@@ -1,0 +1,24 @@
+help
+status
+alloc 4096
+sucs
+sucs ext
+sucs
+vip mount 1 131200 kernel
+vip resolve 1
+vip index /boot/bootvid.owd 12 3
+vip lookup /boot/bootvid.owd
+vip lookup /nope
+vip verify
+fs format OWINIT
+fs mount
+fs mkdir System
+fs create bootvid.owd
+fs write bootvid.owd OpenWindows storage live
+fs read bootvid.owd
+fs list
+fs status
+fs umount
+fs mount
+fs read bootvid.owd
+exit

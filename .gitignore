@@ -1,0 +1,47 @@
+# CMake and local build output
+/build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+compile_commands.json
+
+# Compiled objects and generated binaries
+*.o
+*.obj
+*.exe
+*.a
+*.dll
+*.pe
+*.owx
+*.chk
+*.img
+*.bin
+*.iso
+*.flp
+*.vdi
+*.log
+
+# Generated embedded image and checksum artifacts
+/boot/owinit_image.h
+/boot/owinit_image.chk
+
+# Local VM and emulator output
+.vbox/
+.vscode/
+.cache/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Temporary directories and logs
+.tmp/
+.temp/
+tmp/
+*.trace
+*.dump
+
+# OS/editor files
+.DS_Store
+Thumbs.db

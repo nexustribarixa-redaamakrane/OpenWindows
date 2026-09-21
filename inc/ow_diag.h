@@ -1,0 +1,57 @@
+/* ow_diag.h - Diagnostic Engine (BANcode Integration) */
+#ifndef OW_DIAG_H
+#define OW_DIAG_H
+
+#include "ow_types.h"
+
+/* Kernel-specific COMcode milestones (C+) */
+#define OW_C_HAL_INITIALIZED 0x0011AC01U
+#define OW_C_PML4_BUILT 0x0011AC02U
+#define OW_C_OBJ_MANAGER_READY 0x0011AC03U
+#define OW_C_VFS_PRIMARY_MOUNTED 0x0011AC04U
+#define OW_C_VFS_SECURE_MOUNTED 0x0011AC05U
+#define OW_C_NETWORK_ONLINE 0x0011AC06U
+#define OW_C_SENTINEL_ONLINE 0x0011AC07U
+#define OW_C_SYSCALL_GATEWAY_READY 0x0011AC08U
+#define OW_C_BOOT_COMPLETE 0x0011AC09U
+#define OW_C_RUNLEVEL_TABLE_READY 0x0011AC0AU
+#define OW_C_RUNLEVEL_TRANSITION 0x0011AC0BU
+#define OW_C_ACPI_TABLES_READY 0x0011AC0CU
+#define OW_C_RC_SHUTDOWN_RUN 0x0011AC0DU
+#define OW_C_ACPI_POWEROFF 0x0011AC0EU
+#define OW_C_PS_READY 0x0011AC0FU
+#define OW_C_PS_SCHEDULER_RUNNING 0x0011AC10U
+#define OW_C_OWINIT_PROCESS_CREATED 0x0011AC11U
+#define OW_C_OWINIT_IMAGE_LOADED 0x0011AC12U
+
+/* Kernel-specific WARNcode (W+) */
+#define OW_W_PNP_RESOURCE_CONFLICT 0x0011A800U
+#define OW_W_DRIVER_UNSIGNED 0x0011A801U
+#define OW_W_RUNLEVEL_FEATURE_SKIPPED 0x0011A802U
+#define OW_W_ACPI_NOT_FOUND 0x0011A803U
+#define OW_W_RC_DIRECTIVE_IGNORED 0x0011A804U
+
+/* Kernel-specific SOFTcode (S+) */
+#define OW_S_STACK_ALIGNMENT_FAULT 0x0011AE00U
+#define OW_S_UNDEFINED_INSTRUCTION 0x0011AE01U
+#define OW_S_DRIVER_HOOK_BLOCKED 0x0011AE02U
+
+/* Kernel-specific BANcode (B+) */
+#define OW_B_PAGE_FAULT_FATAL 0x0011A000U
+#define OW_B_SENTINEL_INTEGRITY_FAIL 0x0011A001U
+#define OW_B_TIER_EXTENSION_VIOLATION 0x0011A002U
+#define OW_B_ALPC_TRIPLE_FAULT 0x0011A003U
+#define OW_B_VFS_CORRUPT 0x0011A004U
+#define OW_B_OWINIT_MISSING 0x0011A005U
+
+OW_STATUS OwDiagInitialize(void);
+void OwDiagLogStarted(const char *Name);
+void OwDiagLogFinished(const char *Name, OW_STATUS Code);
+void OwDiagLogFailed(const char *Name, OW_STATUS Code);
+void OwDiagLogWarning(OW_STATUS Code, const char *Detail);
+void OwDiagLogSoft(OW_STATUS Code, const char *Detail);
+void OwDiagBanHammer(OW_STATUS Code, const char *Component,
+                     const char *Explanation);
+const char *OwDiagCodeName(OW_STATUS Code);
+
+#endif /* OW_DIAG_H */

@@ -1,0 +1,14 @@
+OpenWindows Kernel
+Copyright (C) 2026 OpenWindows contributors
+
+OpenWindows-owned source code in this repository is licensed under the GNU
+General Public License, version 3 or any later version (GPL-3.0-or-later).
+
+This notice applies only to material copyrightable by the OpenWindows
+contributors. It does not relicense third-party dependencies, generated
+artifacts, or separately distributed components. See THIRD-PARTY-NOTICES.md.
+
+The complete license terms are available at:
+https://www.gnu.org/licenses/gpl-3.0.html
+
+SPDX-License-Identifier: GPL-3.0-or-later
