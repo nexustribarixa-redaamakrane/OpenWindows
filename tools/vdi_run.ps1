@@ -71,9 +71,16 @@ $out = if (Test-Path $cap) { Get-Content -Raw $cap } else { "" }
 $checks = @(
     "[STARTED] HAL Init",
     "[FAIL] owinit",
+    # The production VDI carries no userspace images at all, so the survey must
+    # reach state ABSENT -- not "primary missing but a fallback was available",
+    # which is state EMERGENCY and would be a completely different boot.  These
+    # two lines are what prove the halt was a deliberate policy decision rather
+    # than a failure to find anything at all.
+    "userspace survey: primary(unusable) owinitv(unusable) owrs(unusable) -> state ABSENT",
+    "state ABSENT: no usable owinit and no emergency userspace",
     "CRITICAL ERROR CODE: U+11A005",
     "[FATAL] SYSTEM HALTED",
-    "owinit.owx executable MISSING - fatal",
+    "REASON: owinit.owx missing or unusable and no emergency userspace",
     "STATE DUMP: Collection was not requested."
 )
 

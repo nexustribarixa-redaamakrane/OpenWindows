@@ -74,7 +74,6 @@ static void OwPsFrameToContext(void* Frame, OW_THREAD_CONTEXT* Ctx) {
     Ctx->Gpr[14] = f->R15;
     Ctx->Rip     = f->Rip;
     Ctx->Cs      = f->Cs;
-    Ctx->Rflags  = f->Rflags | 0x200u;  /* force IF on */
     Ctx->Vector     = 0;
     Ctx->ErrorCode  = 0;
     Ctx->ResumeRsp = f->Rsp;
@@ -82,11 +81,15 @@ static void OwPsFrameToContext(void* Frame, OW_THREAD_CONTEXT* Ctx) {
         /* User-mode capture: the hardware pushed the CPL3 frame onto the
          * kernel stack (f->Rsp); resume must land back on that user stack
          * with the user data selector (RPL3 stamped on selectors so iretq
-         * re-enters ring 3). */
+         * re-enters ring 3).  Keep IF set: a 64-bit IRETQ may re-arm IF when
+         * returning to a lower-privileged ring, and that is what lets the PIT
+         * tick preempt a CPL3 thread. */
+        Ctx->Rflags  = f->Rflags | 0x200u;
         Ctx->SsSlot    = f->Ss ? f->Ss : 0x23u;
     } else {
         /* Kernel-mode capture: ResumeRsp points back into the interrupted
-         * thread's kernel stack (f->Rsp). */
+         * thread's kernel stack (f->Rsp).  Ring 0 also resumes with IF on. */
+        Ctx->Rflags  = f->Rflags | 0x200u;
         Ctx->SsSlot    = 0x10u;
     }
     Ctx->RspSlot = 0;
@@ -144,6 +147,10 @@ OW_STATUS OwPsInitialize(void) {
         P->VadRoot        = (void*)0;
         P->ThreadCount    = 1;
         P->PrimaryThreadId= OW_PS_TID_SYSTEM;
+        /* The idle process is the first thing that ever resumes under a
+         * non-boot CR3, so it is the canary for the mirroring invariant: if
+         * the root is wrong, the very first scheduler tick triple-faults. */
+        P->Pml4Phys      = OwMemCreateAddressSpace();
         ow_memcpy(P->Header.Name, "Kernel", 7);
     }
 
@@ -243,6 +250,40 @@ OW_PROCESS_OBJECT* OwPsCreateProcess(const char* Name, uint32_t ParentPid) {
     P->ThreadCount    = 0;
     P->PrimaryThreadId= 0;
 
+    /* Per-process user-space state.  Seeded here, inside the user window, so
+     * a heap request from this process can only ever hand out an address in
+     * this process's own window from the very first byte. */
+    P->UserBrk        = OW_USER_HEAP_BASE;
+    P->UserStackTop   = OW_USER_STACK_TOP;
+    P->EntryReturn    = 0;
+
+    /* Per-process CR3 root (Phase 2).  Built here rather than lazily in
+     * OwPsCreateUserThread so that EVERY process owns a root, which is what
+     * makes the "kernel half is mirrored in all directories" invariant
+     * checkable by walking any two roots.  The root is a copy of the boot
+     * identity map plus a private pdpt[0]/pd chain, so switching to it can
+     * never remove the mapping for the code currently executing.  Returns 0
+     * under OW_HOST_HAL, where OwPsPrepResume skips the CR3 write entirely. */
+    P->Pml4Phys       = OwMemCreateAddressSpace();
+    if (!P->Pml4Phys) {
+        ow_kprintf("[PS] %s: address space allocation FAILED\r\n",
+                   Name ? Name : "?");
+    }
+
+    /* Private frame run (Phase 3).  Reserved eagerly at creation so demand
+     * paging never has to guess: every frame it later hands out is already
+     * owned by this process alone, which is what makes two processes mapping
+     * the same virtual address land on different physical pages.  A failure
+     * here is not fatal -- the process simply cannot demand-page, and its
+     * faults report OW_PF_STARVED instead. */
+    {
+        uint64_t run = OwMemReserveFrameRun(&P->FrameRun, OW_FRAME_RUN_PAGES);
+        if (!run) {
+            ow_kprintf("[PS] %s: frame run reservation FAILED\r\n",
+                       Name ? Name : "?");
+        }
+    }
+
     if (Name) {
         uint32_t len = 0;
         while (Name[len] && len < OW_MAX_NAME - 1) { len++; }
@@ -325,18 +366,40 @@ OW_THREAD_OBJECT* OwPsCreateThread(OW_PROCESS_OBJECT* Proc,
     return T;
 }
 
-/* ---- Resume precondition ------------------------------------------------
- * Before the CPU iretq's a user-mode thread into CPL3, point TSS.RSP0 at
- * that thread's kernel stack so its next trap (syscall or IRQ) lands on a
- * clean stack.  Kernel-mode resumes don't cross privilege levels and must
- * NOT touch RSP0. */
+/* ---- Resume preconditions ------------------------------------------------
+ * Two things must be true before the CPU iretq's into a thread:
+ *
+ * 1. TSS.RSP0 must point at that thread's kernel stack, so its next trap
+ *    (syscall or IRQ) lands on a clean stack.  This is driven by the thread's
+ *    own StackSize, NOT by Context.Cs: Context.Cs is transient resume state
+ *    that OwPsFrameToContext overwrites with the trapping context's CPL, so a
+ *    Ring 3 thread preempted inside a syscall comes back stamped Cs=0x08.
+ *    Keying off Cs made the write silently skip and left RSP0 pointing at a
+ *    previous thread's stack, so the next trap ran on the wrong stack and
+ *    overlapped another thread's frames.  RSP0 is consulted only on a CPL
+ *    change into Ring 0, so writing it for a Ring 0 resume is harmless.
+ *
+ * 2. CR3 must hold the owning process's root, so the thread sees its own
+ *    address space.  Every root mirrors the kernel half, so a switch between
+ *    any two processes is safe; OwMemSetCurrentPml4 skips the write when the
+ *    root is already active, which is the common case.  A process with no
+ *    root (idle, or built before OwMemInitialize) falls back to the boot
+ *    root, which is what CR3 already holds.
+ */
 static void OwPsPrepResume(OW_THREAD_OBJECT* Thr) {
-    if (!Thr) return;
-    if ((Thr->Context.Cs & 0xFFF8u) == 0x18u) {
 #ifndef OW_HOST_HAL
-        OwHalTssSetRsp0(Thr->StackBase + Thr->StackSize);
+    OW_PROCESS_OBJECT* P;
 #endif
+    if (!Thr) return;
+#ifndef OW_HOST_HAL
+    if (Thr->StackSize != 0) {
+        OwHalTssSetRsp0(Thr->StackBase + Thr->StackSize);
     }
+    P = OwPsGetProcessById(Thr->ProcessId);
+    if (P) {
+        OwMemSetCurrentPml4(P->Pml4Phys ? P->Pml4Phys : OwMemGetCurrentPml4());
+    }
+#endif
 }
 
 /* ====================================================================== */
@@ -346,15 +409,50 @@ static void OwPsPrepResume(OW_THREAD_OBJECT* Thr) {
 OW_THREAD_OBJECT* OwPsCreateUserThread(OW_PROCESS_OBJECT* Proc,
                                        uint64_t EntryAddress,
                                        uint64_t UserStackTop) {
+    /* No C-ABI return address: this is the "enter and never come back" form
+     * used by the synthetic Ring 3 payload, whose tail is a self-loop. */
+    return OwPsCreateUserThreadFrame(Proc, EntryAddress, UserStackTop, 0);
+}
+
+/* ====================================================================== */
+/* OwPsCreateUserThreadFrame - Ring 3 entry WITH a C-ABI return address     */
+/* ====================================================================== */
+/* The iretq frame is written at ResumeRsp, so on entry to CPL3 the user RSP is
+ * ResumeRsp + 40 and [RSP] is the caller's return address.  Writing
+ * ReturnAddress there is what makes `ret` from a loaded image's entry point
+ * land on the process's exit trampoline rather than on stack garbage. */
+OW_THREAD_OBJECT* OwPsCreateUserThreadFrame(OW_PROCESS_OBJECT* Proc,
+                                            uint64_t EntryAddress,
+                                            uint64_t ResumeRsp,
+                                            uint64_t ReturnAddress) {
 #ifdef OW_HOST_HAL
-    /* The host harness is a normal ring-3 process; no CPL3 machinery. */
-    (void)Proc; (void)EntryAddress; (void)UserStackTop;
+    (void)Proc; (void)EntryAddress; (void)ResumeRsp; (void)ReturnAddress;
     return (OW_THREAD_OBJECT*)0;
 #else
     uint32_t i;
     OW_THREAD_OBJECT* T = (void*)0;
 
     if (!Proc) return (void*)0;
+
+    /* Refuse a CPL3 entry point or user stack outside the one user window.
+     * This is the last point before a thread exists carrying a user RIP and
+     * RSP, and it is the one a bad literal in a launcher would corrupt: a
+     * kernel address here would start Ring 3 executing kernel text. */
+    if (!OwMemInUserWindow(EntryAddress) ||
+        !OwMemInUserWindow(ResumeRsp)) {
+        ow_kprintf("[PS] user thread entry/stack outside user window "
+                   "(entry %llX, rsp %llX)\r\n",
+                   (unsigned long long)EntryAddress,
+                   (unsigned long long)ResumeRsp);
+        return (void*)0;
+    }
+    /* The return address sits just above the iretq frame, so it must be inside
+     * the window too when one is supplied. */
+    if (ReturnAddress != 0u && !OwMemInUserWindow(ReturnAddress)) {
+        ow_kprintf("[PS] user return address outside user window (%llX)\r\n",
+                   (unsigned long long)ReturnAddress);
+        return (void*)0;
+    }
 
     for (i = 0; i < OW_PS_MAX_THREADS; i++) {
         if (s_Threads[i].Tid == 0 && s_Threads[i].State == OW_THR_DORMANT) {
@@ -371,7 +469,7 @@ OW_THREAD_OBJECT* OwPsCreateUserThread(OW_PROCESS_OBJECT* Proc,
     T->ProcessId     = Proc->ProcessId;
     T->State         = OW_THR_READY;
     T->EntryFunction = EntryAddress;
-    T->EntryArg      = UserStackTop;
+    T->EntryArg      = ResumeRsp;
     T->Quantum       = OW_PS_DEFAULT_QUANTUM;
     T->NextReady     = (void*)0;
 
@@ -381,11 +479,11 @@ OW_THREAD_OBJECT* OwPsCreateUserThread(OW_PROCESS_OBJECT* Proc,
     /* No cold trampoline: the very first resume iretq's straight into the
      * user program.  Context is pre-stamped for CPL3. */
     ow_memset(&T->Context, 0, sizeof(T->Context));
-    T->Context.ResumeRsp = UserStackTop;   /* where the 5-word iretq frame goes */
+    T->Context.ResumeRsp = ResumeRsp;   /* where the 5-word iretq frame goes */
     T->Context.Rip       = EntryAddress;
-    T->Context.Cs        = 0x1Bu;          /* user code  (DPL3, RPL3) */
-    T->Context.SsSlot    = 0x23u;          /* user data  (DPL3, RPL3) */
-    T->Context.Rflags    = 0x202u;         /* IF on: user thread is preemptable */
+    T->Context.Cs        = 0x1Bu;       /* user code  (DPL3, RPL3) */
+    T->Context.SsSlot    = 0x23u;       /* user data  (DPL3, RPL3) */
+    T->Context.Rflags    = 0x202u;      /* IF on: PIT tick can preempt CPL3 */
 
     if (Proc->ThreadCount == 0) {
         Proc->PrimaryThreadId = T->Tid;
@@ -413,8 +511,136 @@ OW_THREAD_OBJECT* OwPsCreateUserThread(OW_PROCESS_OBJECT* Proc,
     ow_kprintf("[PS] %s: USER thread %u created, ring3 entry 0x%llX stack 0x%llX\r\n",
                Proc->Header.Name, (unsigned)T->Tid,
                (unsigned long long)EntryAddress,
-               (unsigned long long)UserStackTop);
+               (unsigned long long)ResumeRsp);
     return T;
+#endif
+}
+
+/* ====================================================================== */
+/* OwPsLaunchUserImage - bring a loaded image to CPL3                       */
+/* ====================================================================== */
+/* Declare one VAD covering a range, refusing anything outside the window.  The
+ * check is repeated here (not just in the loader) because the launcher can be
+ * called on a process whose image was set up elsewhere. */
+#ifndef OW_HOST_HAL
+static OW_STATUS ps_declare_vad(OW_PROCESS_OBJECT* Proc, uint64_t Start,
+                                uint64_t End, uint64_t Prot) {
+    OW_VAD_NODE* vad;
+
+    if (!OwMemIsUserWindow(Start) ||
+        !OwMemIsUserWindow(End & ~(uint64_t)(OW_PAGE_SIZE - 1u))) {
+        return OW_ERR_INVALID_PARAM;
+    }
+    vad = OwMemCreateVad(Start, End, Prot);
+    if (!vad) return OW_ERR_INSUFFICIENT;
+    return OwMemInsertVad(&Proc->VadRoot, vad);
+}
+#endif
+
+OW_STATUS OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc) {
+#ifdef OW_HOST_HAL
+    (void)Proc;
+    return OW_ERR_NOT_INITIALIZED;
+#else
+    uint64_t           resume_rsp;
+    uint64_t           frame = 0;
+    uint64_t           ret_frame = 0;
+    uint32_t           i;
+    OW_THREAD_OBJECT*  T;
+
+    if (!Proc) return OW_ERR_NULL_POINTER;
+    if (!Proc->EntryPoint || !OwMemInUserWindow(Proc->EntryPoint)) {
+        ow_kprintf("[PS] %s: image entry 0x%llX not in user window\r\n",
+                   Proc->Header.Name,
+                   (unsigned long long)Proc->EntryPoint);
+        return OW_ERR_INVALID_PARAM;
+    }
+
+    /* Stack: NX, because a stack page that can be executed is a page an
+     * attacker-chosen pointer can be aimed at. */
+    for (i = 0; i < (uint32_t)OW_USER_STACK_PAGES; i++) {
+        uint64_t page = OW_USER_STACK_TOP - (uint64_t)i * OW_PAGE_SIZE;
+        OW_STATUS st = ps_declare_vad(Proc, page, page + OW_PAGE_SIZE - 1u,
+                                      OW_PAGE_USER_RW_NX);
+        if (ow_status_error(st)) return st;
+    }
+    /* Guard band immediately below: declared with no PRESENT bit, so it can
+     * never be faulted in and a hit ends the task instead. */
+    {
+        OW_STATUS st = ps_declare_vad(Proc, OW_USER_GUARD_BASE,
+                                      OW_USER_GUARD_TOP, 0u);
+        if (ow_status_error(st)) return st;
+    }
+
+    /* Build the initial user stack.
+     *
+     *   user_rsp -> [ exit trampoline ]       <- C-ABI return address
+     *              [ ... free stack ... ]
+     *   ResumeRsp-40  [ iretq operand ]       <- built by ow_ps_resume_thread
+     *
+     * `ResumeRsp` is the stack pointer the thread will hold once iretq
+     * retires, not the address of a frame written by hand: ow_ps_resume_thread
+     * builds [rip][cs][rflags][rsp][ss] itself at ResumeRsp-40.  So a `ret`
+     * out of the image entry must find the trampoline at [ResumeRsp] exactly
+     * as the SysV ABI requires, which also keeps the whole landing zone
+     * contiguous with the free stack below it. */
+    resume_rsp = Proc->UserStackTop - 8u;
+
+    /* Both stack pages are mapped EAGERLY here, unlike the rest of the user
+     * address space.  The reason is geometric: a 48-byte initial frame placed
+     * under the top page necessarily straddles downward, so the return slot at
+     * rsp + 40 lives in the LOWER page.  The kernel has to write it before the
+     * thread exists, and a kernel write to a demand-paged user address would
+     * itself fault.  Every frame still comes from this process's private run,
+     * so nothing is shared with anyone. */
+    for (i = 0; i < (uint32_t)OW_USER_STACK_PAGES; i++) {
+        uint64_t page = Proc->UserStackTop - (uint64_t)i * OW_PAGE_SIZE;
+        OW_VAD_NODE* v;
+
+        if (ow_status_error(OwMemRunCharge(&Proc->FrameRun, &frame))) {
+            return OW_ERR_INSUFFICIENT;
+        }
+        if (ow_status_error(OwMemMapPage(Proc->Pml4Phys, page, frame,
+                                         OW_PAGE_USER_RW_NX))) {
+            (void)OwMemRunRelease(&Proc->FrameRun, frame);
+            return OW_ERR_INSUFFICIENT;
+        }
+        /* Mark the page backed so a later demand fault here is refused rather
+         * than double-charged. */
+        v = OwMemFindVad(Proc->VadRoot, page);
+        if (v) { v->FirstFrame = frame; v->CommitCharge = 1u; }
+
+        /* Remember the frame backing the return slot, so it can be seeded
+         * through the physical address rather than the virtual one. */
+        if ((resume_rsp & ~(uint64_t)(OW_PAGE_SIZE - 1u)) == page) {
+            ret_frame = frame;
+        }
+    }
+
+    if (Proc->EntryReturn) {
+        uint64_t slot;
+
+        if (!ret_frame) return OW_ERR_INVALID_PARAM;
+        /* Seed the C-ABI return slot through the FRAME, not through the user
+         * virtual address.  At this point CR3 is still the kernel's root, so a
+         * store to `resume_rsp` would land in whatever the kernel happens to
+         * map at that address -- a different physical page entirely -- and the
+         * process would later `ret` into the zeros it finds in its own frame.
+         * Physical memory is identity mapped, so writing frame + offset is
+         * unambiguous and touches exactly the bytes the process will read. */
+        slot = ret_frame + (resume_rsp & (uint64_t)(OW_PAGE_SIZE - 1u));
+        *(volatile uint64_t*)(uintptr_t)slot = Proc->EntryReturn;
+    }
+
+    T = OwPsCreateUserThreadFrame(Proc, Proc->EntryPoint, resume_rsp,
+                                  Proc->EntryReturn);
+    if (!T) return OW_ERR_INSUFFICIENT;
+
+    ow_kprintf("[PS] %s: image entered at CPL3, rsp 0x%llX, exit 0x%llX\r\n",
+               Proc->Header.Name,
+               (unsigned long long)resume_rsp,
+               (unsigned long long)Proc->EntryReturn);
+    return OW_SUCCESS;
 #endif
 }
 
@@ -479,6 +705,17 @@ void OwPsTerminateProcess(OW_PROCESS_OBJECT* Proc, uint64_t ExitStatus) {
     if (!Proc) return;
     Proc->State = OW_PS_PROC_TERMINATED;
     Proc->ExitStatus = ExitStatus;
+
+    /* Give the commit charge back before the slot can be reused.  Leaving a
+     * charge behind on a terminated process would let repeated
+     * create/terminate cycles walk the global ceiling down to nothing and
+     * starve live processes of demand paging.  The frames themselves are not
+     * returned to the bump arena, but they are zeroed, so nothing leaks. */
+    OwMemRunReleaseAll(&Proc->FrameRun);
+    Proc->FrameRun.Base = 0;
+    Proc->FrameRun.Pages = 0;
+    Proc->FrameRun.Committed = 0;
+
     ow_kprintf("[PS] %s: process terminated (PID %u, exit %llu)\r\n",
                Proc->Header.Name, (unsigned)Proc->ProcessId,
                (unsigned long long)ExitStatus);
@@ -560,7 +797,8 @@ void OwPsSchedulerTick(void* Frame) {
             OwPsFrameToContext(Frame, &cur->Context);
             cur->State = OW_THR_READY;
             ready_enqueue(cur);
-            ow_kprintf("[SW] %u->%u\r\n", (unsigned)cur->Tid, (unsigned)next->Tid);
+            /* No console output here: this runs inside the PIT handler and
+             * polled serial writes cost ~ms, which starves the ring. */
 
             s_CurrentThread = next;
             next->State = OW_THR_RUNNING;
@@ -653,5 +891,12 @@ OW_THREAD_OBJECT* OwPsGetCurrentThread(void) { return s_CurrentThread; }
 OW_THREAD_OBJECT* OwPsGetThreadByIndex(uint32_t Index) {
     if (Index >= OW_PS_MAX_THREADS) return (void*)0;
     return &s_Threads[Index];
+}
+OW_PROCESS_OBJECT* OwPsGetProcessById(uint32_t ProcessId) {
+    uint32_t i;
+    for (i = 0; i < OW_PS_MAX_PROCESSES; i++) {
+        if (s_Procs[i].ProcessId == ProcessId) return &s_Procs[i];
+    }
+    return (OW_PROCESS_OBJECT*)0;
 }
 uint32_t OwPsGetTickCount(void) { return s_TickCount; }

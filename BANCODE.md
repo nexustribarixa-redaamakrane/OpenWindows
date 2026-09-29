@@ -81,6 +81,16 @@ These fatal codes trigger immediate crash dumps to `openwinkrnl.chk` and full SM
 | `0x0011A002` | `B_TIER_EXTENSION_VIOLATION` | Uncompliant Tier 1 driver | Triggers `KeDropBanHammer`. A Tier 1 driver lacks the `.owc` driver image signature. |
 | `0x0011A003` | `B_ALPC_TRIPLE_FAULT` | Corruption of the system call router | Triggers `KeDropBanHammer`. The System Call Dispatcher has encountered an unhandled triple nested fault. |
 | `0x0011A004` | `B_VFS_CORRUPT` | Filesystem structure corruption | Triggers `KeDropBanHammer`. A mounted volume CRC32c verification failed. |
+| `0x0011A005` | `B_OWINIT_MISSING` | No usable user-mode init on the primary volume | Triggers `KeDropBanHammer`. The Phase 5c userspace survey resolved to state `ABSENT`: `owinit.owx` is missing or its OWX1 header is not loadable, **and** no emergency image (`owinitv.owx` / `owrs.owx`) is available. There is no user-mode init to enter and no rescue path, so the boot cannot be recovered. |
+
+### Advisory Diagnostic Codes (W+)
+
+Non-fatal. Reported and the boot continues; the code records that the machine is
+running in a degraded state.
+
+| Code (Hex) | Name | Triggering Event | Effect |
+| :--- | :--- | :--- | :--- |
+| `0x0011A805` | `W_OWINIT_EMERGENCY` | Primary userspace orchestrator unusable, emergency userspace available | The Phase 5c survey resolved to state `EMERGENCY`. `owinitv.owx` is entered as `PID 1` in place of `owinit.owx` and spawns `owrs.owx` as the rescue shell through `OW_SYS_PS_SPAWN_OWX`. The boot reaches userspace; the orchestrator did not. |
 
 ---
 

@@ -82,4 +82,56 @@ typedef struct __attribute__((packed)) {
 /* OwOwxValidateHeader: sanity-checks magic/version/sizes/arch. */
 bool OwOwxValidateHeader(const owx_header_t *H, uint32_t ImageSize);
 
+/* OwOwxImageIsSelfContained: true when the image declares no imports.
+ *
+ * OWX1 has no import entry structure, no import table and no relocation table,
+ * so this loader cannot bind an imported symbol.  The intended mechanism is the
+ * .owd dynamic link format (OpenWindows-Essentials/Extensions/owd_format.h):
+ * symbol table + relocation table + dependency list, with OWD_RELOC_OWRPCALL
+ * for gate calls into the kernel.  None of that is implemented in the kernel
+ * yet, so an image with import_count != 0 is rejected at load time rather than
+ * mapped and left to fault at CPL3 on its first imported call. */
+bool OwOwxImageIsSelfContained(const owx_header_t *H);
+
+/* OwOwxImageIsLoadable: the single pre-load verdict for an image.
+ *
+ * This is the conjunction of every check OwPsLoadImage applies before it
+ * charges a frame, plus the two it used to apply only after the header had
+ * already been accepted (a nonzero section count and a nonzero entry point).
+ * The loader keeps its own granular checks because it reports WHICH of them
+ * failed; this predicate exists so that a caller which is only deciding whether
+ * an image is usable -- the boot-time owinit/owinitv/owrs survey -- cannot
+ * answer that question with a weaker test than the loader will.
+ *
+ * That agreement is the point.  A probe that accepts a header the loader then
+ * rejects turns a recoverable "owinit is unusable" into a failed boot with no
+ * diagnostic, which is the failure this predicate is here to prevent.  The two
+ * are held to the same answers by the host test. */
+bool OwOwxImageIsLoadable(const owx_header_t *H, uint32_t ImageSize);
+
+/* OwOwxImageIsUsable: loadable AND whole-image CRC32c verified.  This is the
+ * verdict the boot-time owinit/owinitv/owrs survey acts on.
+ *
+ * OwOwxImageIsLoadable() is a question about structure -- would the loader
+ * accept this header.  "Invalid" in the userspace policy is a question about
+ * contents, so the survey needs both: a scrambled owinit.owx passes every
+ * structural check in the loader and then faults at CPL3 on the instruction it
+ * was corrupted in, which is the least diagnosable failure there is because the
+ * fault address points at code rather than at the disk.
+ *
+ * The CRC32c verification reproduces tools/owx_pack.py exactly: a per-section
+ * checksum over each section's file payload, image_checksum over the file from
+ * offset 0x10 with the image_checksum field itself read as zero (it is inside
+ * its own hash window), and header_checksum over the header as stored.
+ *
+ * Image must be at least OWX_HEADER_SIZE bytes; ImageSize is the length the
+ * caller actually holds, and H->image_size may be smaller.  The header is read
+ * out of Image, so no separate header pointer is taken.
+ *
+ * Deliberately NOT called by OwPsLoadImage(): refusing to load is a different
+ * policy from refusing to boot into an image, and the loader is reachable from
+ * many contexts that have no boot survey.  The guarantee that matters is
+ * one-directional and sufficient: anything this accepts, the loader accepts. */
+bool OwOwxImageIsUsable(const void *Image, uint32_t ImageSize);
+
 #endif /* OW_OWX_H */

@@ -36,6 +36,34 @@
 #define OW_SYS_GET_AUTOREBOOT          0x01EU
 #define OW_SYS_GET_KDUMP               0x01FU
 
+/* Load and enter a named OWX1 image from the primary OWFS volume as a new
+ * process.  This is what makes the emergency userspace work: owinitv.owx is
+ * entered as PID 1 by the kernel, and it is owinitv -- a user-mode program, like
+ * any other -- that spawns owrs.owx through this call.
+ *
+ *   P1 = NUL-terminated image name in the calling process's own memory
+ *   P2 = 0
+ *   P3 = 0
+ *   returns the new process id, or -1 on failure.
+ *
+ * The name is copied with an explicit bound (OW_USERSPACE_NAME_MAX) before any
+ * use: an unbounded walk over a caller-supplied pointer has no termination
+ * guarantee, which is a hazard the rest of this gateway does not have and this
+ * call does not get to inherit.  The image is then held to exactly the gate
+ * OwPsLoadImage applies, so the spawned process is either entered or refused
+ * with a reason -- never mapped and left to fault at CPL3. */
+#define OW_SYS_PS_SPAWN_OWX            0x020U
+
+/* Poll the debug console for one input byte.
+ *   P1..P3 = 0
+ *   returns the byte (0..255), or -1 when nothing is waiting.
+ *
+ * Non-blocking by contract: the underlying OwHalUartReadChar() spins until a
+ * byte arrives, so the gateway must gate on OwHalUartCanRead() first or it
+ * would park a preemptible CPL3 thread inside the kernel with no way to yield.
+ * A caller polls and sleeps between polls. */
+#define OW_SYS_UART_READ               0x021U
+
 OW_STATUS    OwSyscallInitialize(void);
 int64_t      OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2, uint64_t P3);
 
@@ -59,6 +87,8 @@ uint64_t     OwApiPsCreateProcess(const char* Name, uint32_t ParentPid);
 uint64_t     OwApiPsCreateThread(uint64_t ProcessHandle,
                                  uint64_t EntryFunction,
                                  uint64_t EntryArg);
+uint64_t     OwApiPsSpawnOwx(const char* ImageName);
+int          OwApiUartRead(void);
 
 /* Dispatcher object wrappers */
 uint64_t     OwApiSyncCreateEvent(const char* Name, uint8_t ManualReset,

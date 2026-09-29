@@ -4,6 +4,15 @@
 #include "../inc/ow_mem.h"
 #include "../lib/kalloc.h"
 
+/* ---- NX (No-Execute) support --------------------------------------------
+ * EFER is a 64-bit model-specific register; NXE is bit 11.  While NXE is
+ * clear, PTE bit 63 is RESERVED and any access through an entry that sets it
+ * raises #PF with RSVD -- so NX cannot be treated as an optional hardening
+ * flag that can be bolted on later. */
+#define OW_MSR_EFER 0xC0000080U
+#define OW_EFER_NXE (1U << 11)
+static uint32_t s_nx_enabled;
+
 /* ---- GDT + TSS (Ring 3 support) -----------------------------------------
  * The boot loaders install a minimal 3-entry GDT (null, kernel code 0x08,
  * kernel data 0x10).  OwHalSetupUserMode() replaces it with a full table:
@@ -84,7 +93,35 @@ void OwHalTssSetRsp0(uint64_t KernelStackTop) {
  * maps all RAM as supervisor (PDE = 0x83); user space needs U/S set.  The
  * caller must guarantee the page is identity-mapped, physically free (not
  * kernel .bss / stack pool), and backed by RAM.  OW_USER_BASE 0x4000000
- * (64 MiB) sits above the kernel's BSS end (~47 MiB) and within RAM. */
+ * (64 MiB) sits above the kernel's BSS end (~47 MiB) and within RAM.
+ *
+ * ---------------------------------------------------------------------
+ * THE U/S INVARIANT (now enforced everywhere, not just here)
+ * ---------------------------------------------------------------------
+ * x86-64 checks the User/Supervisor bit on EVERY tier of the walk, not just
+ * the leaf.  A CPL3 access succeeds only if the PML4E, the PDPTE, the PDE and
+ * the PTE all carry U/S.  Failing any single tier does not produce a
+ * "not present" fault -- it produces a *protection* violation whose error code
+ * still has the present bit SET, which is exactly how a missing upper-tier
+ * U/S bit disguises itself as a permissions problem.
+ *
+ * So U/S is no longer a property of one leaf: every code path that installs
+ * or validates a user mapping must raise U/S on all four tiers.  Two places
+ * do that, and they must not be confused:
+ *
+ *   OwHalMemSetUserAccessible (this function) - boot-time, patches the LIVE
+ *       CR3 in place, opens one 2 MiB window.  Only for the loader's own
+ *       identity map.
+ *
+ *   OwMemMapPage / OwMemSetUserAccessibleIn (core/memory.c) - the per-process
+ *       path.  It walks Pml4Phys explicitly and stamps U/S on every present
+ *       tier it passes through, including tiers that were already there.
+ *
+ * Raising U/S on the shared upper tiers is safe only because the LEAF still
+ * gates: kernel PDEs in a private PD are verbatim copies of boot's supervisor
+ * huge pages, so a CPL3 access to kernel RAM is refused at the leaf even
+ * though every tier above it now permits user access.
+ */
 void OwHalMemSetUserAccessible(uint64_t VirtualAddress) {
     uint64_t cr3;
     uint64_t pml4i = (VirtualAddress >> 39) & 0x1FFull;
@@ -104,7 +141,7 @@ void OwHalMemSetUserAccessible(uint64_t VirtualAddress) {
      * (0x83) at every level, so this helper must raise U/S on every present
      * level of the walked path.  (The leaf PDE still gates: kernel pages
      * keep U/S=0 there, so rising the upper shared levels alone does not
-     * expose supervisor RAM to CPL3.) */
+     * expose supervisor RAM to CPL3.)  See the full invariant above. */
     if ((pml4[pml4i] & 1ull) == 0) return;
     pml4[pml4i] |= 4ull;                      /* U/S on PML4E   */
     pdpt = (uint64_t*)(pml4[pml4i] & 0x000FFFFFFFFFF000ull);
@@ -121,8 +158,7 @@ void OwHalMemSetUserAccessible(uint64_t VirtualAddress) {
 static OW_HAL_MMIO g_Mmio[MAX_MMIO_RANGES];
 static uint32_t g_MmioCount = 0;
 
-/* Primary RAM disk: blocks 0-2047 (8 MiB) */
-static uint8_t g_ramdisk_primary[OW_RAMDISK_BLOCK_SIZE * OW_RAMDISK_PRIMARY_BLOCKS];
+/* Primary RAM disk: blocks 0-2047 (8 MiB) */static uint8_t g_ramdisk_primary[OW_RAMDISK_BLOCK_SIZE * OW_RAMDISK_PRIMARY_BLOCKS];
 /* Secondary RAM disk: blocks 2048-4095 (8 MiB) */
 static uint8_t g_ramdisk_secondary[OW_RAMDISK_BLOCK_SIZE * OW_RAMDISK_SECONDARY_BLOCKS];
 
@@ -327,12 +363,45 @@ void OwHalVgaDrawText(uint8_t Row, uint8_t Col, const char* Text, uint8_t Attr) 
 
 uint64_t OwHalUptimeMs(void) { return g_kernel_uptime_ms; }
 
+/* Enable NXE in EFER, which is what makes the page-table No-Execute bit (bit
+ * 63 of a PTE) mean anything at all.
+ *
+ * This is a hard prerequisite, not an optimisation.  While EFER.NXE is clear
+ * that same bit 63 is a *reserved* bit, and the CPU is required to raise #PF
+ * with the RSVD bit set for any access through an entry that sets it.  So
+ * setting NX on a data page before NXE is on does not "fail open" -- it turns
+ * every read and write to that page into a fault.  A DATA PTE is only
+ * non-executable once this has run.
+ *
+ * EFER is a 64-bit MSR at 0xC0000080; NXE is bit 11.  CR0.PG is already set
+ * (the boot loader enabled paging long before this runs), and EFER.NXE only
+ * has a defined meaning while paging is on. */
+void OwHalEnableMemoryNx(void) {
+    uint32_t lo, hi;
+
+    __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(OW_MSR_EFER));
+    if ((lo & OW_EFER_NXE) == 0u) {
+        lo |= OW_EFER_NXE;
+        __asm__ volatile("wrmsr" : : "a"(lo), "d"(hi), "c"(OW_MSR_EFER)
+                         : "memory");
+    }
+    s_nx_enabled = 1u;
+}
+
+bool OwHalMemoryNxEnabled(void) {
+    return s_nx_enabled != 0u;
+}
+
 OW_STATUS OwHalInitialize(void) {
     uint32_t i;
 
     /* Install the full GDT (user selectors + TSS) up front so every later
      * boot phase can assume CPL3 machinery is available. */
     OwHalSetupUserMode();
+
+    /* Arm No-Execute support before any page table is ever built, so the
+     * very first user mapping can already carry a real NX policy. */
+    OwHalEnableMemoryNx();
 
     /* NOTE: VGA is prepared by the boot loader (OwHalVgaInitialize + pinned
      * logo) before phase 1 runs, so we must not wipe the screen here. */

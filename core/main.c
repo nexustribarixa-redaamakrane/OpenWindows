@@ -20,6 +20,7 @@
 #include "../inc/ow_acpi.h"
 #include "../inc/ow_ps.h"
 #include "../storage/owdisk.h"
+#include "../inc/ow_usermode.h"
 #include <stdarg.h>
 
 /* Global system state */
@@ -30,6 +31,12 @@ typedef struct _OW_SYSTEM_STATE {
     OW_OBJECT_DIR*      DriverDirectory;
     bool                SystemHalted;
     uint32_t            BootPhase;
+    /* Which of the three userspace states the boot resolved to.  Kept on the
+     * system state rather than as a local because the survey (phase 5c) and the
+     * hand-off (phase 5c.5) are separate phases, and re-deriving the answer
+     * from the volume between them would let the two disagree if anything
+     * changed the catalog in between. */
+    OW_USERSPACE_STATE  UserspaceState;
 } OW_SYSTEM_STATE;
 
 static OW_SYSTEM_STATE g_System;
@@ -130,6 +137,33 @@ static void boot_begin(const char* Name) {
     OwHalVgaSetEnabled(true);
 }
 
+/* Advance the pinned HUD bar by a completed phase's share of the boot. */
+static void boot_advance_bar(uint32_t Weight) {
+    uint32_t pct;
+    uint32_t fill;
+    char bar[40];
+    char line[110];
+    uint32_t b;
+    int n = 0;
+
+    g_boot_weight += Weight;
+    /* Clamp, because this is a percentage of a real total and the alternative is
+     * a bar that quietly reads 106%.  Nothing in the normal path can reach the
+     * clamp -- the phase weights are chosen to sum to BOOT_TOTAL_WEIGHT -- so
+     * hitting it means a phase has been charged twice, which is a bug the HUD
+     * should make visible rather than paper over. */
+    if (g_boot_weight > BOOT_TOTAL_WEIGHT) g_boot_weight = BOOT_TOTAL_WEIGHT;
+    pct  = (g_boot_weight * 100U) / BOOT_TOTAL_WEIGHT;
+    fill = (g_boot_weight * 36U) / BOOT_TOTAL_WEIGHT;
+    bar[n++] = '[';
+    for (b = 0; b < 36; b++) bar[n++] = b < fill ? '#' : '.';
+    bar[n++] = ']';
+    bar[n] = '\0';
+    ow_ksnprintf(line, sizeof(line),
+                 "OpenWindows Kernel 0.1.0   BOOT %s  %u%%", bar, pct);
+    OwHalVgaStatusBar(line);
+}
+
 /* Finish a phase: serial log verdict, then a REAL overall boot percentage on
  * the pinned HUD bar (share of the weighted boot sequence actually done). */
 static void boot_diag_done(uint32_t Phase, OW_STATUS Result,
@@ -144,22 +178,27 @@ static void boot_diag_done(uint32_t Phase, OW_STATUS Result,
     }
     OwHalVgaSetEnabled(true);
 
-    g_boot_weight += Weight;
-    {
-        uint32_t pct = (g_boot_weight * 100U) / BOOT_TOTAL_WEIGHT;
-        uint32_t fill = (g_boot_weight * 36U) / BOOT_TOTAL_WEIGHT;
-        char bar[40];
-        uint32_t b;
-        int n = 0;
-        char line[110];
-        bar[n++] = '[';
-        for (b = 0; b < 36; b++) bar[n++] = b < fill ? '#' : '.';
-        bar[n++] = ']';
-        bar[n] = '\0';
-        ow_ksnprintf(line, sizeof(line),
-                     "OpenWindows Kernel 0.1.0   BOOT %s  %u%%", bar, pct);
-        OwHalVgaStatusBar(line);
-    }
+    boot_advance_bar(Weight);
+    boot_spin(BOOT_PACE_MS);
+}
+
+/* A phase that FAILED, recorded without halting.
+ *
+ * boot_diag_done() logs the failed verdict and then hammers the BANcode trap,
+ * which never returns.  That is right for every phase except one: the owinit
+ * userspace resolution is the phase whose failure the next piece of code gets
+ * to interpret, because an unusable owinit may still be a bootable machine when
+ * the emergency userspace is present.  Recording the failure here and letting
+ * the state machine decide keeps "the phase failed" and "the machine is dead"
+ * as two separate, separately testable facts. */
+static void boot_diag_failed(uint32_t Phase, OW_STATUS Result,
+                             const char* Name, uint32_t Weight) {
+    g_System.BootPhase = Phase;
+    OwHalVgaSetEnabled(false);
+    OwDiagLogFailed(Name, Result);
+    OwHalVgaSetEnabled(true);
+
+    boot_advance_bar(Weight);
     boot_spin(BOOT_PACE_MS);
 }
 
@@ -175,6 +214,121 @@ static void boot_skip_line(const char* Name) {
 static void boot_skip_phase(const char* Name, uint32_t Phase, uint32_t Weight) {
     boot_skip_line(Name);
     boot_diag_done(Phase, OW_SUCCESS, Name, 1, Weight);
+}
+
+/* A phase that FAILED, recorded without halting.
+ *
+ * boot_diag_done() logs the failed verdict and then hammers the BANcode trap,
+ * which never returns.  That is right for every phase except one: the owinit
+ * userspace resolution is the phase whose failure the next piece of code gets
+ * to interpret, because an unusable owinit may still be a bootable machine when
+ * the emergency userspace is present.  Recording the failure here and letting
+ * the state machine decide keeps "the phase failed" and "the machine is dead"
+ * as two separate, separately testable facts. */
+static void boot_diag_failed(uint32_t Phase, OW_STATUS Result,
+                             const char* Name, uint32_t Weight);
+
+/* ====================================================================== */
+/* Userspace boot policy (the three owinit states)                       */
+/* ====================================================================== */
+OW_USERSPACE_STATE OwBootClassifyUserspace(const OW_USERSPACE_PROBE* probe) {
+    if (!probe) return OW_USERSPACE_ABSENT;
+
+    /* State 1.  A loadable owinit.owx is the answer, full stop: the emergency
+     * pair is not consulted and owinitv/owrs are not started, because a rescue
+     * shell on a healthy machine is a second init nobody asked for. */
+    if (probe->PrimaryValid) return OW_USERSPACE_PRIMARY;
+
+    /* State 2.  No usable primary, but something to fall back to.  Reaching
+     * here is not a failure of the boot, only of the primary orchestrator, so
+     * the two are reported differently: a warning for the degraded path, a
+     * BANcode halt for the unrecoverable one. */
+    if (OwUserSpaceEmergencyAvailable(probe)) return OW_USERSPACE_EMERGENCY;
+
+    /* State 3.  Neither.  There is no user-mode init to enter and no rescue
+     * path, so nothing the kernel can do next will produce a userspace. */
+    return OW_USERSPACE_ABSENT;
+}
+
+const char* OwBootUserspaceStateName(OW_USERSPACE_STATE state) {
+    switch (state) {
+    case OW_USERSPACE_PRIMARY:   return "PRIMARY";
+    case OW_USERSPACE_EMERGENCY: return "EMERGENCY";
+    case OW_USERSPACE_ABSENT:    return "ABSENT";
+    default:                     return "UNKNOWN";
+    }
+}
+
+/* Narrate one probed image.  `label` is the boot-log tag, `present`/`valid`
+ * the probe's two separate answers, and `status` why it is not valid. */
+static void log_ow_image(const char* label, bool present, bool valid,
+                         OW_STATUS status) {
+    if (valid) {
+        km_line(0x0A, label, "present, loadable");
+    } else if (present) {
+        km_line(0x0C, label, "present but UNUSABLE (0x%X) - treated as missing",
+                (unsigned)status);
+    } else {
+        km_line(0x08, label, "not present on the primary volume");
+    }
+}
+
+/* ====================================================================== */
+/* Userspace process hand-off                                            */
+/* ====================================================================== */
+/* Read an image off the primary volume, create PID 1 for it, load it into that
+ * process's own guarded address space, audit the result, and enter it at CPL3.
+ *
+ * Every step reports on its own.  A hand-off that fails without saying which
+ * step failed is indistinguishable, in the log, from a volume that was never
+ * provisioned -- and the fix for those two is completely different.
+ *
+ * `out` receives the process so the caller can say which image it entered, or
+ * NULL when the hand-off did not happen. */
+static OW_PROCESS_OBJECT* boot_launch_init(const char* image_name,
+                                           const char* process_name) {
+    static uint8_t s_init_image[OW_USERSPACE_IMAGE_MAX];
+    uint32_t read_len = 0;
+    OW_PROCESS_OBJECT* oproc;
+    OW_STATUS rds;
+
+    rds = OwFsOwfsRead(image_name, s_init_image,
+                       (uint32_t)sizeof(s_init_image), &read_len);
+    if (!ow_status_success(rds) || read_len == 0) {
+        km_line(0x0C, "[OWINIT]", "%s read FAILED (0x%X, %u bytes)",
+                image_name, (unsigned)rds, (unsigned)read_len);
+        return (OW_PROCESS_OBJECT*)0;
+    }
+
+    oproc = OwPsCreateProcess(process_name, OW_PS_PID_KERNEL);
+    if (!oproc) {
+        km_line(0x0C, "[OWINIT]", "%s process creation FAILED", process_name);
+        return (OW_PROCESS_OBJECT*)0;
+    }
+    OwDiagLogFinished("OWINIT Process", OW_C_OWINIT_PROCESS_CREATED);
+
+    if (ow_status_error(OwPsLoadImage(oproc, s_init_image, read_len))) {
+        /* Without this the load's reason is discarded: the boot simply
+         * continued as though the image had not been there at all, with no
+         * init-related line in the log, which is a very expensive thing to
+         * debug after the fact. */
+        km_line(0x0C, "[OWINIT]", "%s image load FAILED", process_name);
+        return (OW_PROCESS_OBJECT*)0;
+    }
+
+    /* Audit the init's address space with the same checker the synthetic Ring 3
+     * app uses: if the loader ever maps a data section executable, or misses U/S
+     * on a tier, it shows up here as a counted violation rather than as a latent
+     * hole. */
+    if (OwMemAuditUserWindow(oproc->Pml4Phys, oproc->VadRoot) != 0u) {
+        km_line(0x0C, "[OWINIT]", "USER WINDOW AUDIT FAILED");
+    }
+
+    if (ow_status_error(OwPsLaunchUserImage(oproc))) {
+        km_line(0x0C, "[OWINIT]", "%s CPL3 launch FAILED", process_name);
+        return (OW_PROCESS_OBJECT*)0;
+    }
+    return oproc;
 }
 
 void _start(void) {
@@ -201,6 +355,7 @@ void _start(void) {
     g_System.PML4Table = (OW_PML4_ENTRY*)OwMemAllocatePage();
     g_System.VadRoot = (void*)0;
     g_System.SystemHalted = false;
+    g_System.UserspaceState = OW_USERSPACE_ABSENT;
     km_line(0x0D, "[MEM]", "pml4: 512 GiB virtual address space, table built");
     km_line(0x0D, "[MEM]", "vad: zero-allocation core, no dynamic heap");
     km_line(0x0D, "[MEM]", "page manager: 4 KiB granularity armed");
@@ -320,57 +475,156 @@ void _start(void) {
         boot_skip_phase("Storage", 51, 8);
     }
 
-    /* Phase 5c: owinit provisioning check.
-     * The kernel only hands off to userland when the primary OWFS volume
-     * carries the Tier-3 userspace orchestrator owinit.owx. A missing
-     * owinit executable is a fatal BANcode halt, not a warning. */
+    /* Phase 5c: userspace resolution over owinit / owinitv / owrs.
+     *
+     * There are exactly three answers, and they are decided here, from what is
+     * actually on the primary volume rather than from what the volume was
+     * supposed to contain:
+     *
+     *   1  owinit.owx present and loadable   -> it becomes PID 1.  Done; the
+     *                                              emergency pair is not started.
+     *   2  otherwise, and at least one of owinitv.owx / owrs.owx is loadable
+     *                                         -> owinitv.owx becomes PID 1 and
+     *                                              brings up the minimum
+     *                                              userspace, spawning owrs.owx
+     *                                              as the rescue shell.
+     *   3  neither                            -> unrecoverable.  Panic.
+     *
+     * A present-but-unloadable owinit.owx lands in state 2, not state 3: a
+     * damaged orchestrator on a volume that still holds a rescue shell is a
+     * degraded machine, and panicking there would throw away the tool meant to
+     * fix it. */
     if (OwRunlevelRequires(OW_RUNLVL_F_OWINIT)) {
+        OW_USERSPACE_PROBE probe;
+        OW_USERSPACE_STATE  ustate;
+
         boot_begin("owinit");
-        {
-            int owloc = OwDiskOwinitPresent();
-            if (owloc) {
-                ow_kprintf("[OWINIT] Root orchestrator executable owinit.owx located\r\n");
-                km_line(0x0A, "[OWINIT]", "root orchestrator executable located");
-                km_line(0x0A, "[OWINIT]", "owinit.owx provisioned (Tier-3 userspace)");
+        OwDiskProbeUserspace(&probe);
+        ustate = OwBootClassifyUserspace(&probe);
+        g_System.UserspaceState = ustate;
+
+        log_ow_image("[OWINIT]", probe.PrimaryPresent, probe.PrimaryValid,
+                     probe.PrimaryStatus);
+        ow_kprintf("[OWINIT] userspace survey: primary(%s) owinitv(%s) "
+                   "owrs(%s) -> state %s\r\n",
+                   probe.PrimaryValid ? "ok" : "unusable",
+                   probe.EmergencyValid ? "ok" : "unusable",
+                   probe.RescueValid ? "ok" : "unusable",
+                   OwBootUserspaceStateName(ustate));
+
+        if (ustate == OW_USERSPACE_PRIMARY) {
+            km_line(0x0A, "[OWINIT]", "state PRIMARY: owinit.owx is PID 1");
+            boot_diag_done(52, OW_SUCCESS, "owinit", 1, 6);
+        } else if (ustate == OW_USERSPACE_EMERGENCY) {
+            /* Degraded, not broken.  The primary orchestrator did not come up,
+             * but a userspace does, so this is a warning and not a BANcode
+             * halt: halting here would destroy the rescue shell. */
+            OwDiagLogWarning(OW_W_OWINIT_EMERGENCY,
+                             "primary owinit unusable; entering owinitv");
+            km_line(0x0E, "[OWINIT]", "state EMERGENCY: owinitv.owx is PID 1");
+            if (probe.EmergencyValid) {
+                km_line(0x0E, "[OWINIT]", "owinitv will spawn owrs.owx "
+                        "(%s)", probe.RescueValid ? "rescue shell available"
+                                                  : "NOT on this volume");
             } else {
-                km_line(0x0C, "[OWINIT]", "owinit.owx executable MISSING - fatal");
+                km_line(0x0C, "[OWINIT]", "owinitv.owx UNUSABLE; owrs.owx "
+                        "cannot be launched without it");
             }
-            boot_diag_done(52, owloc ? OW_SUCCESS : OW_B_OWINIT_MISSING,
-                           "owinit", owloc, 6);
+            boot_diag_done(52, OW_W_OWINIT_EMERGENCY, "owinit", 1, 6);
+        } else {
+            /* State 3.  Nothing to enter.
+             *
+             * "No emergency userspace" and "a rescue shell with no init to
+             * reach it from" are the same state and completely different
+             * faults, and the second one is the more actionable: someone
+             * flashing a lone owrs.owx needs to be told the file is fine and
+             * the pair is not, not sent looking for a disk to re-image. */
+            if (OwUserSpaceEmergencyBytes(&probe)) {
+                km_line(0x0C, "[OWINIT]", "state ABSENT: no usable owinit, and "
+                        "the volume has emergency bytes but no usable owinitv.owx "
+                        "to enter (owinitv is the init; owrs cannot be PID 1)");
+                boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 6);
+                OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
+                                "owinit.owx missing or unusable, and owinitv.owx "
+                                "missing or unusable, so no user-mode init can be "
+                                "entered (an owrs.owx alone is a rescue shell with "
+                                "no init to reach it from)");
+            } else {
+                km_line(0x0C, "[OWINIT]", "state ABSENT: no usable owinit and no "
+                        "emergency userspace on the volume");
+                boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 6);
+                OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
+                                "owinit.owx missing or unusable and no emergency "
+                                "userspace (owinitv.owx / owrs.owx) available");
+            }
+            ow_hlt_loop();   /* unreachable: BanHammer does not return */
         }
     } else {
         boot_skip_phase("owinit", 52, 6);
     }
 
-    /* Phase 5c.5: owinit process hand-off.  When the provisioning check above
-    * found the Essentials owinit.owx on the primary volume, load it into a
-    * PID 1 process and register its primary thread (reads = one thread, no
-    * preemption yet; the scheduler is armed just before the shell so the boot
-    * stays deterministic). */
-    if (OwRunlevelRequires(OW_RUNLVL_F_OWINIT) && OwDiskOwinitPresent()) {
-        static uint8_t s_OwinitImage[64U * 1024U];
-        uint32_t read_len = 0;
-        OW_STATUS rds = OwFsOwfsRead(OW_INIT_EXEC_NAME, s_OwinitImage,
-                                     (uint32_t)sizeof(s_OwinitImage), &read_len);
-        if (!ow_status_success(rds) || read_len == 0) {
-            km_line(0x0C, "[OWINIT]", "owinit.owx read FAILED");
+    /* Phase 5c.5: enter the init the survey chose.
+     *
+     * The loader charges the image out of the process's own frame run and maps
+     * it inside the guarded user window, so the init now executes with a real
+     * privilege boundary: it can only reach the pages its own VAD tree
+     * describes, and its data sections are execute-disabled.  It reaches the
+     * kernel through int 0x80 like any other Ring 3 program.
+     *
+     * State 2 hands off to owinitv, NOT to owrs: owrs is a rescue shell with no
+     * init duties, so entering it directly would produce a machine with a
+     * console and no one to start anything.  owinitv brings up the minimum
+     * userspace and spawns owrs through OW_SYS_PS_SPAWN_OWX, which is a user
+     * mode program doing a user mode thing, over the same loader and the same
+     * OWFS path the kernel just used. */
+    if (OwRunlevelRequires(OW_RUNLVL_F_OWINIT)) {
+        const char* init_image = (g_System.UserspaceState == OW_USERSPACE_PRIMARY)
+                                   ? OW_INIT_EXEC_NAME
+                                   : OW_INITV_EXEC_NAME;
+        const char* init_name  = (g_System.UserspaceState == OW_USERSPACE_PRIMARY)
+                                   ? "owinit" : "owinitv";
+        OW_PROCESS_OBJECT* iproc = (OW_PROCESS_OBJECT*)0;
+
+        if (g_System.UserspaceState != OW_USERSPACE_ABSENT) {
+            iproc = boot_launch_init(init_image, init_name);
+        }
+
+        if (iproc) {
+            km_line(0x0A, "[OWINIT]", "%s entered at CPL3 (PID %u)",
+                    init_name, (unsigned)iproc->ProcessId);
+        } else if (g_System.UserspaceState == OW_USERSPACE_PRIMARY) {
+            /* State 1 promised a PID 1 and did not deliver one.  Falling
+             * through to the shell would leave a "healthy" boot with no
+             * userspace at all, which is state 3 wearing state 1's label. */
+            km_line(0x0C, "[OWINIT]", "state PRIMARY but no init was entered "
+                    "- unrecoverable boot failure - panic");
+            /* Weight 0: phase 5c already charged this phase its full share of
+             * the bar when it selected the init.  This is a failure of the
+             * 5c.5 hand-off, not a second phase, and charging it again would
+             * push the completion percentage past 100%. */
+            boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 0);
+            OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
+                            "owinit.owx was present and loadable but could not "
+                            "be entered as PID 1");
+            ow_hlt_loop();
         } else {
-            OW_PROCESS_OBJECT* oproc = OwPsCreateProcess("owinit", OW_PS_PID_KERNEL);
-            if (!oproc) {
-                km_line(0x0C, "[OWINIT]", "process creation FAILED");
-            } else {
-                OwDiagLogFinished("OWINIT Process", OW_C_OWINIT_PROCESS_CREATED);
-                if (ow_status_success(OwPsLoadImage(oproc, s_OwinitImage, read_len))) {
-                    OW_THREAD_OBJECT* othr =
-                        OwPsCreateThread(oproc, oproc->EntryPoint, 0);
-                    if (!othr) {
-                        km_line(0x0C, "[OWINIT]", "thread creation FAILED");
-                    } else {
-                        km_line(0x0A, "[OWINIT]", "orchestrator enqueued as PID 1 thread %u",
-                                (unsigned)othr->Tid);
-                    }
-                }
-            }
+            /* State 2 has the same obligation and it matters more here, not
+             * less: the emergency userspace is a last-resort path, so a
+             * hand-off that quietly fails leaves the machine booting on with no
+             * init and no indication that the rescue path is dead.  The image
+             * passed the survey, so "present and loadable but not enterable"
+             * means the frame run could not be built for a user process -- a
+             * RAM or loader fault, not a bad disk.  The diagnostic says so,
+             * because the two causes send a user to different places. */
+            km_line(0x0C, "[OWINIT]", "state EMERGENCY but owinitv could not be "
+                    "entered - the rescue path is not available - panic");
+            boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 0);
+            OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
+                            "owinitv.owx was present and loadable but could not "
+                            "be entered as PID 1, so the emergency userspace is "
+                            "unavailable (this indicates a process frame or loader "
+                            "fault, not a damaged owinitv.owx)");
+            ow_hlt_loop();
         }
     }
 
@@ -461,6 +715,13 @@ void _start(void) {
      * thread (PID 1) whatever test shell script runs next. */
     OwPsCaptureBootContext();
     OwPsStartScheduler();
+
+    /* Queue the standalone Ring 3 application: it drives UART_WRITE,
+     * PS_SLEEP (a real block/wake) and PS_EXIT_THREAD through int 0x80,
+     * then hands the CPU back to the kernel for good. */
+    if (OwRunlevelRequires(OW_RUNLVL_F_SYSCALL)) {
+        OwUmLaunchHello();
+    }
 
     OwShellInitialize();
     OwShellRun();

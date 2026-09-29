@@ -15,6 +15,11 @@ typedef uint32_t OW_STATUS;
 #define OW_ERR_ALREADY_EXISTS   0x0011AEE3U
 #define OW_ERR_INSUFFICIENT     0x0011AEE4U
 #define OW_ERR_NOT_INITIALIZED  0x0011AEE9U
+/* Well-formed input that this build cannot honour (e.g. an image that needs
+ * imports bound, when the loader implements no import table).  Distinct from
+ * OW_ERR_INVALID_PARAM so a caller can tell "you asked for something wrong"
+ * from "that is a real feature I have not built yet". */
+#define OW_ERR_UNSUPPORTED      0x0011AEEAU
 #define OW_ERR_IO               0x00000001U
 #define OW_ERR_CORRUPT          0x0011A3E0U
 

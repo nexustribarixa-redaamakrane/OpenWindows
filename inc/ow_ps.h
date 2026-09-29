@@ -74,7 +74,10 @@ typedef struct _OW_THREAD_CONTEXT {
 } OW_THREAD_CONTEXT;                                 /* 184 bytes */
 
 /* ---- Forward declarations ----------------------------------------------- */
+#ifndef OW_PROCESS_TYPEDEF_DEFINED
+#define OW_PROCESS_TYPEDEF_DEFINED
 typedef struct _OW_PROCESS_OBJECT OW_PROCESS_OBJECT;
+#endif
 typedef struct _OW_THREAD_OBJECT  OW_THREAD_OBJECT;
 struct _OW_DISPATCHER_OBJECT;                /* defined in ow_sync.h */
 
@@ -106,9 +109,24 @@ struct _OW_PROCESS_OBJECT {
     uint32_t            ParentProcessId;
     uint64_t            ExitStatus;
     uint64_t            EntryPoint;      /* Loaded image entry (nonzero for valid owinit) */
+    uint64_t            Pml4Phys;        /* Per-process CR3 root (VA==PA); 0 = use boot root */
     OW_VAD_NODE*        VadRoot;
+    /* Private, exclusively owned physical frames for this process.  Demand
+     * paging charges 4 KiB frames out of this run, which is what makes a
+     * user page a real private page instead of an alias of the boot identity
+     * map.  Unreserved (Base == 0) on host builds. */
+    OW_FRAME_RUN        FrameRun;
     uint32_t            ThreadCount;
     uint32_t            PrimaryThreadId;
+
+    /* ---- Per-process user-space state (no global counterpart) -------------
+     * These used to be kernel globals in the syscall dispatcher, which meant
+     * two processes shared one VAD tree and one heap cursor.  They are per
+     * process precisely so a CPL3 request can only ever reach the address
+     * space of the process that made it. */
+    uint64_t            UserBrk;        /* next free user heap byte       */
+    uint64_t            UserStackTop;   /* top of this process's user stack */
+    uint64_t            EntryReturn;    /* C-ABI return address for the image entry */
 };
 
 /* ---- API ---------------------------------------------------------------- */
@@ -132,12 +150,32 @@ OW_THREAD_OBJECT*  OwPsCreateThread(OW_PROCESS_OBJECT* Proc,
 OW_THREAD_OBJECT*  OwPsCreateUserThread(OW_PROCESS_OBJECT* Proc,
                                         uint64_t EntryAddress,
                                         uint64_t UserStackTop);
+
+/* Variant that seeds a C-ABI landing frame.  ResumeRsp is the stack pointer the
+ * thread holds once iretq retires; ow_ps_resume_thread builds the 5-word
+ * [rip][cs][rflags][rsp][ss] operand itself at ResumeRsp-40, so nothing is
+ * pre-written into user memory here.  ReturnAddress, when non-zero, must
+ * already sit at [ResumeRsp] so a `ret` out of the image entry lands on a real
+ * target: a loaded executable that returns from its entry point must land
+ * somewhere defined, or the process jumps into garbage. */
+OW_THREAD_OBJECT*  OwPsCreateUserThreadFrame(OW_PROCESS_OBJECT* Proc,
+                                             uint64_t EntryAddress,
+                                             uint64_t ResumeRsp,
+                                             uint64_t ReturnAddress);
+
+/* Bring a loaded image to CPL3: declares/maps this process's stack and guard
+ * band, writes the initial return address, and enqueues the entry thread. */
+OW_STATUS    OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc);
+
 void          OwPsExitThread(uint64_t ExitStatus);
 void          OwPsTerminateProcess(OW_PROCESS_OBJECT* Proc, uint64_t ExitStatus);
 
-/* OWX image loader: parses a raw OWX1 buffer, maps code/data into a
- * kernel-side exec area, and resolves Proc->EntryPoint. Empty or payload-free
- * images are rejected; successful owinit loads resolve a nonzero entry. */
+/* OWX image loader: parses a raw OWX1 buffer and maps its sections into the
+ * process's OWN address space inside the guarded user window.  Every page is
+ * charged from the process's private frame run -- there is no shared exec
+ * arena any more -- code lands executable and every data section lands
+ * execute-disabled.  On success Proc->EntryPoint is a user-window virtual
+ * address ready for OwPsLaunchUserImage. */
 OW_STATUS    OwPsLoadImage(OW_PROCESS_OBJECT* Proc,
                            const uint8_t* OwxBuffer,
                            uint32_t OwxSize);
@@ -150,6 +188,7 @@ void          OwPsScheduleNext(void);     /* block current thread, run next */
 void          OwPsWakeThread(OW_THREAD_OBJECT* Thr);
 OW_THREAD_OBJECT* OwPsGetCurrentThread(void);
 OW_THREAD_OBJECT* OwPsGetThreadByIndex(uint32_t Index);
+OW_PROCESS_OBJECT* OwPsGetProcessById(uint32_t ProcessId);
 uint32_t      OwPsGetTickCount(void);
 
 /* ---- Assembly primitives (ps/switch.S) ---------------------------------- */

@@ -30,6 +30,13 @@ typedef struct _OW_HAL_MMIO {
 OW_STATUS    OwHalInitialize(void);
 void         OwHalSetupUserMode(void);
 void         OwHalTssSetRsp0(uint64_t KernelStackTop);
+
+/* Set EFER.NXE so that the page-table No-Execute bit (PTE bit 63) is honoured.
+ * MUST run before any NX mapping is created: while NXE is clear that bit is
+ * reserved and any access through an entry setting it raises #PF with the
+ * RSVD bit, so NX does not "fail open", it fails everything. */
+void         OwHalEnableMemoryNx(void);
+bool         OwHalMemoryNxEnabled(void);
 void         OwHalMemSetUserAccessible(uint64_t VirtualAddress);
 void         OwHalUartInitialize(void);
 void         OwHalUartWriteChar(char c);

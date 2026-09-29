@@ -11,9 +11,10 @@ typedef struct bancode_entry {
 } bancode_entry;
 
 static const bancode_entry bancode_table[] = {
-    { 0x0011A005U, "OWINIT_MISSING", "Root userland orchestrator (owinit) not found on the OWINIT boot volume", "bancode" },
+    { 0x0011A005U, "OWINIT_MISSING", "No usable user-mode init: owinit.owx missing/unloadable and no emergency userspace (owinitv.owx / owrs.owx) available", "bancode" },
+    { 0x0011A805U, "OWINIT_EMERGENCY", "Primary orchestrator unusable; owinitv.owx entered as PID 1 and spawns the owrs.owx rescue shell", "warncode" },
 };
-#define BANCODE_TABLE_SIZE 1
+#define BANCODE_TABLE_SIZE 2
 
 static const bancode_entry* bancode_find(bancode_t code) {
     int lo = 0;

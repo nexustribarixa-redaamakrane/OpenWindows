@@ -1,5 +1,6 @@
 # CMake and local build output
 /build/
+/build-cmake/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake

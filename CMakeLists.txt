@@ -11,9 +11,14 @@ set(OWINIT_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials/Artifac
 set(OWINIT_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/boot/owinit_image.h")
 add_custom_command(
     OUTPUT ${OWINIT_HEADER}
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owinit.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owx.py
         ${OWINIT_SOURCE} ${OWINIT_HEADER} --packer ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
-    DEPENDS ${OWINIT_SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owinit.py
+        --subsystem 0x04
+        --symbol g_owinit_image
+        --size-macro OWINIT_IMAGE_SIZE
+        --guard OWINIT_IMAGE_GENERATED_H
+        --note "Generated from OpenWindows-Essentials/Software/owinit/owinit.c."
+    DEPENDS ${OWINIT_SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owx.py
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
     COMMENT "Packaging OpenWindows-Essentials owinit.owx for kernel tests"
 )
@@ -43,6 +48,10 @@ set(KERNEL_COMMON_SOURCES
     core/main.c
     core/object.c
     core/memory.c
+    # Page-fault dispatch.  hal/idt.c calls OwPfDispatch from its common
+    # interrupt handler, so every target that links hal/idt.c needs this, and
+    # the host harness needs it because it exercises the same handler.
+    core/pgfault.c
     core/alpc.c
     core/runlevel.c
     rc/rc.c
@@ -96,6 +105,137 @@ set(KERNEL_COMMON_SOURCES
     ${USFS_DIR}/src/usfs_superblock.c
     ${USFS_DIR}/src/usfs_sync.c
 )
+
+# ==============================================================================
+# Emergency recovery images (owinitv.owx, owrs.owx)
+# ==============================================================================
+# These two are built HERE, from emergency/, and deliberately not taken from
+# another repository the way owinit.owx is.  The recovery path cannot depend on
+# a second repository being present in order to produce the thing you boot when
+# the first repository's output is missing -- that is the whole point of a
+# fallback orchestrator.
+#
+# The three userspace images come out of different pipelines on purpose:
+#   owinit.owx   ships from OpenWindows-Essentials as a PE wearing an .owx
+#                name, so tools/embed_owx.py packs it above.
+#   owinitv.owx  compiled and packed here.
+#   owrs.owx     compiled and packed here.
+#
+# Packing stays a visible step (rather than hidden behind --packer as owinit
+# does) so that a failed import check names the image that failed instead of
+# surfacing as "header not regenerated".  Subsystem 0x05 is
+# OWX_SUBSYSTEM_RECOVERY and is the only thing that distinguishes these two at
+# the format level: nothing in the kernel switches on it.  The survey treats all
+# three images identically, and the byte is what tells a human reading a volume
+# which file is the fallback rather than the orchestrator.
+
+set(EMERGENCY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/emergency")
+set(EMERGENCY_IMAGES owinitv owrs)
+
+add_custom_target(emergency_owx)
+
+# ow_emergency_image(<name> <entry-symbol> <size-macro> <guard> <symbol> <note>)
+#
+# Expressed as a function rather than repeated per image: unlike Make, CMake can
+# uppercase a stem with string(TOUPPER ...), so the generated header symbols do
+# not have to be spelled out by hand at each use site.  Getting one of those
+# wrong is the worst kind of error here -- the bad name compiles fine and then
+# fails at the include site, far away from the rule that produced it.
+function(ow_emergency_image NAME ENTRY SYMBOL SIZE_MACRO GUARD NOTE)
+    set(_src "${EMERGENCY_DIR}/${NAME}.c")
+    set(_pe_target "${NAME}_pe")
+    set(_pe "${CMAKE_CURRENT_BINARY_DIR}/emergency/${NAME}.pe")
+    set(_owx "${EMERGENCY_DIR}/${NAME}.owx")
+    set(_hdr "${EMERGENCY_DIR}/${NAME}_image.h")
+
+    # The PE is a genuine intermediate, not a checked-in artifact: owx_pack.py
+    # deletes the PE it consumed (the kernel's own image goes the same way, and
+    # for the same reason -- a stale PE next to a fresh .owx is a trap).  The
+    # .owx rule therefore depends on the *target*, never on the .pe file, or it
+    # would rebuild the image on every single invocation.
+    add_executable(${_pe_target} "${_src}")
+    set_target_properties(${_pe_target} PROPERTIES
+        OUTPUT_NAME "${NAME}.pe"
+        SUFFIX ""
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/emergency"
+    )
+    target_include_directories(${_pe_target} PRIVATE ${EMERGENCY_DIR})
+    target_compile_options(${_pe_target} PRIVATE
+        -std=c99 -ffreestanding -nostdlib -fno-stack-protector
+        -fno-pie -fno-builtin -fno-asynchronous-unwind-tables
+        -O2 -Wall -Wextra -Werror -g
+    )
+    target_link_options(${_pe_target} PRIVATE
+        -nostdlib
+        -Wl,-e,${ENTRY}
+    )
+    target_link_libraries(${_pe_target} PRIVATE gcc)
+
+    add_custom_command(
+        OUTPUT ${_owx}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+                $<TARGET_FILE:${_pe_target}> ${_owx} --subsystem 0x05
+        DEPENDS ${_pe_target} ${_src} "${EMERGENCY_DIR}/ow_gate.h"
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+        COMMENT "Packing emergency ${NAME}.owx (OWX1 native, subsystem 0x05 recovery)..."
+        VERBATIM
+    )
+
+    add_custom_command(
+        OUTPUT ${_hdr}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owx.py
+                ${_owx} ${_hdr} --no-pack
+                --symbol ${SYMBOL}
+                --size-macro ${SIZE_MACRO}
+                --guard ${GUARD}
+                --note "${NOTE}"
+        DEPENDS ${_owx} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owx.py
+        COMMENT "Embedding ${NAME}.owx into ${NAME}_image.h..."
+        VERBATIM
+    )
+
+    add_custom_target(${NAME}_image DEPENDS ${_hdr})
+    add_dependencies(emergency_owx ${NAME}_image)
+endfunction()
+
+ow_emergency_image(owinitv owinitv_main g_owinitv_image OWINITV_IMAGE_SIZE
+    OWINITV_IMAGE_GENERATED_H "Generated from emergency/owinitv.c by tools/owx_pack.py.")
+ow_emergency_image(owrs owrs_main g_owrs_image OWRS_IMAGE_SIZE
+    OWRS_IMAGE_GENERATED_H "Generated from emergency/owrs.c by tools/owx_pack.py.")
+
+# ==============================================================================
+# Per-image seed objects
+# ==============================================================================
+# Each image is provisioned into the freshly formatted RAM volume by its own seed
+# object, so the SET of images on a test volume is chosen by the link line and
+# readable straight off that target's recipe.  The production images
+# (openwinkrnl.owx / openwinkrnl.vdi) link none of them.
+#
+# openwinkrnl.chk is the sentinel's kernel-checksum fixture.  It is not a
+# userspace image, so it is not part of the per-image set, but every seeded test
+# image needs it: Phase 5d halts with a fatal integrity code when it is absent,
+# and that halt lands AFTER the init is entered, so an image that omits this
+# looks like a kernel-integrity failure rather than a missing fixture.
+#
+# This mirrors the Makefile's SEED_OBJS and is deliberately NOT in the default
+# build: there is no test-image link line in the CMake tree to pull it in, and
+# adding it to `all` would change what a default configure builds for no
+# benefit.  The `ow_seeds` target exists so it can still be built and checked on
+# demand -- which is worth having, because a seed object that no longer compiles
+# against the emergency headers is otherwise only discovered by `make qemu`.
+add_library(ow_seed_objs OBJECT
+    boot/owinit_seed.c
+    boot/owinitv_seed.c
+    boot/owrs_seed.c
+    boot/owchk_seed.c
+)
+add_dependencies(ow_seed_objs owinit_image owinitv_image owrs_image)
+target_include_directories(ow_seed_objs PRIVATE ${OW_INCLUDE_DIRS})
+target_compile_options(ow_seed_objs PRIVATE
+    -std=c99 -ffreestanding -nostdlib -fno-stack-protector
+    -fno-pie -Wall -Wextra -Werror -g
+)
+add_custom_target(ow_seeds DEPENDS ow_seed_objs)
 
 # ==============================================================================
 # Freestanding Kernel (openwinkrnl.pe -> openwinkrnl.owx)
@@ -157,10 +297,15 @@ set(HOSTTEST_SOURCES
     tools/hosttest/host_boot.c
     ${KERNEL_COMMON_SOURCES}
     ${OWINIT_HEADER}
+    # The harness audits and mounts all three userspace images, so the emergency
+    # headers are real inputs, not optional extras: it cannot build without them
+    # and CMake will not know to produce them unless they are listed as sources.
+    ${EMERGENCY_DIR}/owinitv_image.h
+    ${EMERGENCY_DIR}/owrs_image.h
 )
 
 add_executable(hosttest ${HOSTTEST_SOURCES})
-add_dependencies(hosttest owinit_image)
+add_dependencies(hosttest owinit_image owinitv_image owrs_image)
 target_include_directories(hosttest PRIVATE ${OW_INCLUDE_DIRS})
 target_compile_options(hosttest PRIVATE
     -std=c99 -Wall -Wextra -Werror -fno-pie -g -DOW_HOST_HAL

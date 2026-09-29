@@ -25,6 +25,7 @@ USFS_DIR    = ../OpenWindows-Storage/usfs
 CORE_OBJS = core/main.o \
             core/object.o \
             core/memory.o \
+            core/pgfault.o \
             core/alpc.o \
             core/runlevel.o
 
@@ -136,7 +137,12 @@ OWX_SUBSYSTEM = 0x01
 
 all: $(TARGET)
 
-$(TARGET): $(PE_IMAGE)
+# tools/owx_pack.py is a real prerequisite, not just a command-line argument.
+# The image and its openwinkrnl.chk are produced by that script, so editing the
+# packer has to invalidate both.  Without it, a change to the packer left a
+# stale .owx (and a stale .chk) in place and `make` reported "Nothing to be
+# done" -- which is how a mismatched checksum pair survived into a test run.
+$(TARGET): $(PE_IMAGE) tools/owx_pack.py
 	python tools/owx_pack.py $(PE_IMAGE) $(TARGET) \
 	    --subsystem $(OWX_SUBSYSTEM)
 	@echo "=============================================================================="
@@ -267,17 +273,108 @@ storage/%.o: storage/%.c
 	@mkdir -p storage
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Test-image owinit provisioner (linked into the QEMU/floppy test images only;
-# production images openwinkrnl.owx / openwinkrnl.vdi stay without it)
-OWINIT_SEED_OBJ = boot/owinit_seed.o
-OWINIT_SOURCE = C:/Users/KARIMABENDA/Documents/OpenWindows-Essentials/Artifacts/Software/owinit.owx
+# ==============================================================================
+# Userspace images and their test-image provisioners
+# ==============================================================================
+# The three user-mode images the Phase 5c survey knows about are produced by two
+# different pipelines on purpose:
+#
+#   owinit.owx   comes from OpenWindows-Essentials, which ships it as a PE wearing
+#                an .owx name, so tools/embed_owx.py packs it here.
+#   owinitv.owx  built HERE, from emergency/.  The recovery path cannot depend on
+#   owrs.owx     another repository being present in order to produce the thing
+#                you boot when the first repository's output is missing.
+#
+# All three become a C header and are provisioned into the freshly formatted RAM
+# volume by a per-image seed object, so the SET of images on a test volume is
+# chosen by the link line and readable straight off the target's recipe.  The
+# production images (openwinkrnl.owx / openwinkrnl.vdi) link none of them.
+EMERGENCY_DIR    = emergency
+EMERGENCY_CFLAGS = -std=c99 -ffreestanding -nostdlib -fno-stack-protector \
+                   -fno-pie -fno-builtin -fno-asynchronous-unwind-tables \
+                   -O2 -Wall -Wextra -Werror -I$(EMERGENCY_DIR)
+
+EMERGENCY_IMAGES = owinitv owrs
+EMERGENCY_OWX    = $(EMERGENCY_IMAGES:%=$(EMERGENCY_DIR)/%.owx)
+EMERGENCY_HDRS   = $(EMERGENCY_IMAGES:%=$(EMERGENCY_DIR)/%_image.h)
+
+# Per-image seed objects.  A test image links the ones its volume should carry.
+OWINIT_SEED_OBJ  = boot/owinit_seed.o
+OWINITV_SEED_OBJ = boot/owinitv_seed.o
+OWRS_SEED_OBJ    = boot/owrs_seed.o
+# openwinkrnl.chk is the sentinel's kernel-checksum fixture.  It is not a
+# userspace image, so it is not part of the per-image set, but every seeded test
+# image needs it: Phase 5d halts with a fatal integrity code when it is absent,
+# and that halt lands AFTER the init is entered, so an image that omits this
+# looks like a kernel-integrity failure rather than a missing fixture.
+OWCHK_SEED_OBJ   = boot/owchk_seed.o
+SEED_OBJS        = $(OWINIT_SEED_OBJ) $(OWINITV_SEED_OBJ) $(OWRS_SEED_OBJ) $(OWCHK_SEED_OBJ)
+
+ESSENTIALS_ARTIFACTS = C:/Users/KARIMABENDA/Documents/OpenWindows-Essentials/Artifacts/Software
+OWINIT_SOURCE = $(ESSENTIALS_ARTIFACTS)/owinit.owx
 OWINIT_IMAGE = boot/owinit_image.owx
 OWINIT_HEADER = boot/owinit_image.h
 
-$(OWINIT_HEADER): $(OWINIT_SOURCE) tools/owx_pack.py tools/embed_owinit.py
-	python tools/embed_owinit.py $(OWINIT_SOURCE) $@ --packer tools/owx_pack.py
+$(OWINIT_HEADER): $(OWINIT_SOURCE) tools/owx_pack.py tools/embed_owx.py
+	python tools/embed_owx.py $(OWINIT_SOURCE) $@ --packer tools/owx_pack.py \
+	    --subsystem 0x04 --symbol g_owinit_image \
+	    --size-macro OWINIT_IMAGE_SIZE --guard OWINIT_IMAGE_GENERATED_H \
+	    --note "Generated from OpenWindows-Essentials/Software/owinit/owinit.c."
 
 boot/owinit_seed.o: boot/owinit_seed.c storage/owdisk.h $(OWINIT_HEADER)
+	@mkdir -p boot
+	$(CC) $(CFLAGS) -c $< -o $@
+
+boot/owchk_seed.o: boot/owchk_seed.c storage/owdisk.h inc/ow_sentinel.h
+	@mkdir -p boot
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Emergency pair: compile to PE, pack to OWX1, embed.  Packing is its own visible
+# step (rather than hidden behind the embed tool) so that a failed import check
+# names the image that failed instead of surfacing as "header not regenerated".
+#
+# Subsystem 0x05 is OWX_SUBSYSTEM_RECOVERY, and it is the only thing that
+# distinguishes these two images at the format level.  Nothing in the kernel
+# switches on it: the survey treats all three images identically, and the
+# subsystem byte is what tells a human reading a volume which file is the
+# fallback rather than the orchestrator.
+# The dependency is on the .c, not on an intermediate .pe: tools/owx_pack.py
+# deletes the PE it consumed (the kernel's own image goes the same way, and for
+# the same reason -- a stale PE next to a fresh .owx is a trap), so a rule that
+# depended on it would rebuild the image on every single invocation.
+#
+# Spelled out per image rather than as a pattern rule: the generated header's
+# symbols are SHOUTING_SNAKE (OWINITV_IMAGE_SIZE), and there is no portable
+# Make function to upper-case a stem.  A pattern rule that quietly emitted
+# OWowinitv_IMAGE_SIZE would compile, and then fail on the first include of the
+# header -- at the include site, far from the rule that got it wrong.
+$(EMERGENCY_DIR)/owinitv.owx: $(EMERGENCY_DIR)/owinitv.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py
+	$(CC) $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owinitv.o
+	$(CC) $(EMERGENCY_CFLAGS) -Wl,-e,owinitv_main -o $(EMERGENCY_DIR)/owinitv.pe $(EMERGENCY_DIR)/owinitv.o
+	python tools/owx_pack.py $(EMERGENCY_DIR)/owinitv.pe $@ --subsystem 0x05
+
+$(EMERGENCY_DIR)/owrs.owx: $(EMERGENCY_DIR)/owrs.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py
+	$(CC) $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owrs.o
+	$(CC) $(EMERGENCY_CFLAGS) -Wl,-e,owrs_main -o $(EMERGENCY_DIR)/owrs.pe $(EMERGENCY_DIR)/owrs.o
+	python tools/owx_pack.py $(EMERGENCY_DIR)/owrs.pe $@ --subsystem 0x05
+
+$(EMERGENCY_DIR)/owinitv_image.h: $(EMERGENCY_DIR)/owinitv.owx tools/embed_owx.py
+	python tools/embed_owx.py $< $@ --no-pack \
+	    --symbol g_owinitv_image --size-macro OWINITV_IMAGE_SIZE \
+	    --guard OWINITV_IMAGE_GENERATED_H \
+	    --note "Generated from emergency/owinitv.c by tools/owx_pack.py."
+
+$(EMERGENCY_DIR)/owrs_image.h: $(EMERGENCY_DIR)/owrs.owx tools/embed_owx.py
+	python tools/embed_owx.py $< $@ --no-pack \
+	    --symbol g_owrs_image --size-macro OWRS_IMAGE_SIZE \
+	    --guard OWRS_IMAGE_GENERATED_H \
+	    --note "Generated from emergency/owrs.c by tools/owx_pack.py."
+
+boot/owinitv_seed.o: boot/owinitv_seed.c storage/owdisk.h $(EMERGENCY_DIR)/owinitv_image.h
+	@mkdir -p boot
+	$(CC) $(CFLAGS) -c $< -o $@
+
+boot/owrs_seed.o: boot/owrs_seed.c storage/owdisk.h $(EMERGENCY_DIR)/owrs_image.h
 	@mkdir -p boot
 	$(CC) $(CFLAGS) -c $< -o $@
 
@@ -287,7 +384,8 @@ boot/owinit_seed.o: boot/owinit_seed.c storage/owdisk.h $(OWINIT_HEADER)
 
 clean:
 	rm -f $(ALL_OBJS) $(PE_IMAGE) $(TARGET)
-	rm -f $(OWINIT_SEED_OBJ)
+	rm -f $(SEED_OBJS) $(EMERGENCY_OWX) $(EMERGENCY_HDRS)
+	rm -f $(EMERGENCY_DIR)/*.o $(EMERGENCY_DIR)/*.pe
 	rm -f bancode/*.o
 	rm -rf sucs/ vip/
 	rm -f storage/*.o
@@ -314,16 +412,42 @@ $(QEMU_DIR)/qemu_entry.o: boot/qemu_entry.c
 	@mkdir -p $(QEMU_DIR)
 	$(CC) -std=c99 -Wall -Wextra -Werror -fno-pie -g -c $< -o $@
 
-$(QEMU_BIN): $(ALL_OBJS) $(OWINIT_SEED_OBJ) $(OWINIT_HEADER) $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+# The normal test image carries all three userspace images, so the Phase 5c survey
+# resolves to state 1 and owinit.owx is PID 1.  The emergency image (make
+# qemu-emergency) carries only the other two, which is the same kernel sources
+# with a different seed set on the link line and resolves to state 2.
+TEST_SEED_OBJS  = $(OWINIT_SEED_OBJ) $(OWINITV_SEED_OBJ) $(OWRS_SEED_OBJ) $(OWCHK_SEED_OBJ)
+EMERGENCY_SEEDS = $(OWINITV_SEED_OBJ) $(OWRS_SEED_OBJ) $(OWCHK_SEED_OBJ)
+
+$(QEMU_BIN): $(ALL_OBJS) $(TEST_SEED_OBJS) $(OWINIT_HEADER) $(EMERGENCY_HDRS) $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
 	@mkdir -p $(QEMU_DIR)
 	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
 	    -o $(QEMU_DIR)/qemu_image.exe \
-	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o $(OWINIT_SEED_OBJ) $(ALL_OBJS) -lgcc
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o $(TEST_SEED_OBJS) $(ALL_OBJS) -lgcc
 	objcopy -O binary $(QEMU_DIR)/qemu_image.exe $(QEMU_BIN)
-	@echo "QEMU flat multiboot image (owinit test seed included): $(QEMU_BIN)"
+	@echo "QEMU flat multiboot image (state 1: owinit/owinitv/owrs seeded): $(QEMU_BIN)"
 
 qemu: $(QEMU_BIN)
 	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_run.ps1 $(QEMU_BIN)
+
+# ==============================================================================
+# QEMU emergency boot test: the SAME kernel, linked with only the emergency
+# seeds.  owinit.owx is absent from the volume, so the survey resolves to state
+# 2: owinitv.owx is entered as PID 1 and spawns owrs.owx, which prints a prompt.
+# tools/qemu_run.ps1 -Emergency asserts the state-2 transcript.
+# ==============================================================================
+QEMU_EMERG_BIN = $(QEMU_DIR)/openwinkrnl_qemu_emergency.bin
+
+$(QEMU_EMERG_BIN): $(ALL_OBJS) $(EMERGENCY_SEEDS) $(EMERGENCY_HDRS) $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_emergency_image.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o $(EMERGENCY_SEEDS) $(ALL_OBJS) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_emergency_image.exe $(QEMU_EMERG_BIN)
+	@echo "QEMU flat multiboot image (state 2: owinitv/owrs seeded): $(QEMU_EMERG_BIN)"
+
+qemu-emergency: $(QEMU_EMERG_BIN)
+	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_run.ps1 $(QEMU_EMERG_BIN) -Emergency
 
 # ==============================================================================
 # VirtualBox floppy boot test: relinks the same flat kernel (boot/qboot.S +
@@ -341,13 +465,13 @@ $(VBOX_DIR)/stage1.bin: boot/stage1.S
 	@mkdir -p $(VBOX_DIR)
 	nasm -f bin -w-no-error=label-redef-late -w-label-redef-late boot/stage1.S -o $@
 
-$(VBOX_KERNEL): $(ALL_OBJS) $(OWINIT_SEED_OBJ) $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/vbox.ld
+$(VBOX_KERNEL): $(ALL_OBJS) $(TEST_SEED_OBJS) $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/vbox.ld
 	@mkdir -p $(VBOX_DIR) $(QEMU_DIR)
 	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/vbox.ld" "-Wl,-e,qboot_entry" "-Wl,--image-base=0" \
 	-o $(VBOX_DIR)/vbox_image.exe \
-	$(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o $(OWINIT_SEED_OBJ) $(ALL_OBJS) -lgcc
+	$(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o $(TEST_SEED_OBJS) $(ALL_OBJS) -lgcc
 	objcopy -O binary $(VBOX_DIR)/vbox_image.exe $(VBOX_KERNEL)
-	@echo "VBox flat kernel (owinit test seed included): $@"
+	@echo "VBox flat kernel (state 1: owinit/owinitv/owrs seeded): $@"
 
 $(VBOX_FLOPPY): $(VBOX_KERNEL) $(VBOX_DIR)/stage1.bin tools/mkboot.py
 	python tools/mkboot.py $(VBOX_DIR)/stage1.bin $(VBOX_KERNEL) $(VBOX_FLOPPY)
@@ -408,8 +532,8 @@ vdi-test: $(VBOX_VDI)
 HOSTTEST_OUT = $(or $(TMPDIR),$(TEMP),/tmp)/openwinkrnl_host.exe
 HOSTTEST_SRC = tools/hosttest/host_hal.c \
                tools/hosttest/host_boot.c \
-               core/main.c core/object.c core/memory.c core/alpc.c \
-               core/runlevel.c \
+               core/main.c core/object.c core/memory.c core/pgfault.c \
+               core/alpc.c core/runlevel.c \
                rc/rc.c hal/acpi.c \
                diag/bancode_krnl.c vfs/vfs.c net/router.c net/vip.c \
                sentinel/damagecntrl.c sentinel/fltrmgr.c \
@@ -442,8 +566,28 @@ HOSTTEST_FLAGS = -std=c99 -Wall -Wextra -Werror -fno-pie -g -DOW_HOST_HAL \
                  -I../OpenWindows-Storage/owfs/include \
                  -I../OpenWindows-Storage/usfs/include
 
-hosttest: $(OWINIT_HEADER)
+# Entry-point audit across all Essentials OWX targets. Runs the checker's own
+# negative self-test first, so a signature that stopped discriminating fails the
+# gate rather than silently accepting a reverted owinit.
+owx-entries:
+	python tools/check_owx_entries.py --self-test
+	python tools/check_owx_entries.py $(ESSENTIALS_ARTIFACTS)
+
+# The host harness provisions its own volume (tools/hosttest/host_boot.c), so it
+# does NOT link the seed objects -- boot/owinit_seed.o would race host_boot.c for
+# the same catalog entries.  It does depend on all three image headers, because
+# the classifier and CRC tests read the real packed bytes.
+hosttest: $(OWINIT_HEADER) $(EMERGENCY_HDRS)
+	$(MAKE) owx-entries
 	$(CC) $(HOSTTEST_FLAGS) $(HOSTTEST_SRC) -o $(HOSTTEST_OUT)
 	$(HOSTTEST_OUT)
 
-.PHONY: all clean vm hosttest qemu vbox vbox-image vdi vdi-test
+# Build the emergency images and audit them like any other .owx: import-free,
+# RIP-relative, entry at the real symbol.  This is the gate that catches the
+# failure mode where emergency/owrs.c grows a printf and stops being loadable.
+emergency: $(EMERGENCY_OWX)
+	python tools/check_owx_entries.py --self-test
+	python tools/check_owx_entries.py $(EMERGENCY_DIR)
+
+.PHONY: all clean vm hosttest qemu qemu-emergency vbox vbox-image vdi vdi-test \
+        owx-entries emergency

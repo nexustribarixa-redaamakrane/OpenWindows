@@ -3,15 +3,142 @@
 #include "../inc/ow_alpc.h"
 #include "../inc/ow_dpc.h"
 #include "../inc/ow_hal.h"
+#include "../inc/ow_kprintf.h"
 #include "../inc/ow_mem.h"
 #include "../inc/ow_memory.h"
+#include "../inc/ow_owx.h"
 #include "../inc/ow_ps.h"
 #include "../inc/ow_sync.h"
 #include "../inc/ow_syscall.h"
 #include "../inc/ow_vfs.h"
+#include "../storage/owdisk.h"
 
 static bool g_syscall_ready = false;
-static OW_VAD_NODE *s_VadRoot = (void *)0;
+
+/* Resolve the process that owns the syscall.  Every user-supplied pointer in
+ * this file is validated against THIS process's VAD tree and page tables, so
+ * there is no global address-space state to get wrong: the caller's own
+ * VadRoot is the only thing consulted, and a process cannot name another's. */
+static OW_PROCESS_OBJECT *syscall_current_process(void) {
+  OW_THREAD_OBJECT *thr = OwPsGetCurrentThread();
+  if (!thr)
+    return (OW_PROCESS_OBJECT *)0;
+  return OwPsGetProcessById(thr->ProcessId);
+}
+
+/* ====================================================================== */
+/* OW_SYS_PS_SPAWN_OWX support                                            */
+/* ====================================================================== */
+/* Staging pools for the spawn path.  Static, as everywhere else in this kernel:
+ * there is no heap to carve out of, and a syscall cannot ask the caller for
+ * scratch space it might not have. */
+static char s_spawn_name[OW_USERSPACE_NAME_MAX];
+static char s_spawn_proc[OW_USERSPACE_NAME_MAX];
+static uint8_t s_spawn_image[OW_USERSPACE_IMAGE_MAX];
+
+/* Bounded copy of a caller-supplied NUL-terminated name.
+ *
+ * The bound is the point.  Every other name-taking call in this gateway walks
+ * the pointer until it finds a NUL with no limit, which is tolerable for a
+ * trusted caller and a fault for an untrusted one; this copy stops at the
+ * buffer, so a caller that supplies an unterminated string gets a truncated
+ * name that fails to resolve rather than a walk off the end of its own window.
+ *
+ * Returns false when the name did not fit, i.e. when it was longer than the
+ * longest legal root-catalog entry, so truncation is never mistaken for a
+ * valid name that merely happens to resolve. */
+static bool spawn_copy_name(char *dst, size_t cap, const char *src) {
+  size_t i;
+
+  if (dst == NULL || cap == 0u)
+    return false;
+  if (src == NULL) {
+    dst[0] = '\0';
+    return false;
+  }
+
+  for (i = 0u; i + 1u < cap; ++i) {
+    if (src[i] == '\0') {
+      dst[i] = '\0';
+      return true;
+    }
+    dst[i] = src[i];
+  }
+  dst[cap - 1u] = '\0';
+  return false;
+}
+
+/* Derive the process object's name from the image file name: "owrs.owx" ->
+ * "owrs".  The kernel's PS logs read "[PS] <name>: process created", so a name
+ * that kept its extension would put "owrs.owx:" in every line about the
+ * process.  Bounded by construction: it cannot be longer than its input. */
+static void spawn_proc_name(char *dst, size_t cap, const char *image) {
+  size_t i;
+
+  for (i = 0u; i + 1u < cap && image[i] != '\0' && image[i] != '.'; ++i) {
+    dst[i] = image[i];
+  }
+  dst[i] = '\0';
+}
+
+/* Load an OWX1 image from the primary volume and enter it as a new process
+ * parented to the caller.  Shared by the boot-time hand-off in core/main.c and
+ * by OW_SYS_PS_SPAWN_OWX, so the emergency userspace's owrs is loaded by exactly
+ * the same path that loads owinit. */
+static OW_PROCESS_OBJECT *spawn_owx_image(const char *image_name,
+                                          uint32_t parent_pid) {
+  uint32_t len = 0u;
+  OW_PROCESS_OBJECT *proc;
+  OW_STATUS st;
+
+  if (!spawn_copy_name(s_spawn_name, sizeof(s_spawn_name), image_name))
+    return (OW_PROCESS_OBJECT *)0;
+
+  st = OwFsOwfsRead(s_spawn_name, s_spawn_image,
+                    (uint32_t)sizeof(s_spawn_image), &len);
+  if (!ow_status_success(st) || len == 0u) {
+    ow_kprintf("[SPAWN] %s: read failed (st=0x%X, len=%u)\r\n", s_spawn_name,
+               (unsigned)st, (unsigned)len);
+    return (OW_PROCESS_OBJECT *)0;
+  }
+
+  /* Reject before a process slot and any frame are committed.  OwPsLoadImage
+   * repeats this check, and deliberately so: the syscall must not be the only
+   * place that knows a malformed image is malformed. */
+  if (!OwOwxImageIsLoadable(
+          (const owx_header_t *)(const void *)s_spawn_image, len)) {
+    ow_kprintf("[SPAWN] %s: not a loadable OWX1 image (%u bytes)\r\n",
+               s_spawn_name, (unsigned)len);
+    return (OW_PROCESS_OBJECT *)0;
+  }
+
+  spawn_proc_name(s_spawn_proc, sizeof(s_spawn_proc), s_spawn_name);
+
+  proc = OwPsCreateProcess(s_spawn_proc, parent_pid);
+  if (proc == NULL)
+    return (OW_PROCESS_OBJECT *)0;
+
+  if (ow_status_error(OwPsLoadImage(proc, s_spawn_image, len))) {
+    /* The process object exists but holds no image, so it can never be entered;
+     * retire it rather than leaving a zombie in the table that counts against
+     * OW_PS_MAX_PROCESSES. */
+    OwPsTerminateProcess(proc, 0u);
+    return (OW_PROCESS_OBJECT *)0;
+  }
+
+  if (OwMemAuditUserWindow(proc->Pml4Phys, proc->VadRoot) != 0u) {
+    ow_kprintf("[SPAWN] %s: USER WINDOW AUDIT FAILED\r\n", s_spawn_proc);
+  }
+
+  if (ow_status_error(OwPsLaunchUserImage(proc))) {
+    OwPsTerminateProcess(proc, 0u);
+    return (OW_PROCESS_OBJECT *)0;
+  }
+
+  ow_kprintf("[SPAWN] %s entered at CPL3 as PID %u (parent %u)\r\n",
+             s_spawn_proc, (unsigned)proc->ProcessId, (unsigned)parent_pid);
+  return proc;
+}
 
 OW_STATUS OwSyscallInitialize(void) {
   g_syscall_ready = true;
@@ -28,16 +155,66 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
 
   switch (SyscallId) {
   case OW_SYS_ALLOC: {
+    /* Per-process user heap, carved out of the guarded user window.
+     *
+     * This used to bump a file-static cursor starting at 0x10000000 and insert
+     * the result into a file-static VAD root.  Both were global, so every
+     * process shared one heap cursor and one VAD tree: a second process's
+     * allocation would collide with the first's, and nothing checked that the
+     * address handed back was even reachable from the caller's page tables.
+     * Now the cursor lives on the process, the VAD goes into the process's own
+     * tree, and the pages are charged from the process's own frame run. */
+    OW_PROCESS_OBJECT *proc = syscall_current_process();
     uint64_t size = P1;
-    static uint64_t s_VHeap = 0x10000000ULL;
-    uint64_t addr = s_VHeap;
-    OW_VAD_NODE *vad = OwMemCreateVad(addr, addr + size, 0x04);
-    if (vad && ow_status_success(OwMemInsertVad(&s_VadRoot, vad))) {
-      s_VHeap += size;
-      OwMemWalkPml4(addr);
-      return (int64_t)addr;
+    uint64_t base;
+    uint64_t pages;
+    uint64_t va;
+    uint64_t pa;
+    uint64_t end;
+
+    if (!proc || !proc->Pml4Phys)
+      return -1;
+    if (size == 0u)
+      return -1;
+
+    /* Round the request out to whole pages: the mapper has no sub-page
+     * granularity, and a partial page would hand out an address whose tail
+     * aliases the next allocation. */
+    pages = (size + (OW_PAGE_SIZE - 1u)) / OW_PAGE_SIZE;
+    if (pages == 0u || pages > (OW_USER_GUARD_BASE - OW_USER_HEAP_BASE) / OW_PAGE_SIZE)
+      return -1;
+
+    /* Keep the heap strictly below the guard band.  A heap that could grow into
+     * the guard would make stack-overflow detection depend on heap sizing. */
+    if (proc->UserBrk < OW_USER_HEAP_BASE || proc->UserBrk >= OW_USER_GUARD_BASE)
+      return -1;
+    base = (proc->UserBrk + (OW_PAGE_SIZE - 1u)) & ~(uint64_t)(OW_PAGE_SIZE - 1u);
+    end  = base + pages * OW_PAGE_SIZE;
+    if (end > OW_USER_GUARD_BASE)
+      return -1;
+
+    /* Charge and map every page, NX by construction: user memory handed out by
+     * a syscall is data until the process proves otherwise by mapping its own
+     * code. */
+    for (pages = 0; pages < (end - base) / OW_PAGE_SIZE; pages++) {
+      va = base + pages * OW_PAGE_SIZE;
+      if (ow_status_error(OwMemRunCharge(&proc->FrameRun, &pa)))
+        return -1;
+      if (ow_status_error(
+              OwMemMapPage(proc->Pml4Phys, va, pa, OW_PAGE_USER_RW_NX))) {
+        (void)OwMemRunRelease(&proc->FrameRun, pa);
+        return -1;
+      }
     }
-    return -1;
+    {
+      OW_VAD_NODE *vad = OwMemCreateVad(base, end - 1u, OW_PAGE_USER_RW_NX);
+      if (!vad || ow_status_error(OwMemInsertVad(&proc->VadRoot, vad)))
+        return -1;
+      vad->FirstFrame = base;
+      vad->CommitCharge = (uint32_t)((end - base) / OW_PAGE_SIZE);
+    }
+    proc->UserBrk = end;
+    return (int64_t)base;
   }
   case OW_SYS_MAP_IO:
     return (int64_t)(uintptr_t)OwHalMapMmio(P1, (uint32_t)P2);
@@ -153,6 +330,36 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
   }
   case OW_SYS_PS_SLEEP:
     return (int64_t)KeSleep(P1);
+  case OW_SYS_UART_READ: {
+    /* Non-blocking, by contract.  OwHalUartReadChar() spins until a byte lands,
+     * so calling it unconditionally would park the calling CPL3 thread inside
+     * the kernel with interrupts off the scheduler's reach: a thread that could
+     * not be preempted and could not yield, on a request the caller expects to
+     * return immediately.  Gate on "is there one" first and report absence as
+     * -1 so the caller can sleep and come back. */
+    if (!OwHalUartCanRead())
+      return -1;
+    /* Widen before widening the sign: a 0xFF byte read from the UART is data,
+     * not -1, and conflating the two would make half the byte range
+     * indistinguishable from "nothing waiting". */
+    return (int64_t)(unsigned char)OwHalUartReadChar();
+  }
+  case OW_SYS_PS_SPAWN_OWX: {
+    OW_PROCESS_OBJECT *caller = syscall_current_process();
+    OW_PROCESS_OBJECT *spawned;
+
+    if (caller == NULL)
+      return -1;
+
+    /* Parentage is the caller's own PID, taken from the process the gateway
+     * resolved the request against -- never from a caller-supplied value.  A
+     * caller that could name its own parent could also claim PID 0, and PID 0
+     * is the kernel's own identity. */
+    spawned = spawn_owx_image((const char *)(uintptr_t)P1, caller->ProcessId);
+    if (spawned == NULL)
+      return -1;
+    return (int64_t)(uint32_t)spawned->ProcessId;
+  }
   default:
     return -1;
   }
@@ -254,6 +461,19 @@ uint64_t OwApiPsCreateThread(uint64_t ProcessHandle, uint64_t EntryFunction,
                              uint64_t EntryArg) {
   return (uint64_t)OwSyscallDispatch(OW_SYS_PS_CREATE_THREAD, ProcessHandle,
                                      EntryFunction, EntryArg);
+}
+
+uint64_t OwApiPsSpawnOwx(const char *ImageName) {
+  uint64_t r = (uint64_t)OwSyscallDispatch(OW_SYS_PS_SPAWN_OWX,
+                                          (uint64_t)(uintptr_t)ImageName, 0, 0);
+  /* The gateway reports failure as -1.  Callers here work in the "0 means
+   * nothing happened" idiom that every other wrapper in this file uses, and a
+   * raw (uint64_t)-1 handed back as a handle would be a live-looking value. */
+  return (r == (uint64_t)-1) ? 0u : r;
+}
+
+int OwApiUartRead(void) {
+  return (int)OwSyscallDispatch(OW_SYS_UART_READ, 0, 0, 0);
 }
 
 uint64_t OwApiSyncCreateEvent(const char *Name, uint8_t ManualReset,

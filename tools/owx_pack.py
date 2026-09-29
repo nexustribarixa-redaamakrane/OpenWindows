@@ -96,7 +96,7 @@ class Section:
 
 
 def parse_pe(data):
-    """Parse PE32+; return (image_base, entry_rva, [Section...])."""
+    """Parse PE32+; return (image_base, entry_rva, [Section...], import_count)."""
     if data[:2] != b'MZ':
         return None
     pe_off = struct.unpack_from('<I', data, 0x3C)[0]
@@ -123,7 +123,40 @@ def parse_pe(data):
         raw_ptr = struct.unpack_from('<I', data, off + 20)[0]
         flags = struct.unpack_from('<I', data, off + 36)[0]
         sections.append(Section(name, vaddr, raw_ptr, raw_size, vsize, flags))
-    return image_base, entry_rva, sections
+
+    # Data directory 1 is the import table.  Its presence and the number of
+    # descriptors both matter: an image that imports anything cannot be packed
+    # honestly into OWX1, which has nowhere to record a symbol name.
+    num_dd = struct.unpack_from('<I', data, opt + 108)[0]
+    import_count = 0
+    if num_dd > 1:
+        imp_rva, imp_size = struct.unpack_from('<II', data, opt + 112 + 8)
+        if imp_rva and imp_size:
+            import_count = _count_import_descriptors(data, imp_rva, sections)
+    return image_base, entry_rva, sections, import_count
+
+
+def _rva_to_offset(rva, sections):
+    for sec in sections:
+        span = max(sec.vsize, sec.raw_size)
+        if sec.vaddr <= rva < sec.vaddr + span:
+            return sec.raw_ptr + (rva - sec.vaddr)
+    return None
+
+
+def _count_import_descriptors(data, imp_rva, sections):
+    """Count import descriptors (each 20 bytes) up to the null terminator."""
+    off = _rva_to_offset(imp_rva, sections)
+    if off is None:
+        return 0
+    count = 0
+    while off + 20 <= len(data):
+        ilt, ts, fc, name_rva, iat = struct.unpack_from('<IIIII', data, off)
+        if ilt == 0 and name_rva == 0 and iat == 0:
+            break
+        count += 1
+        off += 20
+    return count
 
 
 def section_owx_type(sec):
@@ -147,7 +180,8 @@ def protection_flags(sec):
     return f
 
 
-def build_header(base, entry_off, image_size, subsystem, flags, sec_count):
+def build_header(base, entry_off, image_size, subsystem, flags, sec_count,
+                 import_count=0):
     hdr = bytearray(OWX_HEADER_SIZE)
 
     def h8(off, v):
@@ -170,7 +204,7 @@ def build_header(base, entry_off, image_size, subsystem, flags, sec_count):
     h64(0x30, 0x400000)       # heap_reserve (fixed pool)
     h64(0x38, 0x10000)        # heap_commit
     h32(0x40, sec_count)
-    h32(0x44, 0)              # import_count
+    h32(0x44, import_count)    # reported truthfully; OWX1 has no import table
     h32(0x48, 0)              # string_table_size
     h8(0x4C, subsystem)
     h8(0x4D, 3)               # target_arch = x86-64
@@ -222,7 +256,27 @@ def main():
     if info is None:
         print(f'error: {in_path} is not a PE32+ image')
         sys.exit(1)
-    image_base, entry_rva, sections = info
+    image_base, entry_rva, sections, import_count = info
+
+    # An image that imports symbols cannot be represented in OWX1: the 256-byte
+    # header has no import entry structure, the section table has no import
+    # type, and there is no relocation pass.  Its IAT slots hold RVAs into its
+    # own hint/name table, which a uniform load bias cannot turn back into
+    # callable addresses.
+    #
+    # Refusing here is deliberate.  The previous behaviour wrote import_count=0
+    # regardless and packed .idata as plain RDATA, which produced an image that
+    # claimed to be self-contained, loaded without complaint, and then faulted
+    # at CPL3 the first time it called an imported function.  A build-time error
+    # names the actual problem; a CPL3 page fault does not.
+    if import_count:
+        print(f'error: {in_path} imports {import_count} symbol descriptor(s); '
+              'OWX1 cannot represent imports.')
+        print('       Resolve them at link time (static binding) or implement the '
+              '.owd dynamic linker')
+        print('       (OpenWindows-Essentials/Extensions/owd_format.h: symbol table, '
+              'relocations, dependencies).')
+        sys.exit(1)
 
     # OWX content sections come from PE sections that carry file bytes or are BSS.
     content_parts = []      # (file_bytes) in file order
@@ -281,7 +335,8 @@ def main():
         table += struct.pack('<IIQQQII', st, sflags, sfile, svaddr, ssize, scrc, 0)
     blob[table_off:table_off + table_size] = bytes(table)
 
-    header = build_header(image_base, entry_rva, image_size, subsystem, flags, n)
+    header = build_header(image_base, entry_rva, image_size, subsystem, flags, n,
+                          import_count)
     blob[0:OWX_HEADER_SIZE] = header
 
     image_checksum = crc32c(bytes(blob[0x10:]))           # image_checksum field is 0 here
@@ -303,13 +358,20 @@ def main():
     with open(chk_path, 'w', encoding='utf-8') as f:
         f.write(chk_text)
 
-    root_chk = 'openwinkrnl.chk'
-    if os.path.abspath(chk_path) != os.path.abspath(root_chk):
-        try:
-            with open(root_chk, 'w', encoding='utf-8') as f:
-                f.write(chk_text)
-        except Exception:
-            pass
+    # The checksum must always describe the image packed immediately above it,
+    # and it is written next to that image (chk_path).  Nothing else belongs
+    # here.
+    #
+    # A previous version additionally overwrote a hardcoded 'openwinkrnl.chk'
+    # in the working directory with the hash of whatever image it had just
+    # packed.  For the kernel that was a redundant no-op copy, but for every
+    # other target it was destructive: packing owinit (which embed_owx.py
+    # does for boot/owinit_image.h) replaced the kernel's checksum file with
+    # owinit's hash.  The sentinel then compared openwinkrnl.owx against a
+    # checksum describing a different binary, decided the kernel was corrupted,
+    # raised BanHammer, and froze the cores -- a build-ordering accident that
+    # presented as a kernel integrity failure.  One checksum per image, named
+    # after that image, is the whole contract.
 
     print('OWX packaged:')
     print(f'  input   : {in_path}')

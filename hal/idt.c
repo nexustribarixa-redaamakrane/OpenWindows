@@ -15,6 +15,7 @@
 #include "../inc/ow_hal.h"
 #include "../inc/ow_kprintf.h"
 #include "../inc/ow_io.h"
+#include "../inc/ow_pgfault.h"
 #include "../inc/ow_ps.h"
 #include "../inc/ow_syscall.h"
 #include "../inc/ow_crash_msg.h"
@@ -259,6 +260,17 @@ void OwHalCommonInterruptHandler(ow_hal_frame_t* Frame) {
         ow_outb(0x20u, 0x20u);        /* EOI to master 8259 */
         OwPsSchedulerTick((void*)Frame);
         return;
+    }
+
+    /* Vector 14 (#PF): hand the decision to the pgfault triage layer.  A true
+     * return means a mapping was installed and the ISR epilogue's iretq
+     * retries the faulting instruction.  A false return means the fault was
+     * terminal, so we fall through to the crash banner below -- unchanged
+     * behaviour, but now with a decoded [PF] reason on the console. */
+    if (vec == 0x0Eu) {
+        if (OwPfDispatch((void*)Frame)) {
+            return;
+        }
     }
 
     Name = (vec < 32U) ? OwVectorNames[vec] : "Interrupt";
