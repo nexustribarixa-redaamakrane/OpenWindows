@@ -110,9 +110,10 @@ bool OwOwxImageIsLoadable(const owx_header_t* H, uint32_t ImageSize) {
  *
  * Set on every load, before the status is returned, so a failed load reports its
  * own verdict rather than leaving the previous one in place for a caller to
- * read by mistake.  Single global rather than an out-parameter because
- * OwPsLoadImage's signature is also the boot path's and adding a parameter
- * there would mean every caller threading a value only one of them uses. */
+ * read by mistake.  A single global is used so callers can retrieve the
+ * untranslated verdict without changing every call site; the call sites that
+ * need the reason (core/main.c, syscall/dispatcher.c) read it via
+ * OwPsLastCisVerdict(). */
 static OW_CIS_VERDICT g_OwxLastCisVerdict = OW_CIS_VERDICT_NONE;
 
 OW_CIS_VERDICT OwPsLastCisVerdict(void) {
