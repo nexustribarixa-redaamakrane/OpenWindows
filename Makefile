@@ -60,18 +60,27 @@ NET_OBJS     = net/router.o \
                net/vip.o
 SENT_OBJS    = sentinel/damagecntrl.o \
                sentinel/fltrmgr.o
+CIS_OBJS     = cis/cis_core.o cis/cis_format.o cis/cis_verify.o
 SYSCALL_OBJS = syscall/dispatcher.o
 KAPI_OBJS    = kapi/kernel64.o
 SHELL_OBJS   = shell/shell.o
 
 # Object files - Libraries
+#
+# ow_sha512 and ow_ed25519 are here because CIS verifies signatures: without
+# them the kernel links cis/cis_verify.o against an undefined
+# ow_crypto_ed25519_verify and the build fails at the link, after the host test
+# has already passed using its own copies of both files.  A library the
+# verification path needs belongs in the image, not only in the harness.
 LIB_OBJS = lib/ow_htl.o \
            lib/kmem.o \
            lib/kstring.o \
            lib/kprintf.o \
            lib/kalloc.o \
            lib/sucs.o \
-           lib/ow_sha256.o
+           lib/ow_sha256.o \
+           lib/ow_sha512.o \
+           lib/ow_ed25519.o
 
 # Object files - Ecosystem (BANcode)
 BANCODE_OBJS = bancode/bancode.o \
@@ -117,7 +126,7 @@ STOR_CORE_OBJS = storage/owdisk.o
 ALL_OBJS = $(CORE_OBJS) $(HAL_OBJS) $(RC_OBJS) $(PS_OBJS) $(SYNC_OBJS) $(DPC_OBJS) \
            $(USERMODE_OBJS) \
            $(DIAG_OBJS) $(VFS_OBJS) \
-           $(NET_OBJS) $(SENT_OBJS) $(SYSCALL_OBJS) $(KAPI_OBJS) \
+           $(NET_OBJS) $(SENT_OBJS) $(CIS_OBJS) $(SYSCALL_OBJS) $(KAPI_OBJS) \
            $(SHELL_OBJS) $(LIB_OBJS) $(BANCODE_OBJS) \
            $(SUC_OBJS) $(VIP_OBJS) \
            $(STOR_COMMON_OBJS) $(OWFS_OBJS) $(USFS_OBJS) $(STOR_CORE_OBJS)
@@ -298,6 +307,63 @@ EMERGENCY_IMAGES = owinitv owrs
 EMERGENCY_OWX    = $(EMERGENCY_IMAGES:%=$(EMERGENCY_DIR)/%.owx)
 EMERGENCY_HDRS   = $(EMERGENCY_IMAGES:%=$(EMERGENCY_DIR)/%_image.h)
 
+# ---- CIS_DEV_TRUST -------------------------------------------------------
+#
+# Off by default, and the default is the security property rather than an
+# inconvenience:
+#
+#   make                     no trust anchors; the loader refuses every image
+#   make CIS_DEV_TRUST=1     trust one development key, and sign images with it
+#
+# With the gate in ps/owx_loader.c, a default build cannot boot.  That is
+# deliberate -- an unreviewed machine that will not run unreviewed code -- but it
+# makes CIS_DEV_TRUST the difference between "boots" and "halts at init", so it
+# needs to be the only way across.
+#
+# The flag does two things and both are required.  -DCIS_DEV_TRUST adds the dev
+# anchor to the trust store in cis/cis_keys.h, and OWX_SIGN_ARGS makes the
+# images carry a signature that anchor accepts.  Either half alone is useless:
+# an anchor with nothing signed for it still refuses everything, and a signed
+# image with no anchor is refused.  Setting only one produces a build that looks
+# configured and boots nothing, which is the correct outcome but a confusing one.
+#
+# The dev seed is public (tools/cis_block.py), so a CIS_DEV_TRUST build executes
+# anything that seed signs.  Never set it for a release.
+ifeq ($(CIS_DEV_TRUST),1)
+CIS_DEV_CFLAGS   = -DCIS_DEV_TRUST
+OWX_SIGN_ARGS    = --sign-dev
+else
+CIS_DEV_CFLAGS   =
+OWX_SIGN_ARGS    =
+endif
+
+CFLAGS          += $(CIS_DEV_CFLAGS)
+EMERGENCY_CFLAGS += $(CIS_DEV_CFLAGS)
+
+# Switching CIS_DEV_TRUST changes the bytes of every generated image header, but
+# nothing on disk changes to tell make so.  Without this stamp, `make hosttest`
+# followed by `make hosttest CIS_DEV_TRUST=1` reuses the unsigned header and the
+# opt-in build silently boots nothing -- which is exactly the failure the opt-in
+# exists to rule out.
+#
+# The stamp's CONTENT is the setting; its timestamp is what make reads.  Written
+# with the value inside so that flipping the flag and flipping it back both
+# produce a change, rather than a timestamp that says nothing about what changed.
+CIS_STAMP = $(EMERGENCY_DIR)/.cis_dev_trust
+CIS_STAMP_VALUE = CIS_DEV_TRUST=$(CIS_DEV_TRUST) SIGN_ARGS=$(OWX_SIGN_ARGS)
+
+# Runs every time.  Compares before writing: a changed value updates the
+# timestamp and so forces the images to be rebuilt, while an unchanged value
+# leaves the timestamp alone and the images stay cached.  Touching it
+# unconditionally would rebuild every image on every invocation, which is the
+# opposite of the point.
+.PHONY: $(CIS_STAMP)
+$(CIS_STAMP):
+	@mkdir -p $(EMERGENCY_DIR)
+	@printf '%s\n' '$(CIS_STAMP_VALUE)' > $@.new
+	@cmp -s $@.new $@ || mv $@.new $@
+	@rm -f $@.new
+
 # Per-image seed objects.  A test image links the ones its volume should carry.
 OWINIT_SEED_OBJ  = boot/owinit_seed.o
 OWINITV_SEED_OBJ = boot/owinitv_seed.o
@@ -315,10 +381,12 @@ OWINIT_SOURCE = $(ESSENTIALS_ARTIFACTS)/owinit.owx
 OWINIT_IMAGE = boot/owinit_image.owx
 OWINIT_HEADER = boot/owinit_image.h
 
-$(OWINIT_HEADER): $(OWINIT_SOURCE) tools/owx_pack.py tools/embed_owx.py
+$(OWINIT_HEADER): $(OWINIT_SOURCE) tools/owx_pack.py tools/embed_owx.py \
+                   tools/cis_block.py $(CIS_STAMP)
 	python tools/embed_owx.py $(OWINIT_SOURCE) $@ --packer tools/owx_pack.py \
 	    --subsystem 0x04 --symbol g_owinit_image \
 	    --size-macro OWINIT_IMAGE_SIZE --guard OWINIT_IMAGE_GENERATED_H \
+	    $(if $(OWX_SIGN_ARGS),--pack-arg=--sign-dev,) \
 	    --note "Generated from OpenWindows-Essentials/Software/owinit/owinit.c."
 
 boot/owinit_seed.o: boot/owinit_seed.c storage/owdisk.h $(OWINIT_HEADER)
@@ -348,15 +416,15 @@ boot/owchk_seed.o: boot/owchk_seed.c storage/owdisk.h inc/ow_sentinel.h
 # Make function to upper-case a stem.  A pattern rule that quietly emitted
 # OWowinitv_IMAGE_SIZE would compile, and then fail on the first include of the
 # header -- at the include site, far from the rule that got it wrong.
-$(EMERGENCY_DIR)/owinitv.owx: $(EMERGENCY_DIR)/owinitv.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py
+$(EMERGENCY_DIR)/owinitv.owx: $(EMERGENCY_DIR)/owinitv.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py tools/cis_block.py $(CIS_STAMP)
 	$(CC) $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owinitv.o
 	$(CC) $(EMERGENCY_CFLAGS) -Wl,-e,owinitv_main -o $(EMERGENCY_DIR)/owinitv.pe $(EMERGENCY_DIR)/owinitv.o
-	python tools/owx_pack.py $(EMERGENCY_DIR)/owinitv.pe $@ --subsystem 0x05
+	python tools/owx_pack.py $(EMERGENCY_DIR)/owinitv.pe $@ --subsystem 0x05 $(OWX_SIGN_ARGS)
 
-$(EMERGENCY_DIR)/owrs.owx: $(EMERGENCY_DIR)/owrs.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py
+$(EMERGENCY_DIR)/owrs.owx: $(EMERGENCY_DIR)/owrs.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py tools/cis_block.py $(CIS_STAMP)
 	$(CC) $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owrs.o
 	$(CC) $(EMERGENCY_CFLAGS) -Wl,-e,owrs_main -o $(EMERGENCY_DIR)/owrs.pe $(EMERGENCY_DIR)/owrs.o
-	python tools/owx_pack.py $(EMERGENCY_DIR)/owrs.pe $@ --subsystem 0x05
+	python tools/owx_pack.py $(EMERGENCY_DIR)/owrs.pe $@ --subsystem 0x05 $(OWX_SIGN_ARGS)
 
 $(EMERGENCY_DIR)/owinitv_image.h: $(EMERGENCY_DIR)/owinitv.owx tools/embed_owx.py
 	python tools/embed_owx.py $< $@ --no-pack \
@@ -532,14 +600,18 @@ vdi-test: $(VBOX_VDI)
 HOSTTEST_OUT = $(or $(TMPDIR),$(TEMP),/tmp)/openwinkrnl_host.exe
 HOSTTEST_SRC = tools/hosttest/host_hal.c \
                tools/hosttest/host_boot.c \
+               tools/hosttest/host_cis_verify.c \
+               tools/hosttest/host_cis_loader.c \
                core/main.c core/object.c core/memory.c core/pgfault.c \
                core/alpc.c core/runlevel.c \
                rc/rc.c hal/acpi.c \
                diag/bancode_krnl.c vfs/vfs.c net/router.c net/vip.c \
-               sentinel/damagecntrl.c sentinel/fltrmgr.c \
-               syscall/dispatcher.c kapi/kernel64.c shell/shell.c \
-               lib/ow_htl.c lib/kmem.c lib/kstring.c lib/kprintf.c \
-               lib/kalloc.c lib/sucs.c lib/ow_sha256.c storage/owdisk.c \
+sentinel/damagecntrl.c sentinel/fltrmgr.c \
+                cis/cis_core.c cis/cis_format.c cis/cis_verify.c \
+                syscall/dispatcher.c kapi/kernel64.c shell/shell.c \
+                lib/ow_htl.c lib/kmem.c lib/kstring.c lib/kprintf.c \
+                lib/kalloc.c lib/sucs.c lib/ow_sha256.c \
+                lib/ow_sha512.c lib/ow_ed25519.c storage/owdisk.c \
                ps/ps.c ps/switch.S ps/owx_loader.c sync/ow_sync.c dpc/ow_dpc.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
@@ -559,12 +631,29 @@ HOSTTEST_SRC = tools/hosttest/host_hal.c \
                $(USFS_DIR)/src/usfs_format.c $(USFS_DIR)/src/usfs_superblock.c \
                $(USFS_DIR)/src/usfs_sync.c
 
+# hosttest-asan builds the identical source list with the address and undefined
+# behaviour sanitizers.  It exists because several CIS bounds guards cannot be
+# caught by any verdict assertion: removing one leaves the verdict unchanged (the
+# parse fails anyway, for a different reason) while turning a size subtraction
+# into an out-of-bounds read.  Only the sanitizer sees that, so the guards get
+# tested here rather than argued about in a comment.
+# -I./boot is where boot/owinit_image.h lives.  tools/hosttest/host_boot.c
+# includes it as "owinit_image.h" rather than "../../boot/owinit_image.h" so that
+# CMake can resolve the same include against its own generated copy; the two build
+# systems must therefore agree on the name, not on a relative path.
+HOSTTEST_INCLUDES = -I./boot -I./inc -I./inc/bancode -I$(BANCODE_DIR) \
+                    -I../superunicode/sutf/include -I../vip \
+                    -I../OpenWindows-Storage/common/include \
+                    -I../OpenWindows-Storage/owfs/include \
+                    -I../OpenWindows-Storage/usfs/include
+
+HOSTTEST_ASAN_FLAGS = -std=c99 -Wall -Wextra -Werror -fno-pie -g \
+                      -fsanitize=address,undefined -fno-omit-frame-pointer \
+                      -DOW_HOST_HAL $(CIS_DEV_CFLAGS) $(HOSTTEST_INCLUDES)
+HOSTTEST_ASAN_OUT = $(or $(TMPDIR),$(TEMP),/tmp)/openwinkrnl_asan.exe
+
 HOSTTEST_FLAGS = -std=c99 -Wall -Wextra -Werror -fno-pie -g -DOW_HOST_HAL \
-                 -I./inc -I./inc/bancode -I$(BANCODE_DIR) \
-                 -I../superunicode/sutf/include -I../vip \
-                 -I../OpenWindows-Storage/common/include \
-                 -I../OpenWindows-Storage/owfs/include \
-                 -I../OpenWindows-Storage/usfs/include
+                 $(CIS_DEV_CFLAGS) $(HOSTTEST_INCLUDES)
 
 # Entry-point audit across all Essentials OWX targets. Runs the checker's own
 # negative self-test first, so a signature that stopped discriminating fails the
@@ -581,6 +670,14 @@ hosttest: $(OWINIT_HEADER) $(EMERGENCY_HDRS)
 	$(MAKE) owx-entries
 	$(CC) $(HOSTTEST_FLAGS) $(HOSTTEST_SRC) -o $(HOSTTEST_OUT)
 	$(HOSTTEST_OUT)
+
+# Sanitized build of the same source list.  Kept as a separate target rather than
+# folded into hosttest because the sanitizers roughly double the run time and
+# slow the edit/test loop down; run both before landing anything that touches
+# bounds arithmetic.
+hosttest-asan: $(OWINIT_HEADER) $(EMERGENCY_HDRS)
+	$(CC) $(HOSTTEST_ASAN_FLAGS) $(HOSTTEST_SRC) -o $(HOSTTEST_ASAN_OUT)
+	$(HOSTTEST_ASAN_OUT)
 
 # Build the emergency images and audit them like any other .owx: import-free,
 # RIP-relative, entry at the real symbol.  This is the gate that catches the

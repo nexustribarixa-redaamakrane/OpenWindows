@@ -18,6 +18,7 @@
 #include "../inc/ow_runlevel.h"
 #include "../inc/ow_rc.h"
 #include "../inc/ow_acpi.h"
+#include "../inc/ow_cis.h"
 #include "../inc/ow_ps.h"
 #include "../storage/owdisk.h"
 #include "../inc/ow_usermode.h"
@@ -307,7 +308,12 @@ static OW_PROCESS_OBJECT* boot_launch_init(const char* image_name,
     }
     OwDiagLogFinished("OWINIT Process", OW_C_OWINIT_PROCESS_CREATED);
 
-    if (ow_status_error(OwPsLoadImage(oproc, s_init_image, read_len))) {
+    /* Provenance is named, not inferred.  This is the kernel's own hand-off of
+     * the init image, and saying so is what keeps the measurement log honest:
+     * the loader sees an ordinary process object here and could not tell a boot
+     * from a userspace spawn by looking. */
+    if (ow_status_error(OwPsLoadImage(oproc, s_init_image, read_len,
+                                      (uint32_t)OW_CIS_RECORD_BOOT))) {
         /* Without this the load's reason is discarded: the boot simply
          * continued as though the image had not been there at all, with no
          * init-related line in the log, which is a very expensive thing to
@@ -561,6 +567,65 @@ void _start(void) {
         }
     } else {
         boot_skip_phase("owinit", 52, 6);
+    }
+
+    /* Phase 5c.1: Copyleft Integrity Safeguard.
+     *
+     * Armed BEFORE the init hand-off, which is the only place it can go.
+     * This is the first moment in boot at which any executable has been mapped
+     * into a process, so a CIS that came up after the hand-off would have let
+     * exactly one image through unmeasured -- the init, which is also the
+     * image with the most authority once it is running.  Arming here also
+     * means the survey above is the last thing in boot that looks at an image
+     * without asking CIS about it.
+     *
+     * The phase is gated on OW_RUNLVL_F_CIS, which is in
+     * OW_RUNLEVEL_CORE_FEATURES, so it is armed in every functional profile
+     * including the negative recovery ones.  A runlevel must not be able to
+     * switch off executable verification: that is precisely the runlevel an
+     * attacker with any write access would choose.
+     *
+     * Weight 0, charged to the userspace-resolution step it gates, the same
+     * treatment the 5c.5 hand-off below gets.  The boot HUD denominator was
+     * already over-subscribed (106 against a 100 total) before this phase
+     * existed, so it is not given a share of its own; boot_diag_done() clamps
+     * the percentage either way. */
+    if (OwRunlevelRequires(OW_RUNLVL_F_CIS)) {
+        boot_begin("CIS");
+        {
+            OW_STATUS cist = OwCisInitialize();
+            if (ow_status_error(cist)) {
+                km_line(0x0C, "[CIS]", "enforcement FAILED to arm - "
+                        "no executable will be mapped");
+                boot_diag_failed(52, cist, "CIS", 0);
+                /* A halt, not a warning.  OwCisIsReady() stays false, so every
+                 * image load is refused from here on; carrying on would hand a
+                 * machine whose init cannot start to the shell, with the real
+                 * fault buried in the log rather than stated as the reason the
+                 * machine stopped. */
+                OwDiagBanHammer(cist, "CIS",
+                                "Copyleft Integrity Safeguard could not arm; "
+                                "no image may be mapped without it");
+                ow_hlt_loop();
+            }
+            if (OwCisTrustedKeyCount() == 0) {
+                km_line(0x0E, "[CIS]", "armed with 0 trust anchors - "
+                        "every image will be refused");
+            }
+            km_line(0x0A, "[CIS]", "enforcement armed (signatures mandatory)");
+            boot_diag_done(52, OW_C_CIS_ONLINE, "CIS", 1, 0);
+        }
+    } else {
+        /* Unreachable while CIS is in OW_RUNLEVEL_CORE_FEATURES.  Present so
+         * that removing the feature bit from the core mask produces a loud
+         * refusal rather than a silently unguarded boot. */
+        km_line(0x0C, "[CIS]", "runlevel does not arm CIS - refusing to "
+                "continue without image verification");
+        boot_diag_failed(52, OW_ERR_UNSUPPORTED, "CIS", 0);
+        OwDiagBanHammer(OW_ERR_UNSUPPORTED, "CIS",
+                        "active runlevel does not arm the Copyleft Integrity "
+                        "Safeguard");
+        ow_hlt_loop();
     }
 
     /* Phase 5c.5: enter the init the survey chose.

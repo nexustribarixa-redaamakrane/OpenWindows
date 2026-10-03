@@ -28,7 +28,15 @@
  * below is the only transformation applied, and it is exact for RIP-relative
  * code.
  *
- * Zero dynamic heap: all staging buffers are static pools. */
+ * Zero dynamic heap: all staging buffers are static pools.
+ *
+ * CIS enforcement (Stage 2): the copy in this file that adds the gate below is
+ * the one that matters.  OwCisVerifyImage() is called after the OWX header has
+ * been structurally validated and before any frame is charged or any VAD is
+ * published, so a refused image never acquires an executable mapping, a
+ * published descriptor, or an entry point -- there is nothing to unwind.  The
+ * one thing this file deliberately does NOT do is reimplement any part of the
+ * decision: it passes bytes to cis/cis_verify.c and acts on the verdict. */
 #include "../inc/ow_owx.h"
 #include "../inc/ow_ps.h"
 #include "../inc/ow_mem.h"
@@ -36,6 +44,7 @@
 #include "../inc/ow_syscall.h"
 #include "../inc/ow_diag.h"
 #include "../inc/ow_kprintf.h"
+#include "../inc/ow_cis.h"
 #include <stdint.h>
 
 bool OwOwxValidateHeader(const owx_header_t* H, uint32_t ImageSize) {
@@ -88,6 +97,26 @@ bool OwOwxImageIsLoadable(const owx_header_t* H, uint32_t ImageSize) {
     if (H->section_count == 0u) return false;
     if (H->entry_point == 0u) return false;
     return true;
+}
+
+/* The verdict from the most recent OwPsLoadImage call, untranslated.
+ *
+ * OW_STATUS has to compress a dozen CIS verdicts into whatever the process
+ * loader's public interface already had, and the caller at core/main.c and
+ * syscall/dispatcher.c both want to distinguish "unsigned" from "revoked key"
+ * when they decide whether to fall back to a recovery image.  Keeping the enum
+ * here means that decision is made against the real reason rather than against
+ * a status code someone mapped by hand.
+ *
+ * Set on every load, before the status is returned, so a failed load reports its
+ * own verdict rather than leaving the previous one in place for a caller to
+ * read by mistake.  Single global rather than an out-parameter because
+ * OwPsLoadImage's signature is also the boot path's and adding a parameter
+ * there would mean every caller threading a value only one of them uses. */
+static OW_CIS_VERDICT g_OwxLastCisVerdict = OW_CIS_VERDICT_NONE;
+
+OW_CIS_VERDICT OwPsLastCisVerdict(void) {
+    return g_OwxLastCisVerdict;
 }
 
 /* ====================================================================== */
@@ -268,6 +297,120 @@ bool OwOwxImageIsUsable(const void* Image, uint32_t ImageSize) {
  *   int 0x80                         ; CD 80
  *   jmp $                            ; EB FE  (unreachable: exit never returns)
  */
+/* ---- CIS gate ------------------------------------------------------------
+ *
+ * The mandatory verification step, and the only place in the loader that decides
+ * whether an image may become executable.
+ *
+ * Placement is the security property.  This runs after OwOwxValidateHeader has
+ * established that the header is structurally sound -- so hdr->image_size is a
+ * value the loader has already bounded against OwxSize -- and before the
+ * relocation arithmetic, before any OwMemRunCharge, before any OwMemMapPage, and
+ * before any VAD is published.  Every one of those is after this point in
+ * function order, so a refusal cannot leave a mapped page behind: there is no
+ * partial state to roll back.  Putting the gate after the mapping loop instead
+ * would have meant an unsigned image briefly resident and executable in the
+ * process's address space, which is precisely the window the subsystem exists
+ * to close.
+ *
+ * ImageSize and Available, and why both:
+ *
+ *   ImageSize   hdr->image_size.  The bytes that will be mapped, and exactly the
+ *               range the signed SHA-256 digest covers.  Not OwxSize: the CIS
+ *               block is appended past this offset, so hashing the whole file
+ *               would cover the signature over itself.
+ *   Available   OwxSize.  Bytes physically in hand from Image onward.  This is
+ *               what bounds the trailing block, and it is the caller's own
+ *               count, not anything the image file asserts about itself.
+ *
+ * The loader derives neither from an unvalidated field: hdr->image_size has
+ * already passed OwOwxValidateHeader's `image_size <= ImageSize` check, so
+ * Available >= ImageSize holds before the call and the parser's own guard is
+ * belt-and-braces rather than load-bearing here.  A second, subtly different
+ * idea of "image size" inside the loader is what this avoids -- the loader and
+ * CIS must agree on which bytes are authenticated.
+ *
+ * Relocation does not invalidate the digest, and that is worth stating rather
+ * than leaving to be discovered: OWX1 carries no relocation table, and the only
+ * transformation is a uniform virtual bias applied at mapping time (see the
+ * relocation note at the top of this file).  The bytes CIS authenticates are the
+ * on-disk bytes, and the bytes that execute are those same bytes at a different
+ * address.  Nothing rewrites a byte between the digest and the instruction
+ * pointer, so the hash boundary does not silently shift.
+ *
+ * The verdict is mapped to a distinct OW_STATUS per reason rather than folded
+ * into one OW_ERR_CORRUPT.  Callers that want to distinguish "unsigned" from
+ * "revoked key" read OwPsLastCisVerdict(), which holds the untranslated enum.
+ *
+ * These two functions are outside the OW_HOST_HAL guard below because the host
+ * harness enforces the gate too.  A host build that skipped verification would
+ * make every loader test meaningless -- the tests would be exercising a path no
+ * production build has. */
+static OW_STATUS owx_cis_status(OW_CIS_VERDICT Verdict) {
+    switch (Verdict) {
+    case OW_CIS_VERDICT_TRUSTED:
+        return OW_SUCCESS;
+    case OW_CIS_VERDICT_REJECT_UNSIGNED:
+        return OW_ERR_CIS_UNSIGNED;
+    case OW_CIS_VERDICT_REJECT_BAD_SIGNATURE:
+        return OW_ERR_CIS_BAD_SIGNATURE;
+    case OW_CIS_VERDICT_REJECT_UNKNOWN_KEY:
+        return OW_ERR_CIS_UNKNOWN_KEY;
+    case OW_CIS_VERDICT_REJECT_KEY_REVOKED:
+        return OW_ERR_CIS_KEY_REVOKED;
+    case OW_CIS_VERDICT_REJECT_DIGEST_MISMATCH:
+        return OW_ERR_CIS_DIGEST_MISMATCH;
+    case OW_CIS_VERDICT_REJECT_MALFORMED:
+        return OW_ERR_CIS_MALFORMED;
+    case OW_CIS_VERDICT_REJECT_POLICY:
+        return OW_ERR_CIS_POLICY;
+    case OW_CIS_VERDICT_COMPLIANT_REFUSAL:
+        return OW_ERR_CIS_COMPLIANT_REFUSAL;
+    default:
+        /* NONE and ERROR.  ERROR means verification could not run at all, which
+         * for a loader is never a licence to proceed. */
+        return OW_ERR_CIS_ERROR;
+    }
+}
+
+static OW_STATUS owx_cis_gate(const OW_PROCESS_OBJECT* Proc,
+                              const owx_header_t* Hdr,
+                              const uint8_t* Image, uint32_t Available,
+                              uint32_t RecordFlags) {
+    OW_CIS_VERDICT verdict;
+    OW_STATUS status;
+
+    /* Provenance is checked, not assumed.  An unrecognised value is refused: a
+     * caller that reaches the load path some other way has to say so, because the
+     * alternative is a measurement log holding a load nobody can account for.
+     * Note what this is NOT -- no flag here makes verification optional.  The
+     * worst outcome is a refused load, never a skipped one. */
+    if (RecordFlags != (uint32_t)OW_CIS_RECORD_BOOT &&
+        RecordFlags != (uint32_t)OW_CIS_RECORD_SPAWN) {
+        g_OwxLastCisVerdict = OW_CIS_VERDICT_ERROR;
+        ow_kprintf("[OWX] load refused: unrecognised CIS provenance 0x%08X\r\n",
+                   (unsigned)RecordFlags);
+        return OW_ERR_CIS_ERROR;
+    }
+
+    /* Proc->Header.Name is an inline array, so the label is always printable and
+     * the verifier sees the same string the diagnostic below does. */
+    verdict = OwCisVerifyImage(Image, Hdr->image_size, Available,
+                               (uint32_t)Hdr->subsystem, Proc->ProcessId,
+                               Proc->Header.Name, RecordFlags);
+    g_OwxLastCisVerdict = verdict;
+    status = owx_cis_status(verdict);
+
+    if (ow_status_error(status)) {
+        /* The verdict is already in the measurement log with the digest and key
+         * id; this line is the console trace of the same decision and adds
+         * nothing the log does not already hold. */
+        ow_kprintf("[OWX] %s refused by CIS: %s (status 0x%08X)\r\n",
+                   Proc->Header.Name, OwCisVerdictName(verdict), (unsigned)status);
+    }
+    return status;
+}
+
 #ifndef OW_HOST_HAL
 static const uint8_t s_ExitTrampoline[] = {
     0xB8, 0x0E, 0x00, 0x00, 0x00,
@@ -329,7 +472,8 @@ static OW_STATUS owx_publish_vad(OW_PROCESS_OBJECT* Proc, uint64_t Start,
 
 OW_STATUS OwPsLoadImage(OW_PROCESS_OBJECT* Proc,
                         const uint8_t* OwxBuffer,
-                        uint32_t OwxSize) {
+                        uint32_t OwxSize,
+                        uint32_t RecordFlags) {
     const owx_header_t*        hdr;
     const owx_section_entry_t* secs;
     uint32_t idx;
@@ -343,6 +487,12 @@ OW_STATUS OwPsLoadImage(OW_PROCESS_OBJECT* Proc,
 #endif
 
     if (!Proc || !OwxBuffer) return OW_ERR_NULL_POINTER;
+
+    /* Proc->Header.Name is an inline char array (inc/ow_object.h), not a
+     * pointer, so the diagnostics below always have a valid string to print.  An
+     * empty name prints as an empty field, which is a reporting cosmetic rather
+     * than a defect: there is no NULL-name case in this file to defend, and
+     * inventing one would be code for a hazard this type does not have. */
     hdr = (const owx_header_t*)(const void*)OwxBuffer;
     if (!OwOwxValidateHeader(hdr, OwxSize)) return OW_ERR_CORRUPT;
 
@@ -361,6 +511,20 @@ OW_STATUS OwPsLoadImage(OW_PROCESS_OBJECT* Proc,
     if (OwxSize < OWX_HEADER_SIZE || hdr->section_count == 0 ||
         hdr->entry_point == 0) {
         return OW_ERR_CORRUPT;
+    }
+
+    /* CIS gate.  Placed here, after the header is structurally sound and before
+     * the section walk, the relocation arithmetic, and every mapping below.
+     *
+     * Everything past this point runs only on a header that matched a
+     * signature, which is why the checks below are defence in depth for a bug in
+     * this file rather than the barrier itself.  The gate is the barrier. */
+    {
+        OW_STATUS cis = owx_cis_gate(Proc, hdr, OwxBuffer, OwxSize,
+                                     RecordFlags);
+        if (ow_status_error(cis)) {
+            return cis;
+        }
     }
 
     secs = (const owx_section_entry_t*)(const void*)

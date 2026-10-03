@@ -35,10 +35,12 @@
 #define OW_RUNLVL_F_SYSCALL     0x00004000U   /* system call gateway             */
 #define OW_RUNLVL_F_SHELL       0x00008000U   /* Ring 0 debug shell              */
 #define OW_RUNLVL_F_AI          0x00010000U   /* AI module ecosystem (optional)  */
+#define OW_RUNLVL_F_CIS         0x00020000U   /* Copyleft Integrity Safeguard    */
 
 /* Boot-critical core (armed in every functional profile) */
 #define OW_RUNLEVEL_CORE_FEATURES \
-    (OW_RUNLVL_F_HAL | OW_RUNLVL_F_MEMORY | OW_RUNLVL_F_OBJECT | OW_RUNLVL_F_DIAG)
+    (OW_RUNLVL_F_HAL | OW_RUNLVL_F_MEMORY | OW_RUNLVL_F_OBJECT | OW_RUNLVL_F_DIAG | \
+     OW_RUNLVL_F_CIS)
 
 /* -------------------------------------------------------------------------
  * Per-profile flags

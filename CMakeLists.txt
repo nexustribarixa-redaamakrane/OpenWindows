@@ -7,8 +7,64 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+# ==============================================================================
+# CIS_DEV_TRUST: opt-in development trust anchor
+# ==============================================================================
+# OFF by default, and the default is the point.  A default build trusts no image
+# at all -- cis/cis_keys.h ships zero provisioned anchors -- so an unsigned
+# owinit is refused and the machine stops at the boot gate.  That is the
+# correct state for a build whose owinit was signed by a key nobody holds.
+#
+# Turning this ON builds with cis/cis_keys_dev.h (one public, checked-in,
+# documented test key) and signs the userspace images with it, so a developer can
+# boot.  It is a development affordance and nothing else: the seed is public, so
+# the anchor proves nothing about who produced an image, and a release must be
+# built with this OFF and signed by a key held outside this repository.
+#
+# The Makefile equivalent is `make CIS_DEV_TRUST=1`.  Both must exist, because a
+# security control that one build system honours and the other silently drops is
+# not a control -- it is a build-system inconsistency that happens to be
+# convenient.
+option(CIS_DEV_TRUST
+    "Trust and sign with the public development CIS anchor (never for release)"
+    OFF)
+
+if(CIS_DEV_TRUST)
+    set(CIS_DEV_TRUST_DEFS CIS_DEV_TRUST)
+    # Two spellings of the same switch, because the two consumers are different
+    # programs: tools/owx_pack.py takes --sign-dev, while tools/embed_owx.py
+    # forwards to the packer and only accepts --pack-arg=<arg>.  Passing the bare
+    # switch to embed_owx.py fails with "unrecognized arguments", which is the
+    # failure this comment exists to prevent someone rediscovering.
+    set(CIS_DEV_TRUST_PACKER_ARGS --sign-dev)
+    set(CIS_DEV_TRUST_EMBED_ARGS --pack-arg=--sign-dev)
+    message(WARNING
+        "CIS_DEV_TRUST is ON: images will be signed with a PUBLIC test key from "
+        "this repository. This configuration must never produce a release.")
+else()
+    set(CIS_DEV_TRUST_DEFS "")
+    set(CIS_DEV_TRUST_PACKER_ARGS "")
+    set(CIS_DEV_TRUST_EMBED_ARGS "")
+endif()
+
+# Generated into the CMake BINARY tree, not the source tree.
+#
+# boot/owinit_image.h is a signed-or-not image, and the Makefile writes that same
+# path.  When both build systems wrote there, a CMake build configured without
+# CIS_DEV_TRUST picked up the owinit a previous `make CIS_DEV_TRUST=1` had
+# signed, and the suite reported UNKNOWN-KEY where it meant UNSIGNED -- observed,
+# not feared.  Each build system owning its own generated file removes the
+# sharing entirely, which is more reliable than trying to make two systems
+# invalidate each other's output correctly.
+#
+# tools/hosttest/host_boot.c therefore includes this as "owinit_image.h" and
+# finds it on the include path: boot/ under the Makefile, this directory under
+# CMake.
+set(OWINIT_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY ${OWINIT_GENERATED_DIR})
+set(OWINIT_HEADER "${OWINIT_GENERATED_DIR}/owinit_image.h")
 set(OWINIT_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials/Artifacts/Software/owinit.owx")
-set(OWINIT_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/boot/owinit_image.h")
+
 add_custom_command(
     OUTPUT ${OWINIT_HEADER}
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owx.py
@@ -18,8 +74,10 @@ add_custom_command(
         --size-macro OWINIT_IMAGE_SIZE
         --guard OWINIT_IMAGE_GENERATED_H
         --note "Generated from OpenWindows-Essentials/Software/owinit/owinit.c."
+        ${CIS_DEV_TRUST_EMBED_ARGS}
     DEPENDS ${OWINIT_SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_owx.py
         ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools/cis_block.py
     COMMENT "Packaging OpenWindows-Essentials owinit.owx for kernel tests"
 )
 add_custom_target(owinit_image DEPENDS ${OWINIT_HEADER})
@@ -33,6 +91,8 @@ set(USFS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/usfs")
 
 # Include directories common to all targets
 set(OW_INCLUDE_DIRS
+    ${OWINIT_GENERATED_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/boot
     ${CMAKE_CURRENT_SOURCE_DIR}/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/inc/bancode
     ${CMAKE_CURRENT_SOURCE_DIR}/bancode
@@ -62,6 +122,9 @@ set(KERNEL_COMMON_SOURCES
     net/vip.c
     sentinel/damagecntrl.c
     sentinel/fltrmgr.c
+    cis/cis_core.c
+    cis/cis_format.c
+    cis/cis_verify.c
     dpc/ow_dpc.c
     sync/ow_sync.c
     syscall/dispatcher.c
@@ -78,6 +141,8 @@ set(KERNEL_COMMON_SOURCES
     lib/kalloc.c
     lib/sucs.c
     lib/ow_sha256.c
+    lib/ow_sha512.c
+    lib/ow_ed25519.c
     storage/owdisk.c
     bancode/bancode.c
     bancode/bancode_trap.c
@@ -175,8 +240,10 @@ function(ow_emergency_image NAME ENTRY SYMBOL SIZE_MACRO GUARD NOTE)
         OUTPUT ${_owx}
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
                 $<TARGET_FILE:${_pe_target}> ${_owx} --subsystem 0x05
+                ${CIS_DEV_TRUST_PACKER_ARGS}
         DEPENDS ${_pe_target} ${_src} "${EMERGENCY_DIR}/ow_gate.h"
                 ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/cis_block.py
         COMMENT "Packing emergency ${NAME}.owx (OWX1 native, subsystem 0x05 recovery)..."
         VERBATIM
     )
@@ -255,6 +322,7 @@ set_target_properties(openwinkrnl_pe PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
 )
 target_include_directories(openwinkrnl_pe PRIVATE ${OW_INCLUDE_DIRS})
+target_compile_definitions(openwinkrnl_pe PRIVATE ${CIS_DEV_TRUST_DEFS})
 target_compile_options(openwinkrnl_pe PRIVATE
     -std=c99 -ffreestanding -nostdlib -fno-stack-protector -fno-pie
     -Wall -Wextra -Werror -g
@@ -295,6 +363,10 @@ add_custom_command(
 set(HOSTTEST_SOURCES
     tools/hosttest/host_hal.c
     tools/hosttest/host_boot.c
+    # Verifier tests.  host_boot.c calls test_cis_verify_run(), so this is a link
+    # requirement, not an optional extra -- without it the harness does not build.
+    tools/hosttest/host_cis_verify.c
+    tools/hosttest/host_cis_loader.c
     ${KERNEL_COMMON_SOURCES}
     ${OWINIT_HEADER}
     # The harness audits and mounts all three userspace images, so the emergency
@@ -307,6 +379,7 @@ set(HOSTTEST_SOURCES
 add_executable(hosttest ${HOSTTEST_SOURCES})
 add_dependencies(hosttest owinit_image owinitv_image owrs_image)
 target_include_directories(hosttest PRIVATE ${OW_INCLUDE_DIRS})
+target_compile_definitions(hosttest PRIVATE ${CIS_DEV_TRUST_DEFS})
 target_compile_options(hosttest PRIVATE
     -std=c99 -Wall -Wextra -Werror -fno-pie -g -DOW_HOST_HAL
 )
@@ -314,3 +387,36 @@ target_link_options(hosttest PRIVATE -mconsole)
 
 enable_testing()
 add_test(NAME hosttest COMMAND hosttest)
+
+# ==============================================================================
+# Cross-implementation crypto cross-check
+# ==============================================================================
+# hosttest proves the C implementation matches tools/hosttest/crypto_vectors.h,
+# which tools/cis_sign.py generated.  That generator is itself only trustworthy
+# if the Python model is right, so the model gets its own test: it re-derives the
+# field and group arithmetic and checks itself against Python's own bignums.
+#
+# A C binary cannot substitute for this, because the point of the Python model is
+# that it is an independent derivation.  Running it from C would compare the C
+# against itself.  So it is a separate test that invokes the reference model, and
+# it is registered with CTest so `ctest` still covers it -- which is the point of
+# putting it here rather than leaving it as a manual script.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME crypto_reference_model
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tools/cis_sign.py selftest)
+    # The field sweep is 4800 cases through the Python model; it belongs to
+    # tools/fieldref.py, which is where the operand pairs live.
+    add_test(NAME crypto_field_reference
+             COMMAND ${Python3_EXECUTABLE}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/tools/fieldref.py)
+    set_tests_properties(crypto_reference_model crypto_field_reference
+                         PROPERTIES TIMEOUT 900)
+else()
+    message(WARNING
+        "Python3 not found: the cross-implementation crypto checks "
+        "(crypto_reference_model, crypto_field_reference) will not run under "
+        "ctest.  hosttest still runs, but it would then be the only crypto "
+        "coverage.")
+endif()

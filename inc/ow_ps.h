@@ -19,6 +19,10 @@
 #include "ow_types.h"
 #include "ow_object.h"
 #include "ow_memory.h"
+/* For OW_CIS_VERDICT, returned by OwPsLastCisVerdict().  ow_cis.h includes only
+ * ow_types.h and ow_sha256.h, so this is not a cycle -- cis_core.c includes this
+ * header and ow_cis.h knows nothing about processes. */
+#include "ow_cis.h"
 
 /* ---- Compile-time limits ------------------------------------------------ */
 #define OW_PS_MAX_PROCESSES     64U
@@ -176,9 +180,38 @@ void          OwPsTerminateProcess(OW_PROCESS_OBJECT* Proc, uint64_t ExitStatus)
  * arena any more -- code lands executable and every data section lands
  * execute-disabled.  On success Proc->EntryPoint is a user-window virtual
  * address ready for OwPsLaunchUserImage. */
+/* Maps a verified image.  Refuses unless OwCisVerifyImage returns TRUSTED.
+ *
+ * On refusal nothing is mapped, no VAD is published, and Proc->EntryPoint stays
+ * 0: the CIS gate runs before the first frame charge, so there is no partial
+ * state for the caller to unwind.  The returned OW_STATUS is distinct per CIS
+ * verdict (OW_ERR_CIS_UNSIGNED, _BAD_SIGNATURE, _UNKNOWN_KEY, _KEY_REVOKED,
+ * _DIGEST_MISMATCH, _MALFORMED, _POLICY, _ERROR); call OwPsLastCisVerdict() for
+ * the untranslated enum.
+ *
+ * ImageSize is the caller's own count of bytes in hand, not a value read from
+ * the image.  A caller that passes an attacker-influenced size here is handing
+ * the loader a buffer it cannot vouch for.
+ *
+ * RecordFlags says WHY the load is happening -- OW_CIS_RECORD_BOOT for the
+ * kernel's own hand-off, OW_CIS_RECORD_SPAWN for OW_SYS_PS_SPAWN_OWX -- and is
+ * recorded verbatim in the measurement entry.  It is a parameter rather than
+ * something derived from Proc because the loader cannot tell those two apart by
+ * looking: both arrive as an ordinary process object, and a caller that
+ * hardcoded the boot provenance would have the measurement log asserting that a
+ * userspace spawn came from the kernel.  Nothing here consults it to decide
+ * whether to verify; an unrecognised value is refused rather than ignored, so a
+ * caller that grows a third path has to name it instead of silently falling
+ * through as something else. */
 OW_STATUS    OwPsLoadImage(OW_PROCESS_OBJECT* Proc,
                            const uint8_t* OwxBuffer,
-                           uint32_t OwxSize);
+                           uint32_t OwxSize,
+                           uint32_t RecordFlags);
+
+/* The CIS verdict from the most recent OwPsLoadImage call, untranslated.
+ * OW_CIS_VERDICT_NONE before the first load.  Set on failure as well as on
+ * success, so a refused load reports its own reason. */
+OW_CIS_VERDICT OwPsLastCisVerdict(void);
 
 /* Scheduler.  Frame is a pointer to the ISR frame (ow_hal_frame_t*) cast to
  * void* to avoid pulling in hal/idt.h into this public header. */

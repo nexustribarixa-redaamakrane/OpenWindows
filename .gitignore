@@ -1,6 +1,9 @@
 # CMake and local build output
 /build/
-/build-cmake/
+# One pattern for every out-of-tree build directory, so that a second
+# configuration (for example a CIS_DEV_TRUST=ON tree used to check that
+# switching modes really re-signs) cannot end up staged by accident.
+/build-*/
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -26,6 +29,21 @@ compile_commands.json
 # Generated embedded image and checksum artifacts
 /boot/owinit_image.h
 /boot/owinit_image.chk
+/emergency/owinitv_image.h
+/emergency/owrs_image.h
+
+# Records the CIS_DEV_TRUST setting the generated images were built with.  Its
+# only job is to change its own timestamp when the setting changes, so make can
+# tell; committing it would pin one build configuration to the repository.
+/emergency/.cis_dev_trust
+/emergency/.cis_dev_trust.new
+
+# NOTE: tools/hosttest/crypto_vectors.h and tools/hosttest/cis_fixtures.h are
+# generated, and are tracked on purpose.  No build rule regenerates them, so
+# without them committed a fresh clone cannot build hosttest at all.  Refresh
+# them with:
+#   python tools/gen_crypto_vectors.py > tools/hosttest/crypto_vectors.h
+#   python tools/gen_cis_fixtures.py    > tools/hosttest/cis_fixtures.h
 
 # Local VM and emulator output
 .vbox/

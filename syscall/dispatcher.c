@@ -118,7 +118,12 @@ static OW_PROCESS_OBJECT *spawn_owx_image(const char *image_name,
   if (proc == NULL)
     return (OW_PROCESS_OBJECT *)0;
 
-  if (ow_status_error(OwPsLoadImage(proc, s_spawn_image, len))) {
+  /* Provenance is named, not inferred.  This is OW_SYS_PS_SPAWN_OWX arriving
+   * from CPL3, and it is recorded as a spawn rather than as a boot: a userspace
+   * image arriving through the kernel's init path is exactly the confusion this
+   * distinction exists to prevent. */
+  if (ow_status_error(OwPsLoadImage(proc, s_spawn_image, len,
+                                    (uint32_t)OW_CIS_RECORD_SPAWN))) {
     /* The process object exists but holds no image, so it can never be entered;
      * retire it rather than leaving a zombie in the table that counts against
      * OW_PS_MAX_PROCESSES. */

@@ -93,7 +93,8 @@ static const OW_FEATURE_NAME k_FeatureNames[] = {
     { OW_RUNLVL_F_SENTINEL,  "SENTINEL" },
     { OW_RUNLVL_F_SYSCALL,   "SYSCALL" },
     { OW_RUNLVL_F_SHELL,     "SHELL" },
-    { OW_RUNLVL_F_AI,        "AI" }
+    { OW_RUNLVL_F_AI,        "AI" },
+    { OW_RUNLVL_F_CIS,       "CIS" },
 };
 #define OW_FEATURE_NAME_COUNT \
     ((uint32_t)(sizeof(k_FeatureNames) / sizeof(k_FeatureNames[0])))

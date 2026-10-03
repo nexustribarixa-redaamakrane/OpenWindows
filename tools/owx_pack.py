@@ -234,12 +234,15 @@ def main():
     args = sys.argv[1:]
     if len(args) < 2:
         print('usage: owx_pack.py <kernel.pe> <out.owx> '
-              '[--subsystem 0x01] [--flags 0x09]')
+              '[--subsystem 0x01] [--flags 0x09] [--sign-dev]')
         sys.exit(2)
 
     in_path, out_path = args[0], args[1]
     subsystem = OWX_SUBSYSTEM_NATIVE
     flags = OWX_FLAG_PRIVILEGED | OWX_FLAG_SUPERUNICODE
+    sign_dev = False
+    cis_licence = 'MIT'
+    cis_copyright = '(c) OpenWindows'
 
     i = 2
     while i < len(args):
@@ -247,6 +250,18 @@ def main():
             subsystem = int(args[i + 1], 0)
         elif args[i] == '--flags' and i + 1 < len(args):
             flags = int(args[i + 1], 0)
+        elif args[i] == '--sign-dev':
+            # Append a CICB signed with the development image key from
+            # tools/cis_block.py.  The seed is public and fixed; what makes this
+            # safe is that a build only accepts this key when it was configured
+            # with CIS_DEV_TRUST, so a default build refuses the result.
+            sign_dev = True
+            i += 1
+            continue
+        elif args[i] == '--cis-licence' and i + 1 < len(args):
+            cis_licence = args[i + 1]
+        elif args[i] == '--cis-copyright' and i + 1 < len(args):
+            cis_copyright = args[i + 1]
         i += 2
 
     with open(in_path, 'rb') as f:
@@ -344,11 +359,40 @@ def main():
     header_checksum = crc32c(bytes(blob[0x10:0x100]))     # as stored (incl. image_checksum)
     struct.pack_into('<I', blob, 0x0C, header_checksum)
 
+    # ---- CIS block ---------------------------------------------------------
+    #
+    # Appended *after* the OWX image is final and after both CRC32c fields are
+    # computed.  The header's image_size stays at the OWX image length, which is
+    # exactly the range the CIS digest covers and exactly the range the loader
+    # maps; the block occupies [image_size, file_size).  Those are two different
+    # lengths on purpose and conflating them is the bug this comment exists to
+    # prevent -- see inc/ow_cis_format.h on ImageSize vs FileSize.
+    #
+    # The CRC32c fields must not cover the block: they are the OWX structural
+    # checksums and the loader validates them over the image, and a trailer
+    # folded into image_checksum would make the OWX checksum depend on the
+    # signature over the OWX.
+    cis_block_bytes = b''
+    if sign_dev:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import cis_block
+
+        cis_block_bytes = cis_block.build_signed_block(
+            cis_block.DEV_IMAGE_SEED, bytes(blob), cis_licence, cis_copyright,
+            declared_image_size=image_size)
+
+    artifact = bytes(blob) + cis_block_bytes
+
     with open(out_path, 'wb') as f:
-        f.write(bytes(blob))
+        f.write(artifact)
 
     # Generate openwinkrnl.chk plaintext checksum file containing SHA-256 hex
-    file_bytes = bytes(blob)
+    #
+    # Over the whole artifact as written, block included.  A .chk names a file on
+    # disk, and the file on disk is image||block; hashing only the image would
+    # leave two different OWX files with one checksum, which is the ambiguity the
+    # chk-to-one-image rule below was written to remove.
+    file_bytes = artifact
     file_len = len(file_bytes)
     file_crc = crc32c(file_bytes)
     sha256_hex = hashlib.sha256(file_bytes).hexdigest()
@@ -375,11 +419,19 @@ def main():
 
     print('OWX packaged:')
     print(f'  input   : {in_path}')
-    print(f'  output  : {out_path} ({len(blob)} bytes)')
+    print(f'  output  : {out_path} ({len(artifact)} bytes)')
     print(f'  chk     : {chk_path} ({len(chk_text)} bytes)')
     print(f'  base    : 0x{image_base:X}  entry : 0x{image_base + entry_rva:X} '
           f'(rva 0x{entry_rva:X})')
     print(f'  subsys  : 0x{subsystem:X}  flags : 0x{flags:X}')
+    print(f'  image   : {image_size} bytes (OWX image_size; the loader maps and '
+          f'CIS authenticates exactly this much)')
+    if cis_block_bytes:
+        print(f'  cis     : {len(cis_block_bytes)} bytes signed block, '
+              f'key id {cis_block.dev_key_id().hex()} (dev image key)')
+    else:
+        print('  cis     : none (this image will be refused by a CIS-gated '
+              'loader)')
     print(f'  sections:')
     for st, sflags, sfile, svaddr, ssize, scrc in owx_sections:
         print(f'    type=0x{st:X} flags=0x{sflags:08X} off=0x{sfile:X} '

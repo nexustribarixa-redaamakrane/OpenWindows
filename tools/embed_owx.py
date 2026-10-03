@@ -42,6 +42,12 @@ def main():
                         help="include guard for the generated header")
     parser.add_argument("--note", default="",
                         help="leading comment describing the image's origin")
+    parser.add_argument("--pack-arg", action="append", default=[],
+                        metavar="ARG",
+                        help="extra argument forwarded to the packer, verbatim. "
+                             "Repeatable.  Used to pass --sign-dev without this "
+                             "tool needing to know what any particular packer "
+                             "flag means.")
     args = parser.parse_args()
 
     input_path = pathlib.Path(args.input)
@@ -55,7 +61,7 @@ def main():
         packaged = output_path.with_suffix(".owx")
         subprocess.run(
             [sys.executable, args.packer, str(input_path), str(packaged),
-             "--subsystem", args.subsystem],
+             "--subsystem", args.subsystem] + args.pack_arg,
             check=True,
         )
         data = packaged.read_bytes()
