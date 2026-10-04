@@ -149,6 +149,8 @@
 #define OW_CIS_TAG_CONTENT_DIGEST 0x0004u /* SHA-256, 32 bytes,  required */
 #define OW_CIS_TAG_COPYRIGHT      0x0005u /* notice text,        required */
 #define OW_CIS_TAG_BUILD_ID       0x0006u /* text,               optional */
+#define OW_CIS_TAG_POLICY_CLASS   0x0007u /* text,               optional */
+#define OW_CIS_TAG_SOURCE_DIGEST  0x0008u /* SHA-256, 32 bytes,  optional */
 
 /* Only one digest algorithm exists.  Naming it in the block rather than fixing
  * it means a future algorithm is a version bump with a stated intent, not a
@@ -214,6 +216,10 @@ typedef struct _OW_CIS_BLOCK {
     uint32_t       CopyrightSize;
     const uint8_t* BuildId;     /* NULL when absent */
     uint32_t       BuildIdSize;
+    const uint8_t* PolicyClass; /* NULL when absent, e.g. "CORE_KERNEL" */
+    uint32_t       PolicyClassSize;
+    const uint8_t* SourceDigest;/* NULL when absent, 32 bytes SHA-256 */
+    uint32_t       SourceDigestSize;
 
     uint32_t       TagCount;
 } OW_CIS_BLOCK;

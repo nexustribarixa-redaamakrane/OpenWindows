@@ -120,3 +120,71 @@ OW_STATUS OwSentinelVerifyKernelChecksum(void) {
     return OW_SUCCESS;
 }
 
+#include "../inc/ow_cis.h"
+#include "../inc/ow_owx.h"
+
+OW_STATUS OwSentinelVerifyKernelProvenance(const void* Image, uint32_t ImageSize, uint32_t Available) {
+    OW_CIS_VERDICT verdict;
+
+    if (!OwCisIsReady()) {
+        ow_kprintf("[SENTINEL] CIS subsystem is not ready - kernel provenance cannot be verified\r\n");
+        return OW_ERR_CIS_ERROR;
+    }
+
+    if (Image == (const void*)0 || ImageSize == 0u || Available < ImageSize) {
+        ow_kprintf("[SENTINEL] Invalid kernel image parameters\r\n");
+        return OW_ERR_INVALID_PARAM;
+    }
+
+    verdict = OwCisVerifyImage(Image, ImageSize, Available,
+                               OWX_SUBSYSTEM_NATIVE, 0u,
+                               OW_KERNEL_IMG_NAME, (uint32_t)OW_CIS_RECORD_BOOT);
+
+    if (verdict != OW_CIS_VERDICT_TRUSTED) {
+        ow_kprintf("[SENTINEL] CRITICAL: kernel provenance/license policy failed: %s\r\n",
+                   OwCisVerdictName(verdict));
+        OwDiagBanHammer(OW_B_SENTINEL_INTEGRITY_FAIL, "sentinel",
+                        "Kernel provenance or license policy verification failed");
+        return OW_B_SENTINEL_INTEGRITY_FAIL;
+    }
+
+    ow_kprintf("[SENTINEL] Kernel provenance & CORE_KERNEL GPL policy verified (OK)\r\n");
+    return OW_SUCCESS;
+}
+
+OW_STATUS OwSentinelVerifyRecoveryKernel(const void* Image, uint32_t FileSize) {
+    const owx_header_t* hdr;
+    OW_CIS_VERDICT verdict;
+
+    if (!OwCisIsReady()) {
+        ow_kprintf("[SENTINEL] CIS subsystem not ready for recovery verification\r\n");
+        return OW_ERR_CIS_ERROR;
+    }
+
+    if (Image == (const void*)0 || FileSize < OWX_HEADER_SIZE) {
+        ow_kprintf("[SENTINEL] Recovery image too small or null\r\n");
+        return OW_ERR_INVALID_PARAM;
+    }
+
+    hdr = (const owx_header_t*)Image;
+    if (hdr->magic != OWX_MAGIC || hdr->image_size > FileSize) {
+        ow_kprintf("[SENTINEL] Recovery image has invalid OWX header\r\n");
+        return OW_ERR_CORRUPT;
+    }
+
+    verdict = OwCisVerifyImage(Image, hdr->image_size, FileSize,
+                               OWX_SUBSYSTEM_RECOVERY, 0u,
+                               "recovery_kernel", (uint32_t)OW_CIS_RECORD_BOOT);
+
+    if (verdict != OW_CIS_VERDICT_TRUSTED) {
+        ow_kprintf("[SENTINEL] Recovery kernel rejected by CIS policy: %s\r\n",
+                   OwCisVerdictName(verdict));
+        OwDiagBanHammer(OW_B_SENTINEL_INTEGRITY_FAIL, "sentinel",
+                        "Recovery kernel verification failed policy");
+        return OW_B_SENTINEL_INTEGRITY_FAIL;
+    }
+
+    ow_kprintf("[SENTINEL] Recovery kernel verified under recovery policy (OK)\r\n");
+    return OW_SUCCESS;
+}
+

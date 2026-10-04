@@ -122,6 +122,50 @@ static bool cis_license_permitted(const uint8_t* License, uint32_t Size) {
     return false;
 }
 
+/* Evaluate active policy class and license compliance.
+ *
+ * For CORE_KERNEL:
+ *   - must declare policy class "CORE_KERNEL"
+ *   - must carry an authenticated "GPL-3.0-or-later" license expression
+ *   - must carry an authenticated 32-byte source manifest digest
+ *
+ * For generic/userspace:
+ *   - must satisfy cis_accepted_licenses table (MIT, Apache-2.0, BSD)
+ */
+static bool cis_policy_permitted(const OW_CIS_BLOCK* Block, uint32_t Subsystem) {
+    if (!Block) {
+        return false;
+    }
+
+    /* An image declaring CORE_KERNEL or mapped as the native kernel subsystem
+     * must satisfy the CORE_KERNEL copyleft policy. */
+    if (Block->PolicyClass != (const uint8_t*)0 || Subsystem == OWX_SUBSYSTEM_NATIVE) {
+        if (Block->PolicyClass == (const uint8_t*)0 ||
+            !cis_equals_literal(Block->PolicyClass, Block->PolicyClassSize, "CORE_KERNEL")) {
+            ow_kprintf("[CIS] policy refused: kernel image missing or invalid CORE_KERNEL policy class\r\n");
+            return false;
+        }
+
+        /* CORE_KERNEL policy requires GPL copyleft compliance. */
+        if (!cis_equals_literal(Block->License, Block->LicenseSize, "GPL-3.0-or-later")) {
+            ow_kprintf("[CIS] policy refused: CORE_KERNEL requires GPL-3.0-or-later\r\n");
+            return false;
+        }
+
+        /* CORE_KERNEL policy requires bound source/license manifest provenance. */
+        if (Block->SourceDigest == (const uint8_t*)0 ||
+            Block->SourceDigestSize != OW_SHA256_DIGEST_SIZE) {
+            ow_kprintf("[CIS] policy refused: CORE_KERNEL requires source manifest digest\r\n");
+            return false;
+        }
+
+        return true;
+    }
+
+    /* Userspace and subsystem-level policy (MIT, Apache-2.0, BSD). */
+    return cis_license_permitted(Block->License, Block->LicenseSize);
+}
+
 /* Does this key carry the authority to sign an image of this kind?
  *
  * Checked rather than assumed from the key being pinned.  A key provisioned for
@@ -360,8 +404,8 @@ OW_CIS_VERDICT OwCisVerifyImage(const void* Image, uint32_t ImageSize,
                           SourcePid, Flags, OW_CIS_VERDICT_REJECT_POLICY,
                           OW_SUCCESS);
     }
-    if (cis_license_permitted(block.License, block.LicenseSize) == false) {
-        ow_kprintf("[CIS] %s refused: licence is not permitted\r\n", ImageName);
+    if (cis_policy_permitted(&block, Subsystem) == false) {
+        ow_kprintf("[CIS] %s refused: policy refused\r\n", ImageName);
         return cis_record(ImageName, actual, ImageSize, block.KeyId, Subsystem,
                           SourcePid, Flags, OW_CIS_VERDICT_REJECT_POLICY,
                           OW_SUCCESS);

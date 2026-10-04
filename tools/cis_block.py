@@ -39,6 +39,8 @@ TAG_KEY_ID = 0x0003
 TAG_CONTENT_DIGEST = 0x0004
 TAG_COPYRIGHT = 0x0005
 TAG_BUILD_ID = 0x0006
+TAG_POLICY_CLASS = 0x0007
+TAG_SOURCE_DIGEST = 0x0008
 
 DIGEST_ALGO_SHA256 = 1
 
@@ -82,10 +84,10 @@ def tlv(tag, value):
     return struct.pack("<HH", tag, len(value)) + value
 
 
-def build_manifest(license_expr, digest, key_id, copyright, build_id=None):
+def build_manifest(license_expr, digest, key_id, copyright, build_id=None,
+                   policy_class=None, source_digest=None):
     """Tags strictly ascending, which is the canonical order the parser requires.
-    Build-id (6) sorts after copyright (5), so it is simply appended when
-    present."""
+    Build-id (6), policy_class (7), and source_digest (8) sort after copyright (5)."""
     out = bytearray(MANIFEST_PREFIX)
     out += b"\0" * (32 - len(MANIFEST_PREFIX))
     out += tlv(TAG_LICENSE, license_expr.encode())
@@ -95,6 +97,12 @@ def build_manifest(license_expr, digest, key_id, copyright, build_id=None):
     out += tlv(TAG_COPYRIGHT, copyright.encode())
     if build_id:
         out += tlv(TAG_BUILD_ID, build_id.encode())
+    if policy_class:
+        out += tlv(TAG_POLICY_CLASS, policy_class.encode())
+    if source_digest:
+        if isinstance(source_digest, str):
+            source_digest = bytes.fromhex(source_digest)
+        out += tlv(TAG_SOURCE_DIGEST, source_digest)
     return bytes(out)
 
 
@@ -120,7 +128,8 @@ def build_block(manifest, signature):
 
 def build_signed_block(seed, image, license_expr, copyright, build_id=None,
                        key_id=None, corrupt_signature=False,
-                       corrupt_after_signing=None, declared_image_size=None):
+                       corrupt_after_signing=None, declared_image_size=None,
+                       policy_class=None, source_digest=None):
     """Return just the signed block -- no image in front of it.
 
     `image` is the OWX image whose bytes the digest covers, which is also the
@@ -135,7 +144,8 @@ def build_signed_block(seed, image, license_expr, copyright, build_id=None,
     key_id = key_id or key_id_for(pub)
     size = declared_image_size if declared_image_size is not None else len(image)
     digest = hashlib.sha256(image[:size]).digest()
-    manifest = build_manifest(license_expr, digest, key_id, copyright, build_id)
+    manifest = build_manifest(license_expr, digest, key_id, copyright, build_id,
+                              policy_class=policy_class, source_digest=source_digest)
 
     # The signature must cover the final header, so the block is built once,
     # signed, and then embedded: signing a header that is then changed would
@@ -157,7 +167,8 @@ def build_signed_block(seed, image, license_expr, copyright, build_id=None,
 
 def sign_block(seed, image, license_expr, copyright, build_id=None,
                key_id=None, corrupt_signature=False, corrupt_after_signing=None,
-               extra_trailing=b"", declared_image_size=None, file_image=None):
+               extra_trailing=b"", declared_image_size=None, file_image=None,
+               policy_class=None, source_digest=None):
     """Build image||block, signed, and return the whole file.
 
     `image` is the bytes the digest covers and the bytes the manifest is built
@@ -175,7 +186,8 @@ def sign_block(seed, image, license_expr, copyright, build_id=None,
     """
     block = build_signed_block(seed, image, license_expr, copyright, build_id,
                                 key_id, corrupt_signature, corrupt_after_signing,
-                                declared_image_size)
+                                declared_image_size, policy_class=policy_class,
+                                source_digest=source_digest)
     head = image if file_image is None else file_image
     return head + block + extra_trailing
 

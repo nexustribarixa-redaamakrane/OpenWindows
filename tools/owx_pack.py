@@ -243,6 +243,8 @@ def main():
     sign_dev = False
     cis_licence = 'MIT'
     cis_copyright = '(c) OpenWindows'
+    cis_policy_class = None
+    cis_source_digest = None
 
     i = 2
     while i < len(args):
@@ -262,6 +264,20 @@ def main():
             cis_licence = args[i + 1]
         elif args[i] == '--cis-copyright' and i + 1 < len(args):
             cis_copyright = args[i + 1]
+        elif args[i] == '--policy-class' and i + 1 < len(args):
+            cis_policy_class = args[i + 1]
+            if cis_policy_class == 'CORE_KERNEL' and cis_licence == 'MIT':
+                cis_licence = 'GPL-3.0-or-later'
+        elif args[i] == '--source-digest' and i + 1 < len(args):
+            val = args[i + 1]
+            if os.path.isfile(val):
+                with open(val, 'r', encoding='utf-8') as sf:
+                    cis_source_digest = sf.read().strip()
+            else:
+                cis_source_digest = val
+        elif args[i] == '--manifest' and i + 1 < len(args):
+            with open(args[i + 1], 'rb') as mf:
+                cis_source_digest = hashlib.sha256(mf.read()).hexdigest()
         i += 2
 
     with open(in_path, 'rb') as f:
@@ -379,7 +395,8 @@ def main():
 
         cis_block_bytes = cis_block.build_signed_block(
             cis_block.DEV_IMAGE_SEED, bytes(blob), cis_licence, cis_copyright,
-            declared_image_size=image_size)
+            declared_image_size=image_size, policy_class=cis_policy_class,
+            source_digest=cis_source_digest)
 
     artifact = bytes(blob) + cis_block_bytes
 

@@ -140,17 +140,55 @@ TARGET = openwinkrnl.owx
 # OWX packaging parameters
 OWX_SUBSYSTEM = 0x01
 
+# Canonical source & license manifest for CORE_KERNEL policy.  Generated before
+# packing so the packer can embed the manifest's SHA-256 as the source digest.
+# The manifest is deterministic (fixed sort, canonical JSON, LF newlines), so
+# two builds from the same tree produce the same digest.
+MANIFEST_FILE    = openwinkrnl_manifest.cislm
+MANIFEST_DIGEST  = openwinkrnl_manifest.digest
+
 # ==============================================================================
 # Build Rules
 # ==============================================================================
 
 all: $(TARGET)
 
+# Generate the canonical license manifest and its digest.  Depends on the
+# source files the manifest inspects, but listing them all here would duplicate
+# the discovery logic in gen_license_manifest.py, so the phony target is
+# intentional: the manifest tool is fast and its output is deterministic.
+.PHONY: license-manifest
+license-manifest:
+	python tools/gen_license_manifest.py \
+	    --output $(MANIFEST_FILE) \
+	    --digest-out $(MANIFEST_DIGEST)
+
 # tools/owx_pack.py is a real prerequisite, not just a command-line argument.
 # The image and its openwinkrnl.chk are produced by that script, so editing the
 # packer has to invalidate both.  Without it, a change to the packer left a
 # stale .owx (and a stale .chk) in place and `make` reported "Nothing to be
 # done" -- which is how a mismatched checksum pair survived into a test run.
+#
+# When CIS_DEV_TRUST is on, the kernel image carries CORE_KERNEL policy class,
+# a GPL-3.0-or-later licence declaration, and the SHA-256 of the canonical
+# source manifest.  Without CIS_DEV_TRUST the image is unsigned anyway, so the
+# policy args are omitted -- adding them to an unsigned image would change
+# nothing about the refusal and would add a build step that has no consumer.
+ifeq ($(CIS_DEV_TRUST),1)
+$(TARGET): $(PE_IMAGE) tools/owx_pack.py tools/gen_license_manifest.py
+	$(MAKE) license-manifest
+	python tools/owx_pack.py $(PE_IMAGE) $(TARGET) \
+	    --subsystem $(OWX_SUBSYSTEM) \
+	    --policy-class CORE_KERNEL \
+	    --cis-licence GPL-3.0-or-later \
+	    --source-digest $(MANIFEST_DIGEST) \
+	    --sign-dev
+	@echo "=============================================================================="
+	@echo "  OpenWindows Kernel Build Completed Successfully!"
+	@echo "  Target: $(TARGET) | Freestanding C99 | NT-Like Object Architecture"
+	@echo "  Policy: CORE_KERNEL | License: GPL-3.0-or-later | CIS signed"
+	@echo "=============================================================================="
+else
 $(TARGET): $(PE_IMAGE) tools/owx_pack.py
 	python tools/owx_pack.py $(PE_IMAGE) $(TARGET) \
 	    --subsystem $(OWX_SUBSYSTEM)
@@ -158,6 +196,7 @@ $(TARGET): $(PE_IMAGE) tools/owx_pack.py
 	@echo "  OpenWindows Kernel Build Completed Successfully!"
 	@echo "  Target: $(TARGET) | Freestanding C99 | NT-Like Object Architecture"
 	@echo "=============================================================================="
+endif
 
 $(PE_IMAGE): $(ALL_OBJS)
 	$(CC) $(CFLAGS) -Wl,--image-base=0x200000 -o $(PE_IMAGE) $(ALL_OBJS) -lgcc
@@ -457,6 +496,7 @@ clean:
 	rm -f bancode/*.o
 	rm -rf sucs/ vip/
 	rm -f storage/*.o
+	rm -f $(MANIFEST_FILE) $(MANIFEST_DIGEST)
 	@echo "Clean completed."
 
 vm: all

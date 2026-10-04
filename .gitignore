@@ -31,6 +31,9 @@ compile_commands.json
 /boot/owinit_image.chk
 /emergency/owinitv_image.h
 /emergency/owrs_image.h
+*.cislm
+*.digest
+openwinkrnl_manifest.*
 
 # Records the CIS_DEV_TRUST setting the generated images were built with.  Its
 # only job is to change its own timestamp when the setting changes, so make can

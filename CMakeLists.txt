@@ -334,15 +334,52 @@ target_link_options(openwinkrnl_pe PRIVATE
 target_link_libraries(openwinkrnl_pe PRIVATE gcc)
 
 # Custom target: openwinkrnl.owx & openwinkrnl.chk
+#
+# When CIS_DEV_TRUST is on, the kernel image carries CORE_KERNEL policy class,
+# a GPL-3.0-or-later licence, and the SHA-256 of the canonical source manifest.
+# The manifest is generated into the CMake binary tree so it cannot collide with
+# the Makefile's copy.  Without CIS_DEV_TRUST the image is unsigned anyway, so
+# the policy args are omitted.
 set(OWX_TARGET "${CMAKE_CURRENT_BINARY_DIR}/openwinkrnl.owx")
 set(CHK_TARGET "${CMAKE_CURRENT_BINARY_DIR}/openwinkrnl.chk")
-add_custom_command(
-    OUTPUT ${OWX_TARGET} ${CHK_TARGET}
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
-            $<TARGET_FILE:openwinkrnl_pe> ${OWX_TARGET} --subsystem 0x01
-    DEPENDS openwinkrnl_pe ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
-    COMMENT "Packaging OpenWindows kernel image (OWX1 native) & generating openwinkrnl.chk..."
-)
+set(MANIFEST_FILE "${CMAKE_CURRENT_BINARY_DIR}/openwinkrnl_manifest.cislm")
+set(MANIFEST_DIGEST "${CMAKE_CURRENT_BINARY_DIR}/openwinkrnl_manifest.digest")
+
+if(CIS_DEV_TRUST)
+    add_custom_command(
+        OUTPUT ${MANIFEST_FILE} ${MANIFEST_DIGEST}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_license_manifest.py
+                --repo-root ${CMAKE_CURRENT_SOURCE_DIR}
+                --output ${MANIFEST_FILE}
+                --digest-out ${MANIFEST_DIGEST}
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/gen_license_manifest.py
+        COMMENT "Generating canonical license manifest for CORE_KERNEL policy..."
+        VERBATIM
+    )
+    add_custom_target(license_manifest DEPENDS ${MANIFEST_FILE} ${MANIFEST_DIGEST})
+
+    add_custom_command(
+        OUTPUT ${OWX_TARGET} ${CHK_TARGET}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+                $<TARGET_FILE:openwinkrnl_pe> ${OWX_TARGET} --subsystem 0x01
+                --policy-class CORE_KERNEL
+                --cis-licence GPL-3.0-or-later
+                --source-digest ${MANIFEST_DIGEST}
+                --sign-dev
+        DEPENDS openwinkrnl_pe license_manifest
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+                ${CMAKE_CURRENT_SOURCE_DIR}/tools/cis_block.py
+        COMMENT "Packaging OpenWindows kernel (OWX1 native, CORE_KERNEL policy) & generating openwinkrnl.chk..."
+    )
+else()
+    add_custom_command(
+        OUTPUT ${OWX_TARGET} ${CHK_TARGET}
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+                $<TARGET_FILE:openwinkrnl_pe> ${OWX_TARGET} --subsystem 0x01
+        DEPENDS openwinkrnl_pe ${CMAKE_CURRENT_SOURCE_DIR}/tools/owx_pack.py
+        COMMENT "Packaging OpenWindows kernel image (OWX1 native) & generating openwinkrnl.chk..."
+    )
+endif()
 add_custom_target(openwinkrnl_owx ALL DEPENDS ${OWX_TARGET} ${CHK_TARGET})
 
 # Copy openwinkrnl.owx and openwinkrnl.chk to source tree root for convenient runtime access

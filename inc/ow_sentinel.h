@@ -26,6 +26,8 @@ OW_STATUS    OwFltRegisterCallback(uint32_t RequestType, OW_FLT_CALLBACK Callbac
 #define OW_KERNEL_IMG_NAME     "openwinkrnl.owx"
 
 OW_STATUS    OwSentinelVerifyKernelChecksum(void);
+OW_STATUS    OwSentinelVerifyKernelProvenance(const void* Image, uint32_t ImageSize, uint32_t Available);
+OW_STATUS    OwSentinelVerifyRecoveryKernel(const void* Image, uint32_t FileSize);
 
 #endif /* OW_SENTINEL_H */
 

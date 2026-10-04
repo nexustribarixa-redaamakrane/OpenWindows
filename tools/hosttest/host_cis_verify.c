@@ -861,6 +861,99 @@ static void test_fixtures_are_structurally_valid(void) {
     }
 }
 
+/* CORE_KERNEL copyleft policy verification:
+ *
+ * An image running with native subsystem (OWX_SUBSYSTEM_NATIVE) or claiming
+ * policy class CORE_KERNEL must:
+ * 1. Declare policy class "CORE_KERNEL"
+ * 2. Carry an authenticated license of "GPL-3.0-or-later"
+ * 3. Carry an authenticated 32-byte source manifest digest (TAG_SOURCE_DIGEST)
+ * 4. Refuse non-GPL licenses (e.g. MIT) even when signed by a release key
+ * 5. Refuse missing source digest even when signed by a release key
+ * 6. Refuse native subsystem images lacking explicit CORE_KERNEL policy class
+ */
+static void test_core_kernel_policy(void) {
+    const ow_cis_fixture_t* f_good = fixture_by_name("good_kernel");
+    const ow_cis_fixture_t* f_mit = fixture_by_name("kernel_mit_refused");
+    const ow_cis_fixture_t* f_nodig = fixture_by_name("kernel_no_source_digest");
+    const ow_cis_fixture_t* f_nopolic = fixture_by_name("kernel_no_policy_class");
+    OW_CIS_BLOCK block;
+    OW_CIS_FORMAT_STATUS fmt;
+    OW_CIS_VERDICT v;
+
+    printf("\n--- CIS verification: CORE_KERNEL copyleft policy ---\n");
+
+    if (f_good == NULL || f_mit == NULL || f_nodig == NULL || f_nopolic == NULL) {
+        v_fail("core_kernel", "one or more CORE_KERNEL fixtures missing");
+        return;
+    }
+
+    /* 1. Good kernel: TRUSTED */
+    if (!trust_only(f_good)) {
+        v_fail("core_kernel", "could not pin release key for good_kernel");
+        return;
+    }
+    v = verdict_for(f_good);
+    v_check("good_kernel is TRUSTED", v == OW_CIS_VERDICT_TRUSTED, true);
+    v_check("good_kernel allows execution", OwCisVerdictAllowsExecution(v), true);
+
+    /* Verify block contents parsed from good_kernel */
+    fmt = OwCisFormatParse(f_good->File + f_good->ImageSize,
+                           f_good->FileSize - f_good->ImageSize, &block);
+    v_check("good_kernel block parses successfully", fmt == OW_CIS_FORMAT_OK, true);
+    v_check("good_kernel has PolicyClass", block.PolicyClass != NULL, true);
+    v_check("good_kernel PolicyClass is CORE_KERNEL",
+            block.PolicyClass && block.PolicyClassSize == 11 &&
+            memcmp(block.PolicyClass, "CORE_KERNEL", 11) == 0, true);
+    v_check("good_kernel License is GPL-3.0-or-later",
+            block.License && block.LicenseSize == 16 &&
+            memcmp(block.License, "GPL-3.0-or-later", 16) == 0, true);
+    v_check("good_kernel has SourceDigest", block.SourceDigest != NULL, true);
+    v_check("good_kernel SourceDigest is 32 bytes",
+            block.SourceDigestSize == OW_SHA256_DIGEST_SIZE, true);
+
+    /* 2. MIT kernel: REJECT_POLICY */
+    if (!trust_only(f_mit)) {
+        v_fail("core_kernel", "could not pin release key for kernel_mit_refused");
+        return;
+    }
+    v = verdict_for(f_mit);
+    v_check("kernel_mit_refused produces REJECT_POLICY",
+            v == OW_CIS_VERDICT_REJECT_POLICY, true);
+    v_check("kernel_mit_refused denies execution",
+            OwCisVerdictAllowsExecution(v), false);
+
+    /* 3. Missing source digest: REJECT_POLICY */
+    if (!trust_only(f_nodig)) {
+        v_fail("core_kernel", "could not pin release key for kernel_no_source_digest");
+        return;
+    }
+    v = verdict_for(f_nodig);
+    v_check("kernel_no_source_digest produces REJECT_POLICY",
+            v == OW_CIS_VERDICT_REJECT_POLICY, true);
+    v_check("kernel_no_source_digest denies execution",
+            OwCisVerdictAllowsExecution(v), false);
+
+    /* 4. Native subsystem missing policy class: REJECT_POLICY */
+    if (!trust_only(f_nopolic)) {
+        v_fail("core_kernel", "could not pin release key for kernel_no_policy_class");
+        return;
+    }
+    v = verdict_for(f_nopolic);
+    v_check("kernel_no_policy_class produces REJECT_POLICY",
+            v == OW_CIS_VERDICT_REJECT_POLICY, true);
+    v_check("kernel_no_policy_class denies execution",
+            OwCisVerdictAllowsExecution(v), false);
+
+    /* 5. Subsystem cross-checks:
+     * A non-native subsystem image that declares PolicyClass "CORE_KERNEL" must
+     * STILL be evaluated under CORE_KERNEL policy rules. */
+    v = OwCisVerifyImage(f_mit->File, f_mit->ImageSize, f_mit->FileSize,
+                         OWX_SUBSYSTEM_BOOT, 0u, "kernel_mit_boot_subsys", 0u);
+    v_check("CORE_KERNEL policy enforced even if subsystem is BOOT",
+            v == OW_CIS_VERDICT_REJECT_POLICY, true);
+}
+
 int test_cis_verify_run(int* out_passed) {
     printf("\n=== Copyleft Integrity Safeguard: verification ===\n");
 
@@ -875,6 +968,7 @@ int test_cis_verify_run(int* out_passed) {
     test_fixtures_are_structurally_valid();
 
     test_each_fixture_verdict();
+    test_core_kernel_policy();
     test_trust_store_gates_trusted();
     test_key_id_selects_the_key();
     test_revocation_dominates_signature();

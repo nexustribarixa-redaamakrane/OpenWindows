@@ -213,6 +213,7 @@ static bool cis_tag_is_text(uint16_t Tag) {
     case OW_CIS_TAG_LICENSE:
     case OW_CIS_TAG_COPYRIGHT:
     case OW_CIS_TAG_BUILD_ID:
+    case OW_CIS_TAG_POLICY_CLASS:
         return true;
     default:
         return false;
@@ -226,6 +227,7 @@ static uint32_t cis_tag_fixed_size(uint16_t Tag) {
     case OW_CIS_TAG_DIGEST_ALGO:    return CIS_SIZE_U32;
     case OW_CIS_TAG_KEY_ID:         return OW_CIS_KEY_ID_SIZE;
     case OW_CIS_TAG_CONTENT_DIGEST: return OW_SHA256_DIGEST_SIZE;
+    case OW_CIS_TAG_SOURCE_DIGEST:  return OW_SHA256_DIGEST_SIZE;
     default:                        return 0u;
     }
 }
@@ -338,6 +340,14 @@ static OW_CIS_FORMAT_STATUS cis_scan_tlvs(const uint8_t* Manifest,
         case OW_CIS_TAG_BUILD_ID:
             Out->BuildId = value;
             Out->BuildIdSize = (uint32_t)value_size;
+            break;
+        case OW_CIS_TAG_POLICY_CLASS:
+            Out->PolicyClass = value;
+            Out->PolicyClassSize = (uint32_t)value_size;
+            break;
+        case OW_CIS_TAG_SOURCE_DIGEST:
+            Out->SourceDigest = value;
+            Out->SourceDigestSize = (uint32_t)value_size;
             break;
         default:
             /* Unknown tag, accepted and not relied on.  The bounds above have

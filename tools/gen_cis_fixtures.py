@@ -47,6 +47,8 @@ TAG_KEY_ID = cis_block.TAG_KEY_ID
 TAG_CONTENT_DIGEST = cis_block.TAG_CONTENT_DIGEST
 TAG_COPYRIGHT = cis_block.TAG_COPYRIGHT
 TAG_BUILD_ID = cis_block.TAG_BUILD_ID
+TAG_POLICY_CLASS = cis_block.TAG_POLICY_CLASS
+TAG_SOURCE_DIGEST = cis_block.TAG_SOURCE_DIGEST
 
 DIGEST_ALGO_SHA256 = cis_block.DIGEST_ALGO_SHA256
 
@@ -55,6 +57,7 @@ OWX_HEADER_SIZE = 256
 OWX_FORMAT_VERSION = 1
 OWX_SECTION_ENTRY_SIZE = 40  # packed owx_section_entry_t
 OWX_SECTION_CODE = 0x01
+OWX_SUBSYSTEM_NATIVE = 0x01
 OWX_SUBSYSTEM_BOOT = 0x04
 OWX_SUBSYSTEM_RECOVERY = 0x05
 OWX_TARGET_ARCH_X64 = 3
@@ -179,9 +182,11 @@ def tlv(tag, value):
     return cis_block.tlv(tag, value)
 
 
-def build_manifest(license_expr, digest, key_id, copyright, build_id=None):
+def build_manifest(license_expr, digest, key_id, copyright, build_id=None,
+                   policy_class=None, source_digest=None):
     return cis_block.build_manifest(license_expr, digest, key_id, copyright,
-                                    build_id)
+                                    build_id, policy_class=policy_class,
+                                    source_digest=source_digest)
 
 
 def build_block(manifest, signature):
@@ -190,11 +195,13 @@ def build_block(manifest, signature):
 
 def sign_block(seed, image, license_expr, copyright, build_id=None,
                key_id=None, corrupt_signature=False, corrupt_after_signing=None,
-               extra_trailing=b"", declared_image_size=None, file_image=None):
+               extra_trailing=b"", declared_image_size=None, file_image=None,
+               policy_class=None, source_digest=None):
     return cis_block.sign_block(
         seed, image, license_expr, copyright, build_id, key_id,
         corrupt_signature, corrupt_after_signing, extra_trailing,
-        declared_image_size, file_image)
+        declared_image_size, file_image, policy_class=policy_class,
+        source_digest=source_digest)
 
 
 def mutate_copyright_in_block(block):
@@ -211,6 +218,11 @@ def corrupt_block_magic(block):
     out = bytearray(block)
     out[0] ^= 0x01
     return bytes(out)
+
+
+# A deterministic 32-byte source digest for test fixtures.  Not computed from
+# a real manifest; the value is arbitrary but fixed.
+TEST_SOURCE_DIGEST = hashlib.sha256(b"cis-test-source-manifest-digest").digest()
 
 
 def fixtures():
@@ -257,6 +269,68 @@ def fixtures():
                    build_id="build-2026.10.1"),
         len(image),
         OWX_SUBSYSTEM_BOOT,
+        "release",
+    ))
+
+    # --- CORE_KERNEL policy fixtures ---
+    #
+    # These exercise the CORE_KERNEL copyleft policy enforcement added by the
+    # provenance/authentication feature.  The kernel subsystem (NATIVE, 0x01)
+    # triggers CORE_KERNEL enforcement whether or not a policy-class tag is
+    # present, so the fixtures cover both explicit and implicit triggering.
+
+    kernel = build_owx(OWX_SUBSYSTEM_NATIVE, seed=b"cis-fixture-kernel")
+
+    # A valid kernel: GPL-3.0-or-later, CORE_KERNEL policy, source digest present.
+    out.append((
+        "good_kernel",
+        "GPL-3.0-or-later, CORE_KERNEL policy, source digest, native subsystem",
+        "OW_CIS_VERDICT_TRUSTED",
+        sign_block(seeds["release"], kernel, "GPL-3.0-or-later",
+                   "(c) OpenWindows", policy_class="CORE_KERNEL",
+                   source_digest=TEST_SOURCE_DIGEST),
+        len(kernel),
+        OWX_SUBSYSTEM_NATIVE,
+        "release",
+    ))
+
+    # A kernel claiming CORE_KERNEL but carrying MIT (not GPL): refused by policy.
+    out.append((
+        "kernel_mit_refused",
+        "CORE_KERNEL policy with MIT licence (not GPL): refused",
+        "OW_CIS_VERDICT_REJECT_POLICY",
+        sign_block(seeds["release"], kernel, "MIT", "(c) OpenWindows",
+                   policy_class="CORE_KERNEL",
+                   source_digest=TEST_SOURCE_DIGEST),
+        len(kernel),
+        OWX_SUBSYSTEM_NATIVE,
+        "release",
+    ))
+
+    # A kernel claiming CORE_KERNEL with GPL but missing source digest: refused.
+    out.append((
+        "kernel_no_source_digest",
+        "CORE_KERNEL policy with GPL but no source digest: refused",
+        "OW_CIS_VERDICT_REJECT_POLICY",
+        sign_block(seeds["release"], kernel, "GPL-3.0-or-later",
+                   "(c) OpenWindows", policy_class="CORE_KERNEL"),
+        len(kernel),
+        OWX_SUBSYSTEM_NATIVE,
+        "release",
+    ))
+
+    # A native-subsystem image without an explicit CORE_KERNEL policy class.
+    # The subsystem alone (OWX_SUBSYSTEM_NATIVE) triggers CORE_KERNEL enforcement,
+    # and the missing policy class causes the enforcement to refuse.
+    out.append((
+        "kernel_no_policy_class",
+        "native subsystem without explicit policy class: refused",
+        "OW_CIS_VERDICT_REJECT_POLICY",
+        sign_block(seeds["release"], kernel, "GPL-3.0-or-later",
+                   "(c) OpenWindows",
+                   source_digest=TEST_SOURCE_DIGEST),
+        len(kernel),
+        OWX_SUBSYSTEM_NATIVE,
         "release",
     ))
 
