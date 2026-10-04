@@ -10,16 +10,8 @@ $FloppyDir = Split-Path $Floppy -Parent
 $SerialLog = Join-Path $FloppyDir "owx_serial.log"
 
 function Find-VBoxManage {
-    $candidates = @(
-        "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe",
-        "C:\Program Files\VirtualBox\VBoxManage.exe",
-        "$env:USERPROFILE\scoop\apps\virtualbox\current\VBoxManage.exe"
-    )
     $cmd = Get-Command "VBoxManage" -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
-    foreach ($c in $candidates) {
-        if (Test-Path $c) { return $c }
-    }
     return $null
 }
 
@@ -46,7 +38,7 @@ if (-not $VBox) {
     Write-Host "  5. Start the VM. The floppy boots OpenWindows; the VGA console shows output."
     Write-Host ""
     Write-Host "You can also validate the exact same image under QEMU now:"
-    Write-Host "  `"C:\Program Files\qemu\qemu-system-x86_64.exe`" -fda `"$Floppy`" -boot a -nographic"
+    Write-Host "  qemu-system-x86_64 -fda `"$Floppy`" -boot a -nographic"
     exit 1
 }
 

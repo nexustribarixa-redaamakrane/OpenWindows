@@ -415,8 +415,10 @@ OWRS_SEED_OBJ    = boot/owrs_seed.o
 OWCHK_SEED_OBJ   = boot/owchk_seed.o
 SEED_OBJS        = $(OWINIT_SEED_OBJ) $(OWINITV_SEED_OBJ) $(OWRS_SEED_OBJ) $(OWCHK_SEED_OBJ)
 
-ESSENTIALS_ARTIFACTS = C:/Users/KARIMABENDA/Documents/OpenWindows-Essentials/Artifacts/Software
-OWINIT_SOURCE = $(ESSENTIALS_ARTIFACTS)/owinit.owx
+MAKEFILE_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+# Defaults to a neighboring checkout; override either variable for other layouts.
+ESSENTIALS_ARTIFACTS ?= $(MAKEFILE_ROOT)../OpenWindows-Essentials/Artifacts/Software
+OWINIT_SOURCE ?= $(ESSENTIALS_ARTIFACTS)/owinit.owx
 OWINIT_IMAGE = boot/owinit_image.owx
 OWINIT_HEADER = boot/owinit_image.h
 
@@ -596,7 +598,7 @@ vbox: $(VBOX_FLOPPY)
 # The "actual vdi" keeps the fatal Phase 5c owinit gate (validated by
 # vdi_run.ps1); only the QEMU/floppy test images carry the seed.
 # ==============================================================================
-QEMU_IMG   = "C:/Program Files/qemu/qemu-img.exe"
+QEMU_IMG  ?= qemu-img
 VDI_BYTES  = 4194304
 
 VBOX_STAGE1DISK = $(VBOX_DIR)/stage1disk.bin

@@ -63,7 +63,10 @@ endif()
 set(OWINIT_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY ${OWINIT_GENERATED_DIR})
 set(OWINIT_HEADER "${OWINIT_GENERATED_DIR}/owinit_image.h")
-set(OWINIT_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials/Artifacts/Software/owinit.owx")
+# Defaults to a neighboring checkout; override OWINIT_SOURCE for other layouts.
+set(OWINIT_SOURCE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials/Artifacts/Software/owinit.owx"
+    CACHE FILEPATH "Path to the OpenWindows-Essentials owinit.owx image")
 
 add_custom_command(
     OUTPUT ${OWINIT_HEADER}

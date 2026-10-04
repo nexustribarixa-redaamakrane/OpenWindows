@@ -18,13 +18,8 @@ if (-not (Test-Path -LiteralPath $Vdi -PathType Leaf)) {
 }
 
 if (-not $Qemu) {
-    $installedQemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
-    if (Test-Path -LiteralPath $installedQemu -PathType Leaf) {
-        $Qemu = $installedQemu
-    } else {
-        $qemuCommand = Get-Command "qemu-system-x86_64.exe" -ErrorAction SilentlyContinue
-        if ($qemuCommand) { $Qemu = $qemuCommand.Source }
-    }
+    $qemuCommand = Get-Command "qemu-system-x86_64" -ErrorAction SilentlyContinue
+    if ($qemuCommand) { $Qemu = $qemuCommand.Source }
 }
 if (-not $Qemu -or -not (Test-Path -LiteralPath $Qemu -PathType Leaf)) {
     Write-Host "qemu-system-x86_64 not found; pass -Qemu <path> or add QEMU to PATH"

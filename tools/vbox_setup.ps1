@@ -7,14 +7,21 @@
 param(
     [string]$Vdi = "$env:TEMP\openwinkrnl_vbox\openwinkrnl.vdi",
     [string]$VmName = "OpenWindows",
-    [string]$VboxManage = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe",
+    [string]$VboxManage,
     [switch]$Start
 )
 
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $false
 
-if (-not (Test-Path $VboxManage)) { Write-Error "VBoxManage not found at $VboxManage"; exit 1 }
+if (-not $VboxManage) {
+    $vboxCommand = Get-Command "VBoxManage" -ErrorAction SilentlyContinue
+    if ($vboxCommand) { $VboxManage = $vboxCommand.Source }
+}
+if (-not $VboxManage -or -not (Test-Path -LiteralPath $VboxManage)) {
+    Write-Error "VBoxManage not found; pass -VboxManage <path> or add VirtualBox to PATH"
+    exit 1
+}
 if (-not (Test-Path $Vdi)) { Write-Error "VDI not found: $Vdi (run 'make vdi' first)"; exit 1 }
 
 # Canonicalize a path to the long fully-expanded lowercase form so the REGISTRY

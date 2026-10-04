@@ -19,14 +19,12 @@ if (-not (Test-Path $Floppy)) {
     exit 1
 }
 
-$qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
-if (-not (Test-Path $qemu)) {
-    $qemu = "qemu-system-x86_64.exe"
-}
-if (-not (Get-Command $qemu -ErrorAction SilentlyContinue)) {
-    Write-Host "qemu-system-x86_64 not found"
+$qemuCommand = Get-Command "qemu-system-x86_64" -ErrorAction SilentlyContinue
+if (-not $qemuCommand) {
+    Write-Host "qemu-system-x86_64 not found; add QEMU to PATH"
     exit 1
 }
+$qemu = $qemuCommand.Source
 
 $work = Join-Path $env:TEMP "openwinkrnl_fda_test"
 New-Item -ItemType Directory -Path $work -Force | Out-Null

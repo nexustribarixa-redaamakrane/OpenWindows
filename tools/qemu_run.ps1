@@ -37,13 +37,8 @@ if (-not (Test-Path $Image)) {
 }
 
 $qemu = $null
-$installedQemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
-if (Test-Path $installedQemu) {
-    $qemu = $installedQemu
-} else {
-    $qemuCommand = Get-Command "qemu-system-x86_64.exe" -ErrorAction SilentlyContinue
-    if ($qemuCommand) { $qemu = $qemuCommand.Source }
-}
+$qemuCommand = Get-Command "qemu-system-x86_64" -ErrorAction SilentlyContinue
+if ($qemuCommand) { $qemu = $qemuCommand.Source }
 if (-not $qemu) {
     Write-Host "qemu-system-x86_64 not found"
     exit 1
