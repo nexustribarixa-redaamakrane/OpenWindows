@@ -1,0 +1,25 @@
+===================================================================
+                        O P E N W I N D O W S
+                     Kernel 0.1.0 - Boot Monitor
+===================================================================
+[RUNLVL]   + USFS
+[RUNLVL]   + STORAGE
+[RUNLVL]   + OWINIT
+[RUNLVL]   + INTEGRITY
+[RUNLVL]   + NETWORK
+[RUNLVL]   + VIP
+[RUNLVL]   + SENTINEL
+[RUNLVL]   + SYSCALL
+[RUNLVL]   + SHELL
+[RUNLVL]   + AI
+[RUNLVL]   + CIS
+ow-krnl> fs list
+  [DIR ] System (ino 1)
+  [FILE] bootvid.owd (ino 2)
+[FS] list root: OK (2 entries)
+ow-krnl> sucs
+[SUCS] active=BASE pending=EXTENDED reboot=1 changes=0
+ow-krnl> alloc 4096
+[FAIL] Allocation rejected.
+ow-krnl>
+OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

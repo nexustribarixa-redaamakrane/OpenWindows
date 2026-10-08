@@ -1,0 +1,25 @@
+===================================================================
+                        O P E N W I N D O W S
+                     Kernel 0.1.0 - Boot Monitor
+===================================================================
+  vip lookup <path> - Lookup FVIP entry
+  vip verify        - Verify FVIP index integrity
+  fs format [label] - Format OWFS primary volume
+  fs mount          - Mount OWFS primary volume
+  fs umount         - Unmount OWFS primary volume
+  fs mkdir <name>   - Create catalog in root
+  fs create <name>  - Create file in root
+  fs write <name> <txt> - Write file in root
+  fs read <name>    - Read root file
+  fs list           - List root catalog (OWFS)
+  fs status         - OWFS/USFS volume status
+  trap <vector>     - CPU exception trap (#DE/#GP/#PF/#UD/#SS/#DF/#BP)
+  nuke <hex>        - Manual KeDropBanHammer
+  shutdown/poweroff - RC shutdown sequence then ACPI S5 power-off
+  reboot            - RC shutdown sequence then software reset
+  acpi              - Show ACPI firmware-table status
+  exit              - Shutdown kernel (RC sequence + ACPI power-off)
+========================================================================
+
+ow-krnl>
+OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

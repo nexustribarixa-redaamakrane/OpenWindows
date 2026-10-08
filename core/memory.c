@@ -63,8 +63,35 @@ OW_STATUS OwMemInitialize(void) {
   return OW_SUCCESS;
 }
 
+/* Physical windows that are never plain RAM on PC-class hardware.  The pool
+ * above is one flat array whose absolute address is the kernel link base plus
+ * a .bss offset, so a low-linked image (boot/vbox.ld) has it straddle these
+ * windows.  A frame handed out of them is not memory: stores are dropped and
+ * reads come back as 0xFF, which silently corrupts any page table built on
+ * it.  Skip forward over any window the allocation would touch. */
+#define OW_NONRAM_COUNT 2u
+static const struct { uintptr_t Lo; uintptr_t Hi; } s_NonRam[OW_NONRAM_COUNT] = {
+  { 0x00000u, 0x010000u },  /* IVT, BIOS data, boot sector */
+  { 0xA0000u, 0x100000u },  /* VGA aperture, BIOS ROM     */
+};
+
+static void ow_ram_avoid_nonram(size_t Span) {
+  uintptr_t base = (uintptr_t)g_PhysicalRam;
+  unsigned i;
+
+  /* g_RamPointer only ever moves forward here, so this terminates. */
+  for (i = 0; i < OW_NONRAM_COUNT; i++) {
+    uintptr_t a = base + g_RamPointer;
+    if (a >= s_NonRam[i].Hi) continue;
+    if (a + Span <= s_NonRam[i].Lo) return;
+    g_RamPointer = (size_t)(s_NonRam[i].Hi - base);
+    i = (unsigned)-1;               /* re-test from the first window */
+  }
+}
+
 void *OwMemAllocatePage(void) {
   void *page;
+  ow_ram_avoid_nonram(OW_PAGE_SIZE);
   if (g_RamPointer + OW_PAGE_SIZE > sizeof(g_PhysicalRam))
     return (void *)0;
   page = &g_PhysicalRam[g_RamPointer];
@@ -78,6 +105,7 @@ uint64_t OwMemAllocatePages(uint32_t Count) {
 
   if (Count == 0u) return (uint64_t)0;
   span = (size_t)Count * OW_PAGE_SIZE;
+  ow_ram_avoid_nonram(span);
   if (g_RamPointer + span > sizeof(g_PhysicalRam)) return (uint64_t)0;
   pages = &g_PhysicalRam[g_RamPointer];
   g_RamPointer += span;

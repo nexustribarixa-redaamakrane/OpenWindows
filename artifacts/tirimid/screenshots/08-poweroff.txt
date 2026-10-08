@@ -1,0 +1,25 @@
+===================================================================
+                        O P E N W I N D O W S
+                     Kernel 0.1.0 - Boot Monitor
+===================================================================
+:: user sessions terminated (owkill --all)
+[RC] rc.shutdown:27>> echo ":: Flushing kconf registry changes..."
+:: Flushing kconf registry changes...
+[RC] rc.shutdown:28>> kconfctl save
+:: kconf registry committed to disk
+[RC] rc.shutdown:31>> echo ":: Flushing storage disk caches..."
+:: Flushing storage disk caches...
+[RC] rc.shutdown:32>> owdiskchk --flush
+:: disk check flushed dirty sectors
+[RC] rc.shutdown:33>> sync
+:: storage caches flushed (sync)
+[RC] rc.shutdown:35>> echo ":: System safely halted."
+:: System safely halted.
+[FINISHED] Run Control Shutdown (code 0x11AC0D)
+[RC] shutdown sequence complete
+[SHUTDOWN] System halted.
+========================================================
+  You can safely power off your device now.
+========================================================
+
+OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

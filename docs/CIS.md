@@ -51,6 +51,17 @@ For components operating under the `CORE_KERNEL` policy (such as `openwinkrnl.ow
 ### Userspace Policy
 Components in userspace (such as `owinit.owx`, GUI programs, or system utilities) evaluate against permissive licenses accepted for userspace execution (`MIT`, `Apache-2.0`, `BSD-3-Clause`, `BSD-2-Clause`), preserving flexibility while enforcing ring-0 gating.
 
+### Enforcement scope (current implementation status)
+
+The rules in the two subsections above are the policy the CIS engine implements and enforces. The wiring of that engine into the live boot path is currently partial; this subsection records the exact scope in effect so that no reader infers more enforcement than exists today.
+
+- **Userspace images — active.** Images loaded through the userspace OWX loader are verified by `OwCisVerifyImage()` (`ps/owx_loader.c`). A userspace image whose authenticated license is not in the accepted userspace set is refused with `OW_CIS_VERDICT_REJECT_POLICY` and cannot be entered.
+- **Kernel provenance / license — implemented, not yet wired.** The function that applies the `CORE_KERNEL` / `GPL-3.0-or-later` rule to the kernel, `OwSentinelVerifyKernelProvenance()` (`sentinel/damagecntrl.c`), currently has **no caller**. The boot path calls `OwSentinelVerifyKernelChecksum()` (`core/main.c`) — an integrity check of `openwinkrnl.chk` — but does not call the provenance/license verifier. `OwSentinelVerifyRecoveryKernel()` likewise has no caller.
+- **Bootable images carry no kernel release block.** The flat/floppy/disk boot images are produced by `objcopy` from the linked PE and never pass through the packer, so they do not themselves carry the kernel's `CICB` release metadata. That metadata is attached to `openwinkrnl.owx` by `tools/owx_pack.py`.
+- **Kernel license enforcement is therefore NOT active at boot.** A kernel image declaring a non-GPL license is currently accepted on the live boot path. This is a wiring gap, not a policy relaxation: the policy engine itself still returns `OW_CIS_VERDICT_REJECT_POLICY` for such an image when it is invoked (see the `kernel_mit_refused` case in the host tests).
+
+Wiring `OwSentinelVerifyKernelProvenance()` into the boot path is deferred work. Until it lands, treat this document as the policy specification plus the current enforcement scope above; do not assume the kernel's GPL policy is enforced during boot.
+
 ## Source-to-Binary Cryptographic Binding
 
 To prevent substitution attacks and ensure reproducible, audited builds, OpenWindows implements deterministic source manifest generation via `tools/gen_license_manifest.py`:

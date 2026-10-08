@@ -1,0 +1,787 @@
+c[?7l[2J[0mSeaBIOS (version rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org)
+
+
+iPXE (http://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+1EFD1E30+1EF31E30 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+
+
+Booting from ROM..===================================================================
+                        O P E N W I N D O W S
+                     Kernel 0.1.0 - Boot Monitor
+===================================================================
+[STARTED] HAL Init
+[      1.906] [HAL] console: VGA text 80x25 @ 0xB8000 (row 0-24)...
+[      3.376] [HAL] uart0: COM1 @ 0x3F8, 115200 baud 8N1...
+[      4.826] [HAL] timer: 8254 PIT ~1000 Hz, monotonic clock armed...
+[      6.292] [TIME] 64-bit monotonic time (uint64 ms) - no Y2K38 overflow...
+[FINISHED] HAL Init (code 0x11AC01)
+[ACPI] firmware tables ready: OEM 'BOCHS ', PM1a_CNT=0x604, S5 typ=5, SCI_EN=0
+[FINISHED] ACPI Tables (code 0x11AC0C)
+[STARTED] Memory Init
+[      9.042] [MEM] pml4: 512 GiB virtual address space, table built...
+[     10.952] [MEM] vad: zero-allocation core, no dynamic heap...
+[     12.406] [MEM] page manager: 4 KiB granularity armed...
+[FINISHED] Memory Init (code 0x11AC02)
+[STARTED] Object Manager
+[     15.138] [OBJ] namespace: root \ mounted...
+[     16.684] [OBJ] namespace: \Device, \Kernel, \Drivers created...
+[FINISHED] Object Manager (code 0x11AC03)
+[STARTED] Diagnostics
+[     19.550] [RUNLVL] target 5 (FULL): full system - AI module ecosystem armed...
+[     20.998] [RUNLVL] 13 profile(s) compiled, 18 feature(s) armed...
+[     22.468] [DIAG] BANcode engine online...
+[ALPC] Advanced Local Procedure Call subsystem initialized.
+[     23.916] [DIAG] ALPC dispatcher started...
+[FINISHED] Diagnostics (code 0x11AC0A)
+[STARTED] SuperUnicode
+[SUTF] Codec self-test: OK (Base SUCS / SUTF-8 active)
+[     26.558] [SUCS] SUTF-8 codec self-test passed...
+[     28.012] [SUCS] mode switch committed at boot...
+[FINISHED] SuperUnicode
+[STARTED] PS Init
+[FINISHED] PS Init (code 0x11AC0F)
+[PS] process/thread subsystem initialized (max 64 procs, 256 threads)
+[     30.774] [PS] process/thread tables compiled...
+[     32.244] [PS] idle system thread 0 registered...
+[FINISHED] PS Init (code 0x11AC0F)
+[STARTED] VFS Primary
+[VFS] Primary OWFS volume formatted and mounted.
+[     35.016] [VFS] OWFS: primary database mounted...
+[     36.960] [VFS] journal: initialized...
+[FINISHED] VFS Primary (code 0x11AC04)
+[STARTED] VFS Secure
+[VFS] Secure USFS volume formatted and mounted.
+[     39.616] [VFS] USFS: secure volume mounted...
+[     41.068] [VFS] secure stream verified...
+[FINISHED] VFS Secure (code 0x11AC05)
+[STARTED] Storage
+[OWFS] Primary volume mounted (LBA region 1024 KiB)
+[USFS] Secure volume mounted
+[     43.722] [DISK] disk0: OWFS geometry accepted...
+[     45.162] [DISK] disk1: USFS geometry accepted...
+[     46.844] [DISK] sector engine: 2048-sector LBA ready...
+[FINISHED] Storage
+[STARTED] owinit
+[OWINIT] test image: seeded Essentials owinit.owx (ino 1)
+[OWINIT] owinit.owx: 12522 byte(s), entry 0x140001000, verified
+[OWINITV] test image: seeded owinitv.owx (ino 2, 8426 bytes)
+[OWINIT] owinitv.owx: 8426 byte(s), entry 0x1400010E0, verified
+[OWRS] test image: seeded owrs.owx (ino 3, 8426 bytes)
+[OWINIT] owrs.owx: 8426 byte(s), entry 0x140001220, verified
+[     49.534] [OWINIT] present, loadable...
+[OWINIT] userspace survey: primary(ok) owinitv(ok) owrs(ok) -> state PRIMARY
+[     50.976] [OWINIT] state PRIMARY: owinit.owx is PID 1...
+[FINISHED] owinit
+[STARTED] CIS
+[CIS] enforcement armed: 1 pinned key(s), signatures mandatory, unsigned recovery refused
+[     54.070] [CIS] enforcement armed (signatures mandatory)...
+[FINISHED] CIS (code 0x11AC13)
+[PS] owinit: process created (PID 1)
+[FINISHED] OWINIT Process (code 0x11AC11)
+[CIS] owinit: TRUSTED, signed by dev, licence accepted
+[FINISHED] OWX Image Load (code 0x11AC12)
+[PS] owinit image loaded: 6 section(s), 24 page(s) charged, entry 0x4000000 (bias 0xFFFFFFFEC3FFF000), exit 0x4017000
+[AUDIT] user window 4000000-4200000: 24 VAD(s), 0 guard VAD(s), 2 code page(s), 22 NX data page(s), NXE=1, violations=0
+[PS] owinit: USER thread 1 created, ring3 entry 0x4000000 stack 0x41FEFF8
+[PS] owinit: image entered at CPL3, rsp 0x41FEFF8, exit 0x4017000
+[     56.730] [OWINIT] owinit entered at CPL3 (PID 1)...
+[STARTED] Kernel Integrity
+[SENTINEL] Kernel integrity verified via openwinkrnl.chk: SHA-256=e925ab4e3f175405000000000000000000000000000000000000000000000000 (OK)
+[     58.214] [SENT] kernel checksum verified (openwinkrnl.chk)...
+[FINISHED] Kernel Integrity
+[STARTED] Network
+[NET] 44-bit Sparse Radix Hex Trie router online.
+[     60.932] [NET] router service starting...
+[     62.398] [NET] router online...
+[FINISHED] Network (code 0x11AC06)
+[STARTED] UniVIP
+[VIP] UniVIP online: root volume 0 @ LBA 131200, FVIP index ready
+[     65.441] [VIP] UniVIP registry online, root volume 0 @ LBA 131200...
+[     67.137] [VIP] FVIP root volume index compiled...
+[FINISHED] UniVIP
+[STARTED] Sentinel
+[SENTINEL] Active Defense vectors registered.
+[     69.847] [SENT] active defense armed...
+[     71.409] [SENT] integrity chains bound...
+[FINISHED] Sentinel (code 0x11AC07)
+[STARTED] Syscall Gateway
+[SYSCALL] Ring 3-to-0 gateway active.
+[SYNC] event '_st-event' created
+[SYNC] semaphore '_st-sem' created (state 1, limit 1)
+[SYNC] mutex '_st-mtx' created
+[SELFTEST SYNC] OK (event/semaphore/mutex)
+[SELFTEST DPC] OK (insert/cancel/drain)
+[     74.139] [SYSC] system call table installed...
+[     75.589] [SYSC] gateway ready...
+[FINISHED] Syscall Gateway (code 0x11AC08)
+[STARTED] Boot Complete
+[     78.243] [INIT] handing off to shell 'sh' as init process...
+[     79.683] [BOOT] kernel boot complete in 79683 ms...
+[FINISHED] Boot Complete (code 0x11AC09)
+[PS] boot context captured (thread 0)
+[FINISHED] PS Scheduler (code 0x11AC10)
+[PS] scheduler started (100 Hz)
+[PS] user-hello: process created (PID 2)
+[PS] user-hello: USER thread 2 created, ring3 entry 0x4000000 stack 0x41FF000
+[AUDIT] user window 4000000-4200000: 5 VAD(s), 1 guard VAD(s), 1 code page(s), 0 NX data page(s), NXE=1, violations=0
+[USER] standalone Ring 3 hello application queued
+[KBD] PS/2 keyboard detected (port 0x60, scancode set 1)
+
+========================================================================
+            OpenWindows DEBUG SYSTEM CONTROL SHELL
+========================================================================
+Commands:
+  help              - Display this menu
+  status            - Dump system state
+  runlevel          - Show current runlevel & config
+  runlevel list     - List all runlevel profiles (-6..6)
+  runlevel features - Show armed feature set
+  runlevel set <n>  - Switch runlevel (-6..6)
+  alloc <size>      - Allocate virtual memory
+[EX] tid=1
+[AUDIT] user window 4000000-4200000: 5 VAD(s), 1 guard VAD(s), 1 code page(s), 1 NX data page(s), NXE=1, violations=0
+[PF] RESOLVED err=7 cr2=41FEFF8 rip=4000000 cs=1B cr3=1A4000
+[PF] RESOLVED err=7 cr2=4020000 rip=400000D cs=1B cr3=1A4000
+Hello from Ring 3!
+Hello from Ring 3!
+[SLEEP] tid=2 ticks=8
+  load <path> <tier>- Load driver (1/2/3)
+  write <name> <txt>- Create file on VFS
+  read <name>       - Read file from VFS
+  route <hex>       - Query route table
+  sucs              - Show SUCS mode
+  sucs <base|ext>   - Stage SUCS mode switch
+  vip mount <vol> <sector> <label> - Register volume
+  vip resolve <vol> - Resolve volume base LBA
+  vip index <path> <sector> <flags> - Insert FVIP entry
+  vip lookup <path> - Lookup FVIP entry
+  vip verify        - Verify FVIP index integrity
+  fs format [label] - Format OWFS primary volume
+  fs mount          - Mount OWFS primary volume
+  fs umount         - Unmount OWFS primary volume
+  fs mkdir <name>   - Create catalog in root
+  fs create <name>  - Create file in root
+  fs write <name> <txt> - Write file in root
+  fs read <name>    - Read root file
+  fs list           - List root catalog (OWFS)
+  fs status         - OWFS/USFS volume status
+  trap <vector>     - CPU exception trap (#DE/#GP/#PF/#UD/#SS/#DF/#BP)
+  nuke <hex>        - Manual KeDropBanHammer
+  shutdown/poweroff - RC shutdown sequence then ACPI S5 power-off
+  reboot            - RC shutdown sequence then software reset
+  acpi              - Show ACPI firmware-table status
+  exit              - Shutdown kernel (RC sequence + ACPI power-off)
+========================================================================
+
+ow-krnl> help
+Commands:
+  help              - Display this menu
+  status           [EX] tid=2
+ - Dump system state
+  runlevel          - Show current runlevel & config
+  runlevel list     - List all runlevel profiles (-6..6)
+  runlevel features - Show armed feature set
+  runlevel set <n>  - Switch runlevel (-6..6)
+  alloc <size>      - Allocate virtual memory
+  load <path> <tier>- Load driver (1/2/3)
+  write <name> <txt>- Create file on VFS
+  read <name>       - Read file from VFS
+  route <hex>       - Query route table
+  sucs              - Show SUCS mode
+  sucs <base|ext>   - Stage SUCS mode switch
+  vip mount <vol> <sector> <label> - Register volume
+  vip resolve <vol> - Resolve volume base LBA
+  vip index <path> <sector> <flags> - Insert FVIP entry
+  vip lookup <path> - Lookup FVIP entry
+  vip verify        - Verify FVIP index integrity
+  fs format [label] - Format OWFS primary volume
+  fs mount          - Mount OWFS primary volume
+  fs umount         - Unmount OWFS primary volume
+  fs mkdir <name>   - Create catalog in root
+  fs create <name>  - Create file in root
+  fs write <name> <txt> - Write file in root
+  fs read <name>    - Read root file
+  fs list           - List root catalog (OWFS)
+  fs status         - OWFS/USFS volume status
+  trap <vector>     - CPU exception trap (#DE/#GP/#PF/#UD/#SS/#DF/#BP)
+  nuke <hex>        - Manual KeDropBanHammer
+  shutdown/poweroff - RC shutdown sequence then ACPI S5 power-off
+  reboot            - RC shutdown sequence then software reset
+  acpi              - Show ACPI firmware-table status
+  exit              - Shutdown kernel (RC sequence + ACPI power-off)
+========================================================================
+
+ow-krnl> status
+--- SYSTEM STATUS ---
+Memory Pages: 140 / 4096 used
+VFS Primary:   MOUNTED
+VFS Secure:    MOUNTED
+ow-krnl> runlevel
+[RUNLVL] current=5 (FULL) target=5 transitions=0
+[RUNLVL] config: verbosity=1 watchdogMs=0 heapKB=262144 maxHandles=65536
+[RUNLVL] active features (0x3FFFF):
+[RUNLVL]   + HAL
+[RUNLVL]   + MEMORY
+[RUNLVL]   + OBJECT
+[RUNLVL]   + DIAG
+[RUNLVL]   + ALPC
+[RUNLVL]   + SUCS
+[RUNLVL]   + VFS
+[RUNLVL]   + USFS
+[RUNLVL]   + STORAGE
+[RUNLVL]   + OWINIT
+[RUNLVL]   + INTEGRITY
+[RUNLVL]   + NETWORK
+[RUNLVL]   + VIP
+[RUNLVL]   + SENTINEL
+[RUNLVL]   + SYSCALL
+[RUNLVL]   + SHELL
+[RUNLVL]   + AI
+[RUNLVL]   + CIS
+ow-krnl> runlevel list
+[RUNLVL] runlevel table -6..6 (13 profiles):
+[RUNLVL] profile: level -6, name DIAG-MIN, class RECOVERY, features 2: emergency bring-up - HAL + diagnostics only
+[RUNLVL] profile: level -5, name DIAG-SYS, class RECOVERY, features 5: diagnostic core with memory + object services
+[RUNLVL] profile: level -4, name SAFE-CONSOLE, class RECOVERY, features 7: recovery console with ALPC + sentinel defense
+[RUNLVL] profile: level -3, name RECOVERY-FS, class RECOVERY, features 9: primary volume recovery (OWFS mount service)
+[RUNLVL] profile: level -2, name SINGLE-USER, class RECOVERY, features 11: local maintenance (secure volume, no network)
+[RUNLVL] profile: level -1, name MAINTENANCE, class RECOVERY, features 15: full local maintenance (owinit/integrity/shell)
+[RUNLVL] profile: level 0, name HALT, class TERMINAL, features 0: system halt - all subsystems torn down
+[RUNLVL] profile: level 1, name BOOT-CONSOLE, class RUNTIME, features 10: single-user boot console
+[RUNLVL] profile: level 2, name MULTIUSER, class RUNTIME, features 15: multi-user console (VFS/USFS backed, no network)
+[RUNLVL] profile: level 3, name NETWORK, class RUNTIME, features 16: multi-user with univip 44-bit router online
+[RUNLVL] profile: level 4, name SERVICES, class RUNTIME, features 17: full services (UniVIP volume / FVIP index armed)
+[RUNLVL] profile: level 5, name FULL, class RUNTIME, features 18: full system - AI module ecosystem armed
+[RUNLVL] profile: level 6, name REBOOT, class RECYCLE, features 18: full system recycle / reboot target
+ow-krnl> runlevel features
+[RUNLVL] active features (0x3FFFF):
+[RUNLVL]   + HAL
+[RUNLVL]   + MEMORY
+[RUNLVL]   + OBJECT
+[RUNLVL]   + DIAG
+[RUNLVL]   + ALPC
+[RUNLVL]   + SUCS
+[RUNLVL]   + VFS
+[RUNLVL]   + USFS
+[RUNLVL]   + STORAGE
+[RUNLVL]   + OWINIT
+[RUNLVL]   + INTEGRITY
+[RUNLVL]   + NETWORK
+[RUNLVL]   + VIP
+[RUNLVL]   + SENTINEL
+[RUNLVL]   + SYSCALL
+[RUNLVL]   + SHELL
+[RUNLVL]   + AI
+[RUNLVL]   + CIS
+ow-krnl> alloc 4096
+[FAIL] Allocation rejected.
+ow-krnl> sucs
+[SUCS] active=BASE pending=BASE reboot=0 changes=0
+ow-krnl> sucs ext
+[SUCS] request: staged, reboot required
+ow-krnl> sucs
+[SUCS] active=BASE pending=EXTENDED reboot=1 changes=0
+ow-krnl> vip mount 1 131200 kernel
+[VIP] mount code 0x11AD02
+ow-krnl> vip resolve 1
+[VIP] volume 1 base LBA 131200
+ow-krnl> vip index /boot/bootvid.owd 12 3
+[VIP] index code 0x11AD04 (entries=1)
+ow-krnl> vip lookup /boot/bootvid.owd
+[VIP] '/boot/bootvid.owd' sector_offset=12 flags=0x3
+ow-krnl> vip lookup /nope
+[VIP] lookup miss code 0x11AEE2
+ow-krnl> vip verify
+[VIP] integrity code 0x11AD07 (entries=1)
+ow-krnl> fs format OWINIT
+[FS] format: OK (code 0x0)
+ow-krnl> fs mount
+[FS] owfs mount: OK (code 0x0)
+ow-krnl> fs mkdir System
+[FS] mkdir 'System': OK (ino 1, code 0x0)
+ow-krnl> fs create bootvid.owd
+[FS] create 'bootvid.owd': OK (ino 2, code 0x0)
+ow-krnl> fs write bootvid.owd OpenWindows storage live
+[FS] write 'bootvid.owd': OK (code 0x0)
+ow-krnl> fs read bootvid.owd
+[FS] read 'bootvid.owd' (24 bytes):
+---
+OpenWindows storage live
+---
+ow-krnl> fs list
+  [DIR ] System (ino 1)
+  [FILE] bootvid.owd (ino 2)
+[FS] list root: OK (2 entries)
+ow-krnl> fs status
+[FS] OWFS: MOUNTED  free blocks: 1772
+[FS] USFS: MOUNTED  free blocks: 2029
+ow-krnl> fs umount
+[FS] owfs umount: OK (code 0x0)
+ow-krnl> fs mount
+[FS] owfs mount: OK (code 0x0)
+ow-krnl> fs read bootvid.owd
+[FS] read 'bootvid.owd' (24 bytes):
+---
+OpenWindows storage live
+---
+ow-krnl> runlevel list
+[RUNLVL] runlevel table -6..6 (13 profiles):
+[RUNLVL] profile: level -6, name DIAG-MIN, class RECOVERY, features 2: emergency bring-up - HAL + diagnostics only
+[RUNLVL] profile: level -5, name DIAG-SYS, class RECOVERY, features 5: diagnostic core with memory + object services
+[RUNLVL] profile: level -4, name SAFE-CONSOLE, class RECOVERY, features 7: recovery console with ALPC + sentinel defense
+[RUNLVL] profile: level -3, name RECOVERY-FS, class RECOVERY, features 9: primary volume recovery (OWFS mount service)
+[RUNLVL] profile: level -2, name SINGLE-USER, class RECOVERY, features 11: local maintenance (secure volume, no network)
+[RUNLVL] profile: level -1, name MAINTENANCE, class RECOVERY, features 15: full local maintenance (owinit/integrity/shell)
+[RUNLVL] profile: level 0, name HALT, class TERMINAL, features 0: system halt - all subsystems torn down
+[RUNLVL] profile: level 1, name BOOT-CONSOLE, class RUNTIME, features 10: single-user boot console
+[RUNLVL] profile: level 2, name MULTIUSER, class RUNTIME, features 15: multi-user console (VFS/USFS backed, no network)
+[RUNLVL] profile: level 3, name NETWORK, class RUNTIME, features 16: multi-user with univip 44-bit router online
+[RUNLVL] profile: level 4, name SERVICES, class RUNTIME, features 17: full services (UniVIP volume / FVIP index armed)
+[RUNLVL] profile: level 5, name FULL, class RUNTIME, features 18: full system - AI module ecosystem armed
+[RUNLVL] profile: level 6, name REBOOT, class RECYCLE, features 18: full system recycle / reboot target
+ow-krnl> 
+ow-krnl> runlevel set 3
+[RUNLVL] transition complete -> level 3 (NETWORK), 16 feature(s) armed
+[FINISHED] Runlevel Transition (code 0x11AC0B)
+[RUNLVL] set 3: accepted
+ow-krnl> 
+ow-krnl> exit
+[SHUTDOWN] Exiting...
+[RC] running shutdown sequence (OpenWindows-Essentials rc.d)
+[RC] rc.shutdown not on volume; using embedded rc.d script
+[RC] rc.shutdown:4>> echo ":: Initiating OpenWindows system shutdown..."
+:: Initiating OpenWindows system shutdown...
+[RC] rc.shutdown:7>> echo ":: Terminating active services..."
+:: Terminating active services...
+[RC] rc.shutdown:8>> call rc.gui stop
+:: gui - desktop session stopped
+[RC] rc.shutdown:9>> call rc.cron stop
+:: cron - scheduler daemon stopped
+[RC] rc.shutdown:10>> call rc.sentinel stop
+:: sentinel - integrity chains released
+[RC] rc.shutdown:11>> call rc.banhammer stop
+:: banhammer - BANcode traps disarmed
+[RC] rc.shutdown:12>> call rc.audio stop
+:: audio - sound engine stopped
+[RC] rc.shutdown:13>> call rc.firewall stop
+:: firewall - packet filter detached
+[RC] rc.shutdown:14>> call rc.network stop
+:: network - router daemon stopped
+[RC] rc.shutdown:15>> call rc.storage stop
+:: storage - volume caches flushed
+[RC] rc.shutdown:16>> call rc.kconf stop
+:: kconf - registry service stopped
+[RC] rc.shutdown:17>> call rc.devmgr stop
+:: devmgr - device manager stopped
+[RC] rc.shutdown:18>> call rc.syslog stop
+:: syslog - log daemon stopped
+[RC] rc.shutdown:21>> echo ":: Terminating user sessions..."
+:: Terminating user sessions...
+[RC] rc.shutdown:22>> owkill --all --term
+:: user sessions terminated (owkill --all)
+[RC] rc.shutdown:23>> sleep 1
+[RC] rc.shutdown:24>> owkill --all --kill
+:: user sessions terminated (owkill --all)
+[RC] rc.shutdown:27>> echo ":: Flushing kconf registry changes..."
+:: Flushing kconf registry changes...
+[RC] rc.shutdown:28>> kconfctl save
+:: kconf registry committed to disk
+[RC] rc.shutdown:31>> echo ":: Flushing storage disk caches..."
+:: Flushing storage disk caches...
+[RC] rc.shutdown:32>> owdiskchk --flush
+:: disk check flushed dirty sectors
+[RC] rc.shutdown:33>> sync
+:: storage caches flushed (sync)
+[RC] rc.shutdown:35>> echo ":: System safely halted."
+:: System safely halted.
+[FINISHED] Run Control Shutdown (code 0x11AC0D)
+[RC] shutdown sequence complete
+[SHUTDOWN] System halted.
+[ACPI] software power-off (S5)
+[FINISHED] Software Power Off (code 0x11AC0E)
+[ACPI] power-off request complet
+c[?7l[2J[0mSeaBIOS (version rel-1.17.0-0-gb52ca86e094d-prebuilt.qemu.org)
+
+
+iPXE (http://ipxe.org) 00:03.0 CA00 PCI2.10 PnP PMM+1EFD1E30+1EF31E30 CA00
+Press Ctrl-B to configure iPXE (PCI 00:03.0)...                                                                               
+
+
+Booting from ROM..===================================================================
+                        O P E N W I N D O W S
+                     Kernel 0.1.0 - Boot Monitor
+===================================================================
+[STARTED] HAL Init
+[      1.928] [HAL] console: VGA text 80x25 @ 0xB8000 (row 0-24)...
+[      3.370] [HAL] uart0: COM1 @ 0x3F8, 115200 baud 8N1...
+[      4.812] [HAL] timer: 8254 PIT ~1000 Hz, monotonic clock armed...
+[      6.308] [TIME] 64-bit monotonic time (uint64 ms) - no Y2K38 overflow...
+[FINISHED] HAL Init (code 0x11AC01)
+[ACPI] firmware tables ready: OEM 'BOCHS ', PM1a_CNT=0x604, S5 typ=5, SCI_EN=0
+[FINISHED] ACPI Tables (code 0x11AC0C)
+[STARTED] Memory Init
+[      8.976] [MEM] pml4: 512 GiB virtual address space, table built...
+[     10.434] [MEM] vad: zero-allocation core, no dynamic heap...
+[     11.882] [MEM] page manager: 4 KiB granularity armed...
+[FINISHED] Memory Init (code 0x11AC02)
+[STARTED] Object Manager
+[     14.524] [OBJ] namespace: root \ mounted...
+[     15.970] [OBJ] namespace: \Device, \Kernel, \Drivers created...
+[FINISHED] Object Manager (code 0x11AC03)
+[STARTED] Diagnostics
+[     18.628] [RUNLVL] target 5 (FULL): full system - AI module ecosystem armed...
+[     20.070] [RUNLVL] 13 profile(s) compiled, 18 feature(s) armed...
+[     21.626] [DIAG] BANcode engine online...
+[ALPC] Advanced Local Procedure Call subsystem initialized.
+[     23.066] [DIAG] ALPC dispatcher started...
+[FINISHED] Diagnostics (code 0x11AC0A)
+[STARTED] SuperUnicode
+[SUTF] Codec self-test: OK (Base SUCS / SUTF-8 active)
+[     25.780] [SUCS] SUTF-8 codec self-test passed...
+[     27.406] [SUCS] mode switch committed at boot...
+[FINISHED] SuperUnicode
+[STARTED] PS Init
+[FINISHED] PS Init (code 0x11AC0F)
+[PS] process/thread subsystem initialized (max 64 procs, 256 threads)
+[     30.054] [PS] process/thread tables compiled...
+[     31.722] [PS] idle system thread 0 registered...
+[FINISHED] PS Init (code 0x11AC0F)
+[STARTED] VFS Primary
+[VFS] Primary OWFS volume formatted and mounted.
+[     34.572] [VFS] OWFS: primary database mounted...
+[     36.020] [VFS] journal: initialized...
+[FINISHED] VFS Primary (code 0x11AC04)
+[STARTED] VFS Secure
+[VFS] Secure USFS volume formatted and mounted.
+[     38.672] [VFS] USFS: secure volume mounted...
+[     40.112] [VFS] secure stream verified...
+[FINISHED] VFS Secure (code 0x11AC05)
+[STARTED] Storage
+[OWFS] Primary volume mounted (LBA region 1024 KiB)
+[USFS] Secure volume mounted
+[     42.948] [DISK] disk0: OWFS geometry accepted...
+[     44.390] [DISK] disk1: USFS geometry accepted...
+[     45.860] [DISK] sector engine: 2048-sector LBA ready...
+[FINISHED] Storage
+[STARTED] owinit
+[OWINIT] test image: seeded Essentials owinit.owx (ino 1)
+[OWINIT] owinit.owx: 12522 byte(s), entry 0x140001000, verified
+[OWINITV] test image: seeded owinitv.owx (ino 2, 8426 bytes)
+[OWINIT] owinitv.owx: 8426 byte(s), entry 0x1400010E0, verified
+[OWRS] test image: seeded owrs.owx (ino 3, 8426 bytes)
+[OWINIT] owrs.owx: 8426 byte(s), entry 0x140001220, verified
+[     48.534] [OWINIT] present, loadable...
+[OWINIT] userspace survey: primary(ok) owinitv(ok) owrs(ok) -> state PRIMARY
+[     49.974] [OWINIT] state PRIMARY: owinit.owx is PID 1...
+[FINISHED] owinit
+[STARTED] CIS
+[CIS] enforcement armed: 1 pinned key(s), signatures mandatory, unsigned recovery refused
+[     52.626] [CIS] enforcement armed (signatures mandatory)...
+[FINISHED] CIS (code 0x11AC13)
+[PS] owinit: process created (PID 1)
+[FINISHED] OWINIT Process (code 0x11AC11)
+[CIS] owinit: TRUSTED, signed by dev, licence accepted
+[FINISHED] OWX Image Load (code 0x11AC12)
+[PS] owinit image loaded: 6 section(s), 24 page(s) charged, entry 0x4000000 (bias 0xFFFFFFFEC3FFF000), exit 0x4017000
+[AUDIT] user window 4000000-4200000: 24 VAD(s), 0 guard VAD(s), 2 code page(s), 22 NX data page(s), NXE=1, violations=0
+[PS] owinit: USER thread 1 created, ring3 entry 0x4000000 stack 0x41FEFF8
+[PS] owinit: image entered at CPL3, rsp 0x41FEFF8, exit 0x4017000
+[     55.282] [OWINIT] owinit entered at CPL3 (PID 1)...
+[STARTED] Kernel Integrity
+[SENTINEL] Kernel integrity verified via openwinkrnl.chk: SHA-256=e925ab4e3f175405000000000000000000000000000000000000000000000000 (OK)
+[     56.728] [SENT] kernel checksum verified (openwinkrnl.chk)...
+[FINISHED] Kernel Integrity
+[STARTED] Network
+[NET] 44-bit Sparse Radix Hex Trie router online.
+[     59.378] [NET] router service starting...
+[     60.892] [NET] router online...
+[FINISHED] Network (code 0x11AC06)
+[STARTED] UniVIP
+[VIP] UniVIP online: root volume 0 @ LBA 131200, FVIP index ready
+[     63.532] [VIP] UniVIP registry online, root volume 0 @ LBA 131200...
+[     64.974] [VIP] FVIP root volume index compiled...
+[FINISHED] UniVIP
+[STARTED] Sentinel
+[SENTINEL] Active Defense vectors registered.
+[     67.776] [SENT] active defense armed...
+[     69.216] [SENT] integrity chains bound...
+[FINISHED] Sentinel (code 0x11AC07)
+[STARTED] Syscall Gateway
+[SYSCALL] Ring 3-to-0 gateway active.
+[SYNC] event '_st-event' created
+[SYNC] semaphore '_st-sem' created (state 1, limit 1)
+[SYNC] mutex '_st-mtx' created
+[SELFTEST SYNC] OK (event/semaphore/mutex)
+[SELFTEST DPC] OK (insert/cancel/drain)
+[     71.860] [SYSC] system call table installed...
+[     73.300] [SYSC] gateway ready...
+[FINISHED] Syscall Gateway (code 0x11AC08)
+[STARTED] Boot Complete
+[     76.246] [INIT] handing off to shell 'sh' as init process...
+[     78.012] [BOOT] kernel boot complete in 78012 ms...
+[FINISHED] Boot Complete (code 0x11AC09)
+[PS] boot context captured (thread 0)
+[FINISHED] PS Scheduler (code 0x11AC10)
+[PS] scheduler started (100 Hz)
+[PS] user-hello: process created (PID 2)
+[PS] user-hello: USER thread 2 created, ring3 entry 0x4000000 stack 0x41FF000
+[AUDIT] user window 4000000-4200000: 5 VAD(s), 1 guard VAD(s), 1 code page(s), 0 NX data page(s), NXE=1, violations=0
+[USER] standalone Ring 3 hello application queued
+[KBD] PS/2 keyboard detected (port 0x60, scancode set 1)
+
+========================================================================
+            OpenWindows DEBUG SYSTEM CONTROL SHELL
+========================================================================
+Commands:
+  help              - Display this menu
+  status            - Dump system state
+  runlevel          - Show current runlevel & config
+  runlevel list     - List all runlevel profiles (-6..6)
+  runlevel features - Show armed feature set
+  runlevel set <n>  - Switch runlevel (-6..6)
+  alloc <size>      - Allocate virtual memory
+  load <path> <tier>- Load driver (1/2/3)
+  write <name> <txt>- Create file on VFS
+  read <name>       - Read file from VFS
+  route <hex>       - Query route table
+  sucs              - Show SUCS mode
+  sucs <base|ext>   - Stage SUCS mode switch
+  vip mount <vol> <sector> <label> - Register volume
+  vip resolve <vol> - Resolve volume base LBA
+  vip index <path> <sector> <flags> - Insert FVIP entry
+  vip lookup <path> - Lookup FVIP entry
+  vip verify        - Verify FVIP index integrity
+  fs format [label] - Format OWFS primary volume
+  fs mount          - Mount OWFS primary volume
+[EX] tid=1
+[AUDIT] user window 4000000-4200000: 5 VAD(s), 1 guard VAD(s), 1 code page(s), 1 NX data page(s), NXE=1, violations=0
+[PF] RESOLVED err=7 cr2=41FEFF8 rip=4000000 cs=1B cr3=1A4000
+[PF] RESOLVED err=7 cr2=4020000 rip=400000D cs=1B cr3=1A4000
+Hello from Ring 3!
+Hello from Ring 3!
+[SLEEP] tid=2 ticks=8
+  fs umount         - Unmount OWFS primary volume
+  fs mkdir <name>   - Create catalog in root
+  fs create <name>  - Create file in root
+  fs write <name> <txt> - Write file in root
+  fs read <name>    - Read root file
+  fs list           - List root catalog (OWFS)
+  fs status         - OWFS/USFS volume status
+  trap <vector>     - CPU exception trap (#DE/#GP/#PF/#UD/#SS/#DF/#BP)
+  nuke <hex>        - Manual KeDropBanHammer
+  shutdown/poweroff - RC shutdown sequence then ACPI S5 power-off
+  reboot            - RC shutdown sequence then software reset
+  acpi              - Show ACPI firmware-table status
+  exit              - Shutdown kernel (RC sequence + ACPI power-off)
+========================================================================
+
+ow-krnl> help
+Commands:
+  help              - Display this menu
+  status            - Dump system state
+  runlevel          - Show current runlevel & config
+  runlevel list     - List all runlevel profiles (-6..6)
+  runlevel features - Show armed feature set
+  runlevel set <n>  - Switch runlevel (-6..6)
+  alloc <size>      - Allocate virtual memory
+  load <path> <tier>- Load driver (1/2/3)
+  write <name> <txt>- Create file on VFS
+  read <name>       - Read file from VFS
+  route <hex>       - Query route table
+  sucs              - Show SUCS mode
+  sucs <base|ext>   - Stage SUCS mode switch
+  vip mount <vol> <sector> <label> - Register volume
+  vip resolve <vol> - Resolve volume base LBA
+  vip index <path> <sector> <flags> - Insert FVIP entry
+  vip lookup <path> - Lookup FVIP entry
+  vip verify        - Verify FVIP index integrity
+  fs format [label] - Format OWFS primar[EX] tid=2
+y volume
+  fs mount          - Mount OWFS primary volume
+  fs umount         - Unmount OWFS primary volume
+  fs mkdir <name>   - Create catalog in root
+  fs create <name>  - Create file in root
+  fs write <name> <txt> - Write file in root
+  fs read <name>    - Read root file
+  fs list           - List root catalog (OWFS)
+  fs status         - OWFS/USFS volume status
+  trap <vector>     - CPU exception trap (#DE/#GP/#PF/#UD/#SS/#DF/#BP)
+  nuke <hex>        - Manual KeDropBanHammer
+  shutdown/poweroff - RC shutdown sequence then ACPI S5 power-off
+  reboot            - RC shutdown sequence then software reset
+  acpi              - Show ACPI firmware-table status
+  exit              - Shutdown kernel (RC sequence + ACPI power-off)
+========================================================================
+
+ow-krnl> status
+--- SYSTEM STATUS ---
+Memory Pages: 140 / 4096 used
+VFS Primary:   MOUNTED
+VFS Secure:    MOUNTED
+ow-krnl> runlevel
+[RUNLVL] current=5 (FULL) target=5 transitions=0
+[RUNLVL] config: verbosity=1 watchdogMs=0 heapKB=262144 maxHandles=65536
+[RUNLVL] active features (0x3FFFF):
+[RUNLVL]   + HAL
+[RUNLVL]   + MEMORY
+[RUNLVL]   + OBJECT
+[RUNLVL]   + DIAG
+[RUNLVL]   + ALPC
+[RUNLVL]   + SUCS
+[RUNLVL]   + VFS
+[RUNLVL]   + USFS
+[RUNLVL]   + STORAGE
+[RUNLVL]   + OWINIT
+[RUNLVL]   + INTEGRITY
+[RUNLVL]   + NETWORK
+[RUNLVL]   + VIP
+[RUNLVL]   + SENTINEL
+[RUNLVL]   + SYSCALL
+[RUNLVL]   + SHELL
+[RUNLVL]   + AI
+[RUNLVL]   + CIS
+ow-krnl> runlevel list
+[RUNLVL] runlevel table -6..6 (13 profiles):
+[RUNLVL] profile: level -6, name DIAG-MIN, class RECOVERY, features 2: emergency bring-up - HAL + diagnostics only
+[RUNLVL] profile: level -5, name DIAG-SYS, class RECOVERY, features 5: diagnostic core with memory + object services
+[RUNLVL] profile: level -4, name SAFE-CONSOLE, class RECOVERY, features 7: recovery console with ALPC + sentinel defense
+[RUNLVL] profile: level -3, name RECOVERY-FS, class RECOVERY, features 9: primary volume recovery (OWFS mount service)
+[RUNLVL] profile: level -2, name SINGLE-USER, class RECOVERY, features 11: local maintenance (secure volume, no network)
+[RUNLVL] profile: level -1, name MAINTENANCE, class RECOVERY, features 15: full local maintenance (owinit/integrity/shell)
+[RUNLVL] profile: level 0, name HALT, class TERMINAL, features 0: system halt - all subsystems torn down
+[RUNLVL] profile: level 1, name BOOT-CONSOLE, class RUNTIME, features 10: single-user boot console
+[RUNLVL] profile: level 2, name MULTIUSER, class RUNTIME, features 15: multi-user console (VFS/USFS backed, no network)
+[RUNLVL] profile: level 3, name NETWORK, class RUNTIME, features 16: multi-user with univip 44-bit router online
+[RUNLVL] profile: level 4, name SERVICES, class RUNTIME, features 17: full services (UniVIP volume / FVIP index armed)
+[RUNLVL] profile: level 5, name FULL, class RUNTIME, features 18: full system - AI module ecosystem armed
+[RUNLVL] profile: level 6, name REBOOT, class RECYCLE, features 18: full system recycle / reboot target
+ow-krnl> runlevel features
+[RUNLVL] active features (0x3FFFF):
+[RUNLVL]   + HAL
+[RUNLVL]   + MEMORY
+[RUNLVL]   + OBJECT
+[RUNLVL]   + DIAG
+[RUNLVL]   + ALPC
+[RUNLVL]   + SUCS
+[RUNLVL]   + VFS
+[RUNLVL]   + USFS
+[RUNLVL]   + STORAGE
+[RUNLVL]   + OWINIT
+[RUNLVL]   + INTEGRITY
+[RUNLVL]   + NETWORK
+[RUNLVL]   + VIP
+[RUNLVL]   + SENTINEL
+[RUNLVL]   + SYSCALL
+[RUNLVL]   + SHELL
+[RUNLVL]   + AI
+[RUNLVL]   + CIS
+ow-krnl> alloc 4096
+[FAIL] Allocation rejected.
+ow-krnl> sucs
+[SUCS] active=BASE pending=BASE reboot=0 changes=0
+ow-krnl> sucs ext
+[SUCS] request: staged, reboot required
+ow-krnl> sucs
+[SUCS] active=BASE pending=EXTENDED reboot=1 changes=0
+ow-krnl> vip mount 1 131200 kernel
+[VIP] mount code 0x11AD02
+ow-krnl> vip resolve 1
+[VIP] volume 1 base LBA 131200
+ow-krnl> vip index /boot/bootvid.owd 12 3
+[VIP] index code 0x11AD04 (entries=1)
+ow-krnl> vip lookup /boot/bootvid.owd
+[VIP] '/boot/bootvid.owd' sector_offset=12 flags=0x3
+ow-krnl> vip lookup /nope
+[VIP] lookup miss code 0x11AEE2
+ow-krnl> vip verify
+[VIP] integrity code 0x11AD07 (entries=1)
+ow-krnl> fs format OWINIT
+[FS] format: OK (code 0x0)
+ow-krnl> fs mount
+[FS] owfs mount: OK (code 0x0)
+ow-krnl> fs mkdir System
+[FS] mkdir 'System': OK (ino 1, code 0x0)
+ow-krnl> fs create bootvid.owd
+[FS] create 'bootvid.owd': OK (ino 2, code 0x0)
+ow-krnl> fs write bootvid.owd OpenWindows storage live
+[FS] write 'bootvid.owd': OK (code 0x0)
+ow-krnl> fs read bootvid.owd
+[FS] read 'bootvid.owd' (24 bytes):
+---
+OpenWindows storage live
+---
+ow-krnl> fs list
+  [DIR ] System (ino 1)
+  [FILE] bootvid.owd (ino 2)
+[FS] list root: OK (2 entries)
+ow-krnl> fs status
+[FS] OWFS: MOUNTED  free blocks: 1772
+[FS] USFS: MOUNTED  free blocks: 2029
+ow-krnl> fs umount
+[FS] owfs umount: OK (code 0x0)
+ow-krnl> fs mount
+[FS] owfs mount: OK (code 0x0)
+ow-krnl> fs read bootvid.owd
+[FS] read 'bootvid.owd' (24 bytes):
+---
+OpenWindows storage live
+---
+ow-krnl> safeoff on
+[ACPI] safe power-off screen: armed
+ow-krnl> 
+ow-krnl> exit
+[SHUTDOWN] Exiting...
+[RC] running shutdown sequence (OpenWindows-Essentials rc.d)
+[RC] rc.shutdown not on volume; using embedded rc.d script
+[RC] rc.shutdown:4>> echo ":: Initiating OpenWindows system shutdown..."
+:: Initiating OpenWindows system shutdown...
+[RC] rc.shutdown:7>> echo ":: Terminating active services..."
+:: Terminating active services...
+[RC] rc.shutdown:8>> call rc.gui stop
+:: gui - desktop session stopped
+[RC] rc.shutdown:9>> call rc.cron stop
+:: cron - scheduler daemon stopped
+[RC] rc.shutdown:10>> call rc.sentinel stop
+:: sentinel - integrity chains released
+[RC] rc.shutdown:11>> call rc.banhammer stop
+:: banhammer - BANcode traps disarmed
+[RC] rc.shutdown:12>> call rc.audio stop
+:: audio - sound engine stopped
+[RC] rc.shutdown:13>> call rc.firewall stop
+:: firewall - packet filter detached
+[RC] rc.shutdown:14>> call rc.network stop
+:: network - router daemon stopped
+[RC] rc.shutdown:15>> call rc.storage stop
+:: storage - volume caches flushed
+[RC] rc.shutdown:16>> call rc.kconf stop
+:: kconf - registry service stopped
+[RC] rc.shutdown:17>> call rc.devmgr stop
+:: devmgr - device manager stopped
+[RC] rc.shutdown:18>> call rc.syslog stop
+:: syslog - log daemon stopped
+[RC] rc.shutdown:21>> echo ":: Terminating user sessions..."
+:: Terminating user sessions...
+[RC] rc.shutdown:22>> owkill --all --term
+:: user sessions terminated (owkill --all)
+[RC] rc.shutdown:23>> sleep 1
+[RC] rc.shutdown:24>> owkill --all --kill
+:: user sessions terminated (owkill --all)
+[RC] rc.shutdown:27>> echo ":: Flushing kconf registry changes..."
+:: Flushing kconf registry changes...
+[RC] rc.shutdown:28>> kconfctl save
+:: kconf registry committed to disk
+[RC] rc.shutdown:31>> echo ":: Flushing storage disk caches..."
+:: Flushing storage disk caches...
+[RC] rc.shutdown:32>> owdiskchk --flush
+:: disk check flushed dirty sectors
+[RC] rc.shutdown:33>> sync
+:: storage caches flushed (sync)
+[RC] rc.shutdown:35>> echo ":: System safely halted."
+:: System safely halted.
+[FINISHED] Run Control Shutdown (code 0x11AC0D)
+[RC] shutdown sequence complete
+[SHUTDOWN] System halted.
+========================================================
+  You can safely power off your device now.
+========================================================
+

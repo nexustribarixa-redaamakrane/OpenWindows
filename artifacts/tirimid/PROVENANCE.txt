@@ -1,0 +1,60 @@
+OpenWindows - Tirimid test package - PROVENANCE
+================================================
+
+Produced:  2026-10-08 20:11:43 +00:00
+Host:      DESKTOP-GI1JNJN  Windows  PowerShell 7.6.6
+Repo:      C:\Users\KARIMABENDA\Documents\OpenWindows
+Commit:    06984b4da27caa5cce64112e0a0a97466ae93b7a
+Subject:   docs: rewrite README with implementation details
+
+Working tree at packaging time:
+   M boot/stage1.S
+   M boot/stage1disk.S
+   M core/memory.c
+  ?? artifacts/
+  ?? tools/ppm2png.py
+  ?? tools/tirimid_capture.ps1
+  ?? tools/vgatext.py
+
+Toolchain:
+  gcc     gcc.exe (GCC) 15.2.0
+  nasm    NASM version 3.01 compiled on Oct 10 2025
+  python  Python 3.14.5
+  qemu    QEMU emulator version 11.1.0 (v11.1.0-12130-ge470268ff4)
+  qemu-imgqemu-img version 11.1.0 (v11.1.0-12130-ge470268ff4)
+
+Build commands:
+  make CIS_DEV_TRUST=1 qemu
+  make CIS_DEV_TRUST=1 vbox-image
+  make CIS_DEV_TRUST=1 owx-entries
+  nasm -f bin boot\stage1disk.S -o stage1disk.bin
+  python tools\mkboot.py stage1disk.bin <openwinkrnl_vbox.bin> openwinkrnl_tirimid_disk.img 4194304
+  qemu-img convert -f raw -O vdi openwinkrnl_tirimid_disk.img openwinkrnl_tirimid_disk.vdi
+
+Capture commands:
+  pwsh -File tools\tirimid_capture.ps1 -Image <disk.img> -Media disk -OutDir <dir>
+  python tools\ppm2png.py --dir <dir>
+  python tools\vgatext.py <dir>\<name>.vgabin -o <dir>\<name>.txt
+
+Modified source files (required for disk/floppy boot):
+  core/memory.c     skip ISA reserved window when bump-allocating the RAM pool
+  boot/stage1.S     zero .bss from multiboot header end fields
+  boot/stage1disk.S zero .bss from multiboot header end fields
+  tools/tirimid_capture.ps1  (new) screenshot capture driver
+  tools/ppm2png.py           (new) PPM -> PNG
+  tools/vgatext.py           (new) 0xB8000 dump -> 80x25 text
+
+Follow-up investigation (post-packaging); the historical provenance above is unchanged:
+  - make CIS_DEV_TRUST=1 hosttest: 771 passed, 0 failed.
+  - CIS enforcement-scope findings recorded in artifacts/tirimid/TESTER_NOTES.md
+    section 4.4 and docs/CIS.md (Enforcement scope):
+      * Userspace .owx license/policy enforcement: ACTIVE (ps/owx_loader.c).
+      * Live kernel license/provenance enforcement during boot: NOT WIRED
+        (OwSentinelVerifyKernelProvenance has zero callers; the boot path calls
+        only OwSentinelVerifyKernelChecksum).
+      * Empirically: a CORE_KERNEL / Apache-2.0 dev-signed kernel image boots;
+        a Proprietary dev-signed userspace owinit.owx is refused (POLICY-REFUSED).
+      * Known issue: the halt reason is reported as OWINIT_MISSING when the
+        actual cause is POLICY-REFUSED.
+  - No source-code behavior was changed, and the packaged tester images were
+    not rebuilt, for this investigation.

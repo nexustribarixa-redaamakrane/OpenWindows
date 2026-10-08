@@ -1,0 +1,25 @@
+===================================================================
+                        O P E N W I N D O W S
+                     Kernel 0.1.0 - Boot Monitor
+===================================================================
+---
+OpenWindows storage live
+---
+ow-krnl> fs list
+  [DIR ] System (ino 1)
+  [FILE] bootvid.owd (ino 2)
+[FS] list root: OK (2 entries)
+ow-krnl> fs status
+[FS] OWFS: MOUNTED  free blocks: 1772
+[FS] USFS: MOUNTED  free blocks: 2029
+ow-krnl> fs umount
+[FS] owfs umount: OK (code 0x0)
+ow-krnl> fs mount
+[FS] owfs mount: OK (code 0x0)
+ow-krnl> fs read bootvid.owd
+[FS] read 'bootvid.owd' (24 bytes):
+---
+OpenWindows storage live
+---
+ow-krnl>
+OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

@@ -173,9 +173,21 @@ load_chs:
 ; Read complete: fetch the entry pointer, enter protected mode, jump.
 ; ===========================================================================
 read_done:
+    ; Fetch the flat-image header longwords before the mode switch: the
+    ; entry address into ESI, and the .bss bounds into EBX/ECX so they
+    ; survive it (EAX is consumed by the CR0 dance below).
+    ;
+    ; The .bss bounds are mandatory, not an optimisation.  objcopy -O
+    ; binary emits no bytes for .bss, and the multiboot loader zeroes it
+    ; for the -kernel path, but this real-mode bootstrap has no loader to
+    ; do that job.  Without it the scheduler starts on whatever garbage
+    ; was in RAM across ~0x4F050..0x2D06440 (process/thread tables, shell
+    ; state, the in-memory volume) and the first Ring 3 entry dies #GP.
     mov ax, LOAD_SEG0
     mov es, ax
-    mov esi, [es:0x1C]              ; entry RVA from the flat image header
+    mov esi, [es:0x1C]              ; entry from the flat image header
+    mov ebx, [es:0x14]              ; _end_of_file (start of .bss)
+    mov ecx, [es:0x18]              ; _end_of_bss  (end of .bss)
 
     mov ax, 0
     mov es, ax
@@ -197,6 +209,16 @@ pmode:
     mov gs, ax
     mov ss, ax
     mov esp, 0x00090000
+
+    ; Zero .bss over [EBX, ECX): C requires it, and nothing below has
+    ; touched those pages yet, so this is still plain physical memory.
+    ; ES is flat (base 0), so EDI is a linear address.  The stack is set
+    ; but empty, so writing through its address changes nothing in use.
+    cld
+    mov edi, ebx
+    sub ecx, edi
+    xor eax, eax
+    rep stosb
 
     jmp esi
 
