@@ -23,6 +23,13 @@ typedef uint32_t OW_STATUS;
 #define OW_ERR_IO               0x00000001U
 #define OW_ERR_CORRUPT          0x0011A3E0U
 
+/* Not an error and not a success: a check the active policy has waived (e.g. a
+ * development build booting a test volume that deliberately omits the on-volume
+ * kernel image).  Distinct from OW_SUCCESS so no consumer can mistake "skipped"
+ * for "verified", and outside the OW_ERR_* range so it is never a fault code.
+ * 0x0000AExx, disjoint from every other status family. */
+#define OW_WRN_NOT_VERIFIED     0x0000AE01U
+
 /* CIS refusals from the image loader.
  *
  * A distinct status per verdict, not one OW_ERR_CORRUPT for all of them.  The

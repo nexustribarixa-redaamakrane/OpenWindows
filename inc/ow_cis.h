@@ -112,6 +112,12 @@ typedef struct _OW_CIS_POLICY {
     bool     AllowUnsignedRecovery;
     /* Largest image CIS will measure, as a bounds check before hashing. */
     uint32_t MaxImageSize;
+    /* Whether the kernel image (openwinkrnl.owx) and its provenance metadata
+     * MUST be present on the volume and verify at boot.  True in a production
+     * build.  A development build (CIS_DEV_TRUST) relaxes it so seeded test
+     * volumes that deliberately omit the kernel image still boot -- with a
+     * warning and no claimed verification, never a fabricated success. */
+    bool     RequireKernelImage;
 } OW_CIS_POLICY;
 
 /* ---- Lifecycle ---------------------------------------------------------- */
@@ -153,6 +159,14 @@ OW_STATUS OwCisTestArm(void);
 
 const OW_CIS_POLICY* OwCisPolicy(void);
 OW_STATUS             OwCisSetUnsignedRecoveryAllowed(bool Allow);
+
+/* Set whether the on-volume kernel image (openwinkrnl.owx) and its provenance
+ * are mandatory at boot.  A production build defaults this to true; a
+ * CIS_DEV_TRUST build defaults it to false so test volumes that omit the
+ * kernel image boot with a warning instead of halting.  Cannot be relaxed
+ * before CIS is armed, and never turns a missing or refused image into a
+ * success -- it only decides whether absence is fatal. */
+OW_STATUS             OwCisSetRequireKernelImage(bool Require);
 
 /* ---- Verification ------------------------------------------------------ */
 

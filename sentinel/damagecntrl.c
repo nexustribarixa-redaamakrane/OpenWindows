@@ -152,6 +152,64 @@ OW_STATUS OwSentinelVerifyKernelProvenance(const void* Image, uint32_t ImageSize
     return OW_SUCCESS;
 }
 
+/* Read openwinkrnl.owx off the primary volume and hold it to the CORE_KERNEL
+ * provenance policy.  Mirrors OwSentinelVerifyKernelChecksum: the running
+ * (flat) kernel carries no CIS block, so the on-volume image is the only
+ * artifact that can be attested.
+ *
+ * Return value distinguishes the three outcomes the caller must not conflate:
+ *   OW_SUCCESS          image present and provenance verified
+ *   OW_WRN_NOT_VERIFIED image absent, policy allows it (development build);
+ *                       verification did NOT happen and is not claimed
+ *   anything else       refusal -- absent when required, malformed, or a CIS
+ *                       policy/licence failure (the last of which BanHammers
+ *                       inside OwSentinelVerifyKernelProvenance)
+ *
+ * A missing image, missing CIS block, bad signature or rejected licence is
+ * never mapped onto OW_SUCCESS here. */
+OW_STATUS OwSentinelVerifyKernelProvenanceFromVolume(void) {
+    static uint8_t s_kernel_image[OW_KERNEL_IMAGE_MAX];
+    const OW_CIS_POLICY* policy;
+    const owx_header_t* hdr;
+    uint32_t len = 0;
+    OW_STATUS st;
+
+    if (!OwCisIsReady()) {
+        ow_kprintf("[SENTINEL] CIS subsystem not ready - kernel provenance cannot be verified\r\n");
+        return OW_ERR_CIS_ERROR;
+    }
+
+    st = OwFsOwfsRead(OW_KERNEL_IMG_NAME, s_kernel_image,
+                      (uint32_t)sizeof(s_kernel_image), &len);
+    if (!ow_status_success(st) || len == 0u) {
+        policy = OwCisPolicy();
+        if (!policy || policy->RequireKernelImage) {
+            ow_kprintf("[SENTINEL] CRITICAL: %s required by policy but absent or "
+                       "unreadable on the volume\r\n", OW_KERNEL_IMG_NAME);
+            return OW_ERR_NOT_FOUND;
+        }
+        ow_kprintf("[SENTINEL] kernel provenance NOT verified: %s absent on the "
+                   "volume (development policy tolerates absence; enforcement "
+                   "skipped)\r\n", OW_KERNEL_IMG_NAME);
+        return OW_WRN_NOT_VERIFIED;
+    }
+
+    if (len < OWX_HEADER_SIZE) {
+        ow_kprintf("[SENTINEL] CRITICAL: %s is too small to be an OWX image "
+                   "(%u byte(s))\r\n", OW_KERNEL_IMG_NAME, (unsigned)len);
+        return OW_ERR_CORRUPT;
+    }
+
+    hdr = (const owx_header_t*)(const void*)s_kernel_image;
+    if (hdr->magic != OWX_MAGIC || hdr->image_size > len) {
+        ow_kprintf("[SENTINEL] CRITICAL: %s has an invalid OWX header\r\n",
+                   OW_KERNEL_IMG_NAME);
+        return OW_ERR_CORRUPT;
+    }
+
+    return OwSentinelVerifyKernelProvenance(s_kernel_image, hdr->image_size, len);
+}
+
 OW_STATUS OwSentinelVerifyRecoveryKernel(const void* Image, uint32_t FileSize) {
     const owx_header_t* hdr;
     OW_CIS_VERDICT verdict;

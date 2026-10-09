@@ -301,6 +301,21 @@ static OW_PROCESS_OBJECT* boot_launch_init(const char* image_name,
         return (OW_PROCESS_OBJECT*)0;
     }
 
+    /* Recovery images carry the explicit recovery-policy gate at the sentinel
+     * boundary, in addition to the loader's own per-image CIS check later in the
+     * hand-off.  Only the emergency init (owinitv) reaches here in that state;
+     * owinit is subsystem NATIVE and is covered by the kernel-provenance path
+     * above.  A refused recovery image fails here rather than being entered and
+     * failing at CPL3. */
+    if (g_System.UserspaceState == OW_USERSPACE_EMERGENCY) {
+        OW_STATUS rvst = OwSentinelVerifyRecoveryKernel(s_init_image, read_len);
+        if (ow_status_error(rvst)) {
+            km_line(0x0C, "[OWINIT]", "%s recovery policy verification FAILED",
+                    process_name);
+            return (OW_PROCESS_OBJECT*)0;
+        }
+    }
+
     oproc = OwPsCreateProcess(process_name, OW_PS_PID_KERNEL);
     if (!oproc) {
         km_line(0x0C, "[OWINIT]", "%s process creation FAILED", process_name);
@@ -699,13 +714,37 @@ void _start(void) {
         {
             OW_STATUS chkst = OwSentinelVerifyKernelChecksum();
             int chkok = ow_status_success(chkst);
+            int provok = 1;
             if (chkok) {
                 km_line(0x0A, "[SENT]", "kernel checksum verified (openwinkrnl.chk)");
             } else {
                 km_line(0x0C, "[SENT]", "kernel checksum CORRUPTED (openwinkrnl.chk)");
             }
-            boot_diag_done(53, chkok ? OW_SUCCESS : OW_B_SENTINEL_INTEGRITY_FAIL,
-                           "Kernel Integrity", chkok, 6);
+
+            /* Provenance/licence of the on-volume kernel image, held to the
+             * CORE_KERNEL policy.  In a production build the image and its CIS
+             * block are mandatory: absence, a missing block, a bad signature or
+             * a rejected licence fails the check and never reports success.  A
+             * development build tolerates absence with an explicit warning and
+             * does not claim verification happened. */
+            if (chkok) {
+                OW_STATUS pst = OwSentinelVerifyKernelProvenanceFromVolume();
+                if (pst == OW_SUCCESS) {
+                    km_line(0x0A, "[SENT]", "kernel provenance verified (openwinkrnl.owx)");
+                } else if (pst == OW_WRN_NOT_VERIFIED) {
+                    km_line(0x0E, "[SENT]", "kernel provenance NOT verified: "
+                            "openwinkrnl.owx absent (development policy)");
+                } else {
+                    provok = 0;
+                    km_line(0x0C, "[SENT]", "kernel provenance FAILED (openwinkrnl.owx)");
+                    OwDiagBanHammer(pst, "sentinel",
+                                    "kernel image provenance/license policy "
+                                    "verification failed");
+                }
+            }
+
+            boot_diag_done(53, (chkok && provok) ? OW_SUCCESS : OW_B_SENTINEL_INTEGRITY_FAIL,
+                           "Kernel Integrity", (chkok && provok), 6);
         }
     } else {
         boot_skip_phase("Kernel Integrity", 53, 6);

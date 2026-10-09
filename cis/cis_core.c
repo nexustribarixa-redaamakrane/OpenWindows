@@ -125,6 +125,16 @@ OW_STATUS OwCisInitialize(void) {
     g_Cis.Policy.RequireSignature = true;
     g_Cis.Policy.AllowUnsignedRecovery = false;
     g_Cis.Policy.MaxImageSize = OW_CIS_DEFAULT_MAX_IMAGE_SIZE;
+    /* Production requires the on-volume kernel image and its provenance; a
+     * development build tolerates its absence so seeded test volumes that omit
+     * it still boot -- with a warning, never a claimed verification.  This is a
+     * compile-time decision, like the trust anchors, so no running kernel can
+     * be talked out of it. */
+#ifdef CIS_DEV_TRUST
+    g_Cis.Policy.RequireKernelImage = false;
+#else
+    g_Cis.Policy.RequireKernelImage = true;
+#endif
 
     /* The count is passed in rather than read from the macro inside the loop:
      * an unprovisioned build has OW_CIS_PINNED_KEY_COUNT == 0, and a loop
@@ -141,6 +151,8 @@ OW_STATUS OwCisInitialize(void) {
                "mandatory, unsigned recovery %s\r\n",
                (unsigned)g_Cis.KeyCount,
                g_Cis.Policy.AllowUnsignedRecovery ? "allowed" : "refused");
+    ow_kprintf("[CIS] kernel image provenance: openwinkrnl.owx %s\r\n",
+               g_Cis.Policy.RequireKernelImage ? "required" : "optional (development policy)");
     if (g_Cis.KeyCount == 0) {
         ow_kprintf("[CIS] no pinned keys: every image will be refused until a "
                    "release key is provisioned\r\n");
@@ -329,6 +341,18 @@ OW_STATUS OwCisSetUnsignedRecoveryAllowed(bool Allow) {
      * Unsigned recovery is a policy relaxation, not a signature relaxation,
      * so it can be argued with separately and only while CIS is armed. */
     g_Cis.Policy.AllowUnsignedRecovery = Allow;
+    return OW_SUCCESS;
+}
+
+OW_STATUS OwCisSetRequireKernelImage(bool Require) {
+    if (!cis_ready()) {
+        return OW_ERR_NOT_INITIALIZED;
+    }
+    /* RequireSignature is not negotiable through this API and never is.  Whether
+     * the kernel image must be present is a separate question from whether an
+     * image, once present, must be signed: relaxing this only decides whether
+     * absence is fatal, and can never make a missing or refused image verify. */
+    g_Cis.Policy.RequireKernelImage = Require;
     return OW_SUCCESS;
 }
 

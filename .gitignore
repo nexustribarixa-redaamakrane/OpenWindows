@@ -26,6 +26,15 @@ compile_commands.json
 *.vdi
 *.log
 
+# The tirimid test package ships prebuilt boot images on purpose, and its
+# README/MANIFEST reference them; the generic build-output rules above must not
+# swallow them the way they did before this path was re-included.
+!artifacts/tirimid/images/
+!artifacts/tirimid/images/*.bin
+!artifacts/tirimid/images/*.flp
+!artifacts/tirimid/images/*.img
+!artifacts/tirimid/images/*.vdi
+
 # Generated embedded image and checksum artifacts
 /boot/owinit_image.h
 /boot/owinit_image.chk

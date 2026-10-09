@@ -3368,6 +3368,39 @@ int main(int argc, char **argv) {
   }
 
   /* ------------------------------------------------------------------ */
+  /* Kernel provenance policy (absence handling)                        */
+  /* ------------------------------------------------------------------ */
+  /* The freshly formatted volume carries no openwinkrnl.owx yet.  The two
+   * outcomes that must never be conflated are pinned here: a development
+   * policy tolerates absence but reports it as NOT verified, and a production
+   * policy refuses absence outright.  Neither may return OW_SUCCESS, so a
+   * missing kernel image can never be laundered into a passing check. */
+  {
+    const OW_CIS_POLICY *kpol = OwCisPolicy();
+    bool saved = (kpol != NULL) ? kpol->RequireKernelImage : false;
+    OW_STATUS rst;
+
+    ow_kprintf("[STARTED] Kernel Provenance Policy\r\n");
+
+    (void)OwCisSetRequireKernelImage(false);
+    rst = OwSentinelVerifyKernelProvenanceFromVolume();
+    check_eq("development policy: absent kernel image is skipped, not verified",
+             (unsigned long)rst, (unsigned long)OW_WRN_NOT_VERIFIED);
+    check_window("development policy: skipped is not a claimed success",
+                 ow_status_success(rst), false);
+
+    (void)OwCisSetRequireKernelImage(true);
+    rst = OwSentinelVerifyKernelProvenanceFromVolume();
+    check_eq("production policy: absent kernel image is refused",
+             (unsigned long)rst, (unsigned long)OW_ERR_NOT_FOUND);
+    check_window("production policy: refusal is never a success",
+                 ow_status_success(rst), false);
+
+    (void)OwCisSetRequireKernelImage(saved);
+    ow_kprintf("[FINISHED] Kernel Provenance Policy\r\n");
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Provision owinit.owx                                               */
   /* ------------------------------------------------------------------ */
 
