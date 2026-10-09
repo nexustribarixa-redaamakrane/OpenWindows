@@ -560,6 +560,114 @@ qemu-emergency: $(QEMU_EMERG_BIN)
 	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_run.ps1 $(QEMU_EMERG_BIN) -Emergency
 
 # ==============================================================================
+# QEMU kernel provenance/licence regression: the real kernel, two artifacts.
+#
+# Both cases are packed by tools/owx_pack.py from the SAME kernel PE with the
+# same CORE_KERNEL policy class, source digest, and dev signature, so they are
+# byte-identical except for the licence declaration (and the signature over
+# it).  Each is embedded into its own boot/kprov_seed.c object -- which provides
+# the strong OwDiskSeedTestChk hook that writes openwinkrnl.chk + openwinkrnl.owx
+# on the test volume, and therefore links IN PLACE OF boot/owchk_seed.o -- and
+# booted through the real Phase 5d provenance path:
+#
+#   control (GPL-3.0-or-later)  CIS trusts it; the boot must reach the shell
+#                               hand-off.
+#   denied  (Apache-2.0)        CIS refuses the CORE_KERNEL licence; the sentinel
+#                               reports a fatal provenance/licence failure and the
+#                               kernel halts before the shell hand-off.
+#
+# The checksum passes in BOTH cases (that is what isolates the licence verdict
+# being tested), and is computed at boot from the embedded bytes, so the fixture
+# cannot drift from the checksum it is paired with.  tools/qemu_provenance_test.ps1
+# asserts the two transcripts; qemu_run.ps1 is not used here because one case is
+# expected to halt and that script only knows the healthy transcript.
+#
+# Both cases need CIS_DEV_TRUST=1: the artifacts are signed with the development
+# key, which only a CIS_DEV_TRUST build pins in the trust store, and the seed
+# object deliberately replaces boot/owchk_seed.o.
+# ==============================================================================
+KPROV_CONTROL_DIR = $(QEMU_DIR)/kprov_control
+KPROV_DENIED_DIR  = $(QEMU_DIR)/kprov_denied
+KPROV_CONTROL_OWX = $(KPROV_CONTROL_DIR)/kprov.owx
+KPROV_DENIED_OWX  = $(KPROV_DENIED_DIR)/kprov.owx
+KPROV_CONTROL_BIN = $(QEMU_DIR)/openwinkrnl_qemu_prov_control.bin
+KPROV_DENIED_BIN  = $(QEMU_DIR)/openwinkrnl_qemu_prov_denied.bin
+KPROV_SIGN_ARGS   = --policy-class CORE_KERNEL --source-digest $(MANIFEST_DIGEST) --sign-dev
+
+# license-manifest is phony, so both artifacts are repacked on every invocation;
+# a provenance regression should test what a clean build would produce, not what
+# a previous run happened to leave behind.
+$(KPROV_CONTROL_OWX): $(PE_IMAGE) tools/owx_pack.py license-manifest
+	@mkdir -p $(KPROV_CONTROL_DIR)
+	python tools/owx_pack.py $(PE_IMAGE) $@ --subsystem $(OWX_SUBSYSTEM) \
+	    --cis-licence GPL-3.0-or-later $(KPROV_SIGN_ARGS)
+
+$(KPROV_DENIED_OWX): $(PE_IMAGE) tools/owx_pack.py license-manifest
+	@mkdir -p $(KPROV_DENIED_DIR)
+	python tools/owx_pack.py $(PE_IMAGE) $@ --subsystem $(OWX_SUBSYSTEM) \
+	    --cis-licence Apache-2.0 $(KPROV_SIGN_ARGS)
+
+$(KPROV_CONTROL_DIR)/kprov_image.h: $(KPROV_CONTROL_OWX) tools/embed_owx.py
+	@mkdir -p $(KPROV_CONTROL_DIR)
+	python tools/embed_owx.py $< $@ --no-pack --symbol g_kprov_image \
+	    --size-macro KPROV_IMAGE_SIZE --guard KPROV_IMAGE_GENERATED_H \
+	    --note "Control: CORE_KERNEL / GPL-3.0-or-later. Signed kernel artifact for the provenance regression."
+
+$(KPROV_DENIED_DIR)/kprov_image.h: $(KPROV_DENIED_OWX) tools/embed_owx.py
+	@mkdir -p $(KPROV_DENIED_DIR)
+	python tools/embed_owx.py $< $@ --no-pack --symbol g_kprov_image \
+	    --size-macro KPROV_IMAGE_SIZE --guard KPROV_IMAGE_GENERATED_H \
+	    --note "Denied: CORE_KERNEL / Apache-2.0 (violates the GPL policy). Signed kernel artifact for the provenance regression."
+
+# The header on each case's include path (via -I), not the object, is what
+# carries the case; the source is byte-identical for both.
+$(KPROV_CONTROL_DIR)/kprov_seed.o: boot/kprov_seed.c $(KPROV_CONTROL_DIR)/kprov_image.h
+	@mkdir -p $(KPROV_CONTROL_DIR)
+	$(CC) $(CFLAGS) -I$(KPROV_CONTROL_DIR) -c $< -o $@
+
+$(KPROV_DENIED_DIR)/kprov_seed.o: boot/kprov_seed.c $(KPROV_DENIED_DIR)/kprov_image.h
+	@mkdir -p $(KPROV_DENIED_DIR)
+	$(CC) $(CFLAGS) -I$(KPROV_DENIED_DIR) -c $< -o $@
+
+# Same picture as the other QEMU images, but with boot/owchk_seed.o swapped for
+# the provenance case's seed.
+$(KPROV_CONTROL_BIN): $(ALL_OBJS) boot/owinit_seed.o boot/owinitv_seed.o boot/owrs_seed.o \
+                      $(KPROV_CONTROL_DIR)/kprov_seed.o $(OWINIT_HEADER) $(EMERGENCY_HDRS) \
+                      $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_prov_control.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    boot/owinit_seed.o boot/owinitv_seed.o boot/owrs_seed.o \
+	    $(KPROV_CONTROL_DIR)/kprov_seed.o $(ALL_OBJS) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_prov_control.exe $@
+	@echo "QEMU provenance control image (CORE_KERNEL / GPL-3.0-or-later): $@"
+
+$(KPROV_DENIED_BIN): $(ALL_OBJS) boot/owinit_seed.o boot/owinitv_seed.o boot/owrs_seed.o \
+                     $(KPROV_DENIED_DIR)/kprov_seed.o $(OWINIT_HEADER) $(EMERGENCY_HDRS) \
+                     $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_prov_denied.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    boot/owinit_seed.o boot/owinitv_seed.o boot/owrs_seed.o \
+	    $(KPROV_DENIED_DIR)/kprov_seed.o $(ALL_OBJS) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_prov_denied.exe $@
+	@echo "QEMU provenance denied image (CORE_KERNEL / Apache-2.0): $@"
+
+ifeq ($(CIS_DEV_TRUST),1)
+qemu-provenance: $(KPROV_CONTROL_BIN) $(KPROV_DENIED_BIN)
+	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_provenance_test.ps1 \
+	    $(KPROV_CONTROL_BIN) $(KPROV_DENIED_BIN)
+else
+qemu-provenance:
+	@echo "qemu-provenance requires CIS_DEV_TRUST=1: the test artifacts are signed"
+	@echo "with the development key, which only a CIS_DEV_TRUST build pins in the"
+	@echo "trust store. Run: make CIS_DEV_TRUST=1 qemu-provenance"
+	@exit 1
+endif
+
+# ==============================================================================
 # VirtualBox floppy boot test: relinks the same flat kernel (boot/qboot.S +
 # boot/qemu_entry.c + ALL_OBJS) at 0x10000 via boot/vbox.ld, packs stage1.S +
 # the flat image into a 1.44MB floppy (tools/mkboot.py), and launches it in
@@ -728,5 +836,5 @@ emergency: $(EMERGENCY_OWX)
 	python tools/check_owx_entries.py --self-test
 	python tools/check_owx_entries.py $(EMERGENCY_DIR)
 
-.PHONY: all clean vm hosttest qemu qemu-emergency vbox vbox-image vdi vdi-test \
+.PHONY: all clean vm hosttest qemu qemu-emergency qemu-provenance vbox vbox-image vdi vdi-test \
         owx-entries emergency
