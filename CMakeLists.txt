@@ -283,9 +283,10 @@ ow_emergency_image(owrs owrs_main g_owrs_image OWRS_IMAGE_SIZE
 #
 # openwinkrnl.chk is the sentinel's kernel-checksum fixture.  It is not a
 # userspace image, so it is not part of the per-image set, but every seeded test
-# image needs it: Phase 5d halts with a fatal integrity code when it is absent,
-# and that halt lands AFTER the init is entered, so an image that omits this
-# looks like a kernel-integrity failure rather than a missing fixture.
+# image needs it: the kernel-integrity phase (Phase 5c.2, before the init
+# hand-off) halts with a fatal integrity code when it is absent, so an image
+# that omits this looks like a kernel-integrity failure rather than a missing
+# fixture.
 #
 # This mirrors the Makefile's SEED_OBJS and is deliberately NOT in the default
 # build: there is no test-image link line in the CMake tree to pull it in, and

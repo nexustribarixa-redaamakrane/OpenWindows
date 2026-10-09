@@ -1,9 +1,9 @@
 # qemu_provenance_test.ps1 - two-case kernel provenance/licence regression.
 #
 # Boots two otherwise-identical kernel images, each carrying a signed
-# openwinkrnl.owx and its matching openwinkrnl.chk, through the real Phase 5d
-# path (OwSentinelVerifyKernelProvenanceFromVolume), and checks the outcome the
-# CORE_KERNEL policy demands:
+# openwinkrnl.owx and its matching openwinkrnl.chk, through the real pre-init
+# kernel-integrity/provenance phase (OwSentinelVerifyKernelProvenanceFromVolume),
+# and checks the outcome the CORE_KERNEL policy demands:
 #
 #   control  CORE_KERNEL / GPL-3.0-or-later  -> CIS TRUSTED, boot reaches the
 #                                               shell hand-off.
@@ -61,11 +61,18 @@ function Assert-Absent {
     if ($Text.Contains($Needle)) { Write-Host "[FAIL] $Name -- must NOT contain: $Needle"; $script:failed = $true }
     else { Write-Host "[PASS] $Name" }
 }
+function Assert-Order {
+    param([string]$Name, [string]$Text, [string]$First, [string]$Second)
+    $i = $Text.IndexOf($First)
+    $j = $Text.IndexOf($Second)
+    if ($i -ge 0 -and $j -ge 0 -and $i -lt $j) { Write-Host "[PASS] $Name" }
+    else { Write-Host "[FAIL] $Name -- expected '$First' before '$Second' (idx $i vs $j)"; $script:failed = $true }
+}
 
 # Boot one image, stream its serial output, and return the transcript.  $Done is
 # the substring that marks the run's terminal state (the shell hand-off for the
-# control, the halt banner for the denied case); it bounds the wait so a boot
-# that never gets there fails rather than hanging forever.
+# control, the critical-error-code line for the denied case); it bounds the wait
+# so a boot that never gets there fails rather than hanging forever.
 function Invoke-QemuCase {
     param([string]$Image, [string]$Done, [int]$TimeoutSeconds, [int]$Port)
 
@@ -103,8 +110,12 @@ function Invoke-QemuCase {
             }
             if ($sb.ToString().Contains($Done)) {
                 $matched = $true
-                # Drain whatever the terminal state flushed right after the marker.
-                Start-Sleep -Milliseconds 500
+                # $Done is the run's terminal line: the shell hand-off for the
+                # control, and for the denied case "CRITICAL ERROR CODE:" -- the
+                # last line the halt path emits.  Everything the assertions read
+                # has therefore already been appended by the read above, so a
+                # non-blocking sweep of any bytes buffered in the same tick is
+                # enough; no fixed post-match sleep is needed.
                 while ($stream.DataAvailable) {
                     $n = $stream.Read($buf, 0, $buf.Length)
                     if ($n -gt 0) { [void]$sb.Append([System.Text.Encoding]::ASCII.GetString($buf, 0, $n)) }
@@ -140,7 +151,11 @@ Assert-Absent  "control: no checksum mismatch"                      $ta "SHA-256
 Assert-Present "control: CIS trusts the artifact"                   $ta "[CIS] openwinkrnl.owx: TRUSTED"
 Assert-Present "control: GPL CORE_KERNEL policy verified"           $ta "Kernel provenance & CORE_KERNEL GPL policy verified (OK)"
 Assert-Present "control: sentinel records provenance verified"      $ta "[SENT] kernel provenance verified (openwinkrnl.owx)"
+Assert-Present "control: PID 1 executes"                            $ta "[OWINIT] owinit entered at CPL3 (PID 1)"
+Assert-Present "control: userspace image is launched"               $ta "[PS] owinit: image entered at CPL3"
 Assert-Present "control: boot reaches the shell hand-off"           $ta "[INIT] handing off to shell 'sh' as init process..."
+Assert-Order   "control: provenance approved before PID 1 entered"  $ta "[SENT] kernel provenance verified" "[OWINIT] owinit entered at CPL3"
+Assert-Order   "control: PID 1 entered before shell hand-off"       $ta "[OWINIT] owinit entered at CPL3" "[INIT] handing off to shell"
 Assert-Absent  "control: no fatal halt"                             $ta "[FATAL] SYSTEM HALTED"
 Assert-Absent  "control: no critical error code"                    $ta "CRITICAL ERROR CODE:"
 
@@ -149,7 +164,7 @@ Assert-Absent  "control: no critical error code"                    $ta "CRITICA
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "=== Case B (denied): CORE_KERNEL / Apache-2.0 -- must be refused ==="
-$b = Invoke-QemuCase -Image $DeniedImage -Done "[FATAL] SYSTEM HALTED" `
+$b = Invoke-QemuCase -Image $DeniedImage -Done "CRITICAL ERROR CODE:" `
                      -TimeoutSeconds 120 -Port ($basePort + 1)
 $tb = $b.Text
 Set-Content -Path (Join-Path $work "denied.txt") -Value $tb
@@ -160,6 +175,8 @@ if (-not $b.Matched) {
 }
 Assert-Present "denied: provenance fixture seeded onto the volume"  $tb "[KPROV] test volume: seeded openwinkrnl.owx"
 Assert-Present "denied: the integrity phase ran"                    $tb "[STARTED] Kernel Integrity"
+Assert-Present "denied: an init was present in the survey"          $tb "[OWINIT] userspace survey: primary(ok)"
+Assert-Present "denied: the survey resolved to PRIMARY"             $tb "-> state PRIMARY"
 Assert-Present "denied: kernel integrity verified (checksum OK)"    $tb "Kernel integrity verified via openwinkrnl.chk:"
 Assert-Absent  "denied: no checksum mismatch (isolation holds)"     $tb "SHA-256 checksum mismatch"
 Assert-Present "denied: CIS refuses the licence specifically"       $tb "[CIS] policy refused: CORE_KERNEL requires GPL-3.0-or-later"
@@ -167,6 +184,9 @@ Assert-Present "denied: artifact refused by policy"                 $tb "[CIS] o
 Assert-Present "denied: critical provenance/licence failure"        $tb "kernel provenance/license policy failed: POLICY-REFUSED"
 Assert-Present "denied: system halts"                               $tb "[FATAL] SYSTEM HALTED"
 Assert-Present "denied: halt reports a critical error code"         $tb "CRITICAL ERROR CODE:"
+Assert-Order   "denied: refusal precedes the halt"                  $tb "kernel provenance/license policy failed: POLICY-REFUSED" "[FATAL] SYSTEM HALTED"
+Assert-Absent  "denied: PID 1 is never entered"                     $tb "[OWINIT] owinit entered at CPL3"
+Assert-Absent  "denied: no userspace image is launched"             $tb "[PS] owinit: image entered at CPL3"
 Assert-Absent  "denied: shell hand-off is never reached"            $tb "[INIT] handing off to shell"
 Assert-Absent  "denied: interactive shell prompt is never reached"  $tb "ow-krnl>"
 

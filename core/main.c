@@ -643,6 +643,84 @@ void _start(void) {
         ow_hlt_loop();
     }
 
+    /* Phase 5c.2: kernel checksum + provenance, BEFORE any userspace runs.
+     *
+     * This is the last verification before the hand-off below, and that is the
+     * whole point of its position.  The kernel image on the volume is checked
+     * for integrity AND held to the CORE_KERNEL provenance/licence policy while
+     * the boot thread still has exclusive CPU and no PID 1 exists.  A kernel
+     * that passes integrity but fails policy is refused HERE, so its init is
+     * never mapped, never entered, and never runs.
+     *
+     * Every dependency is satisfied by this point: the primary OWFS volume and
+     * the storage engine are up (Phase 5 / 5b); openwinkrnl.owx and its .chk are
+     * on the volume (provisioned by the real installation, or seeded by a test
+     * image during the Phase 5c survey); and CIS is armed (Phase 5c.1) --
+     * OwSentinelVerifyKernelProvenanceFromVolume() refuses to run while
+     * OwCisIsReady() is false.  Any earlier and the volume is not mounted yet;
+     * any later and userspace has already started.
+     *
+     * Integrity and policy stay separate: the provenance check below is reached
+     * only after the checksum passes, and a checksum pass on its own never
+     * implies a licence pass. */
+    if (OwRunlevelRequires(OW_RUNLVL_F_INTEGRITY)) {
+        boot_begin("Kernel Integrity");
+        {
+            OW_STATUS chkst = OwSentinelVerifyKernelChecksum();
+            int chkok = ow_status_success(chkst);
+            int provok = 1;
+            if (chkok) {
+                km_line(0x0A, "[SENT]", "kernel checksum verified (openwinkrnl.chk)");
+            } else {
+                km_line(0x0C, "[SENT]", "kernel checksum CORRUPTED (openwinkrnl.chk)");
+            }
+
+            /* Provenance/licence of the on-volume kernel image, held to the
+             * CORE_KERNEL policy.  In a production build the image and its CIS
+             * block are mandatory: absence, a missing block, a bad signature or
+             * a rejected licence fails the check and never reports success.  A
+             * development build tolerates absence with an explicit warning and
+             * does not claim verification happened. */
+            if (chkok) {
+                OW_STATUS pst = OwSentinelVerifyKernelProvenanceFromVolume();
+                if (pst == OW_SUCCESS) {
+                    km_line(0x0A, "[SENT]", "kernel provenance verified (openwinkrnl.owx)");
+                } else if (pst == OW_WRN_NOT_VERIFIED) {
+                    km_line(0x0E, "[SENT]", "kernel provenance NOT verified: "
+                            "openwinkrnl.owx absent (development policy)");
+                } else {
+                    provok = 0;
+                    km_line(0x0C, "[SENT]", "kernel provenance FAILED (openwinkrnl.owx)");
+                    OwDiagBanHammer(pst, "sentinel",
+                                    "kernel image provenance/license policy "
+                                    "verification failed");
+                }
+            }
+
+            boot_diag_done(53, (chkok && provok) ? OW_SUCCESS : OW_B_SENTINEL_INTEGRITY_FAIL,
+                           "Kernel Integrity", (chkok && provok), 6);
+        }
+    } else {
+        boot_skip_phase("Kernel Integrity", 53, 6);
+    }
+
+    /* The hand-off below enters userspace, so it must not run unless the phase
+     * above ran.  That phase is gated on OW_RUNLVL_F_INTEGRITY; the hand-off is
+     * gated on OW_RUNLVL_F_OWINIT, and every profile that arms the latter arms
+     * the former (core/runlevel.c).  The ordering depends on that invariant, so
+     * if a future profile ever separates the two, fail closed here rather than
+     * enter an unverified init. */
+    if (OwRunlevelRequires(OW_RUNLVL_F_OWINIT) &&
+        !OwRunlevelRequires(OW_RUNLVL_F_INTEGRITY)) {
+        km_line(0x0C, "[OWINIT]", "runlevel arms owinit without kernel integrity "
+                "- refusing to enter unverified userspace");
+        boot_diag_failed(52, OW_ERR_UNSUPPORTED, "owinit", 0);
+        OwDiagBanHammer(OW_ERR_UNSUPPORTED, "owinit",
+                        "runlevel enters userspace without kernel "
+                        "integrity/provenance verification armed");
+        ow_hlt_loop();
+    }
+
     /* Phase 5c.5: enter the init the survey chose.
      *
      * The loader charges the image out of the process's own frame run and maps
@@ -706,48 +784,6 @@ void _start(void) {
                             "fault, not a damaged owinitv.owx)");
             ow_hlt_loop();
         }
-    }
-
-    /* Phase 5d: Kernel Checksum & Integrity Validation (openwinkrnl.chk) */
-    if (OwRunlevelRequires(OW_RUNLVL_F_INTEGRITY)) {
-        boot_begin("Kernel Integrity");
-        {
-            OW_STATUS chkst = OwSentinelVerifyKernelChecksum();
-            int chkok = ow_status_success(chkst);
-            int provok = 1;
-            if (chkok) {
-                km_line(0x0A, "[SENT]", "kernel checksum verified (openwinkrnl.chk)");
-            } else {
-                km_line(0x0C, "[SENT]", "kernel checksum CORRUPTED (openwinkrnl.chk)");
-            }
-
-            /* Provenance/licence of the on-volume kernel image, held to the
-             * CORE_KERNEL policy.  In a production build the image and its CIS
-             * block are mandatory: absence, a missing block, a bad signature or
-             * a rejected licence fails the check and never reports success.  A
-             * development build tolerates absence with an explicit warning and
-             * does not claim verification happened. */
-            if (chkok) {
-                OW_STATUS pst = OwSentinelVerifyKernelProvenanceFromVolume();
-                if (pst == OW_SUCCESS) {
-                    km_line(0x0A, "[SENT]", "kernel provenance verified (openwinkrnl.owx)");
-                } else if (pst == OW_WRN_NOT_VERIFIED) {
-                    km_line(0x0E, "[SENT]", "kernel provenance NOT verified: "
-                            "openwinkrnl.owx absent (development policy)");
-                } else {
-                    provok = 0;
-                    km_line(0x0C, "[SENT]", "kernel provenance FAILED (openwinkrnl.owx)");
-                    OwDiagBanHammer(pst, "sentinel",
-                                    "kernel image provenance/license policy "
-                                    "verification failed");
-                }
-            }
-
-            boot_diag_done(53, (chkok && provok) ? OW_SUCCESS : OW_B_SENTINEL_INTEGRITY_FAIL,
-                           "Kernel Integrity", (chkok && provok), 6);
-        }
-    } else {
-        boot_skip_phase("Kernel Integrity", 53, 6);
     }
 
     /* Phase 6: Network Router */

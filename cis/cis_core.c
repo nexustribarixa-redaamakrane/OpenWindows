@@ -344,6 +344,14 @@ OW_STATUS OwCisSetUnsignedRecoveryAllowed(bool Allow) {
     return OW_SUCCESS;
 }
 
+#ifdef OW_HOST_HAL
+/* Host-build only.  A production kernel fixes this policy at initialization
+ * (OwCisInitialize sets it from CIS_DEV_TRUST) and has no runtime switch that a
+ * caller could use to lower it.  The host test needs both directions -- tolerate
+ * absence as NOT verified, and refuse absence outright -- so the setter lives
+ * here with the other host-only shims.  A production build has no definition,
+ * so an accidental production caller fails to link rather than silently
+ * weakening the policy. */
 OW_STATUS OwCisSetRequireKernelImage(bool Require) {
     if (!cis_ready()) {
         return OW_ERR_NOT_INITIALIZED;
@@ -355,6 +363,7 @@ OW_STATUS OwCisSetRequireKernelImage(bool Require) {
     g_Cis.Policy.RequireKernelImage = Require;
     return OW_SUCCESS;
 }
+#endif /* OW_HOST_HAL */
 
 OW_STATUS OwCisRecordVerdict(const char* Image,
                              const uint8_t* Digest,

@@ -230,12 +230,12 @@ __attribute__((weak)) bool OwDiskSeedTestOwrs(void)    { return false; }
 
 /* openwinkrnl.chk is not one of the three userspace images, so it is seeded
  * separately and unconditionally rather than being hung off one of them.  Every
- * seeded test image needs it: Phase 5d reads it off the volume and halts with a
- * fatal integrity code if it is absent, and that halt happens AFTER the init is
- * entered, so a test image that forgets this fixture boots to a working userspace
- * and then dies looking like tampering.  It was previously written by
+ * seeded test image needs it: the kernel-integrity phase (before the init
+ * hand-off) reads it off the volume and halts with a fatal integrity code if it
+ * is absent, so a test image that forgets this fixture halts looking like
+ * tampering before any userspace runs.  It was previously written by
  * owinit_seed.c, which is why the emergency image -- seeded without owinit.owx
- * -- failed Phase 5d. */
+ * -- failed the integrity phase. */
 __attribute__((weak)) bool OwDiskSeedTestChk(void)     { return false; }
 
 /* One-shot guard per hook: the provisioner must not rewrite an image that the
@@ -369,9 +369,9 @@ void OwDiskProbeUserspace(OW_USERSPACE_PROBE* out) {
 
     /* The integrity fixture is seeded here rather than by one of the three image
      * hooks because it belongs to the volume, not to any one image.  Doing it
-     * first keeps the failure mode sane: if this fails, Phase 5d will still halt
-     * with a fatal integrity code, but the log will already say why, next to the
-     * survey line that has just run. */
+     * first keeps the failure mode sane: if this fails, the kernel-integrity
+     * phase will still halt with a fatal integrity code, but the log will
+     * already say why, next to the survey line that has just run. */
     if (!g_seeded_chk) {
         g_seeded_chk = true;
         (void)OwDiskSeedTestChk();

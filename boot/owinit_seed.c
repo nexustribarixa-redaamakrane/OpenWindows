@@ -4,9 +4,9 @@
  * the Phase 5c owinit gate finds the Essentials owinit.owx on the freshly formatted
  * in-memory OWFS volume and the boot reaches the interactive shell, where
  * everything can be exercised from the terminal.
- * The openwinkrnl.chk fixture Phase 5d needs lives in boot/owchk_seed.c: it
- * belongs to the volume rather than to this one image, and an image seeded
- * without owinit.owx still has to pass the integrity phase.
+ * The openwinkrnl.chk fixture the integrity phase needs lives in
+ * boot/owchk_seed.c: it belongs to the volume rather than to this one image,
+ * and an image seeded without owinit.owx still has to pass the integrity phase.
  * Production images (openwinkrnl.owx, openwinkrnl.vdi) do not link this file:
  * there the weak hook returns false, nothing is seeded, and the owinit gate
  * keeps its fatal halt. */

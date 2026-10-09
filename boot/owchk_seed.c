@@ -2,13 +2,13 @@
  *
  * This used to live inside owinit_seed.c, which was a mistake of placement rather
  * than of intent.  openwinkrnl.chk is the sentinel's plaintext kernel-checksum
- * file: Phase 5d reads it off the primary volume and compares the SHA-256 it
- * names against the running image.  It has nothing to do with owinit.owx, so
- * coupling it to the owinit seed meant every image that was NOT seeded with
- * owinit.owx -- the emergency image above all -- booted to a working init and
- * then died in Phase 5d with a fatal U+11A001, which reads as a kernel
- * integrity failure and sends whoever sees it looking for tampering rather
- * than for a missing test fixture.
+ * file: the kernel-integrity phase (Phase 5c.2) reads it off the primary volume
+ * and compares the SHA-256 it names against the running image.  It has nothing
+ * to do with owinit.owx, so coupling it to the owinit seed meant every image
+ * that was NOT seeded with owinit.owx -- the emergency image above all -- had
+ * no checksum fixture at all and halted in that phase with a fatal U+11A001,
+ * which reads as a kernel integrity failure and sends whoever sees it looking
+ * for tampering rather than for a missing test fixture.
  *
  * So it gets its own hook, and every seeded test image links it.  The value is
  * the same fixed placeholder the previous copy used: the plaintext path accepts

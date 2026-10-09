@@ -114,9 +114,15 @@ OW_STATUS OwSentinelVerifyKernelChecksum(void) {
         }
     }
 
-    /* Fallback: image in memory, plaintext checksum validated */
-    ow_kprintf("[SENTINEL] Kernel integrity verified via %s: SHA-256=%s (OK)\r\n",
-               OW_KERNEL_CHK_NAME, expected_hex);
+    /* Fallback: the volume holds no image to hash, so nothing has been verified
+     * here.  The .chk file's SHA-256 was only format-checked above; printing it
+     * with "(OK)" made an unverified statement read like a passed image check,
+     * so this line names the absence explicitly.  Presence is decided by
+     * provenance, not by this function: on a production policy the absent image
+     * is refused there (OW_ERR_NOT_FOUND), and OW_SUCCESS here only means the
+     * .chk syntax was well-formed. */
+    ow_kprintf("[SENTINEL] no %s on volume; %s SHA-256 present but NOT verified against an image\r\n",
+               OW_KERNEL_IMG_NAME, OW_KERNEL_CHK_NAME);
     return OW_SUCCESS;
 }
 

@@ -161,11 +161,15 @@ const OW_CIS_POLICY* OwCisPolicy(void);
 OW_STATUS             OwCisSetUnsignedRecoveryAllowed(bool Allow);
 
 /* Set whether the on-volume kernel image (openwinkrnl.owx) and its provenance
- * are mandatory at boot.  A production build defaults this to true; a
- * CIS_DEV_TRUST build defaults it to false so test volumes that omit the
- * kernel image boot with a warning instead of halting.  Cannot be relaxed
- * before CIS is armed, and never turns a missing or refused image into a
- * success -- it only decides whether absence is fatal. */
+ * are mandatory at boot.
+ *
+ * Test-only, compiled into host builds only (OW_HOST_HAL), like the injection
+ * shims above; a production build has no definition of this symbol.  A
+ * production kernel fixes the policy at initialization -- true by default, and
+ * false under CIS_DEV_TRUST so test volumes that omit the kernel image boot
+ * with a warning instead of halting.  The setter cannot be relaxed before CIS
+ * is armed and never turns a missing or refused image into a success -- it only
+ * decides whether absence is fatal. */
 OW_STATUS             OwCisSetRequireKernelImage(bool Require);
 
 /* ---- Verification ------------------------------------------------------ */

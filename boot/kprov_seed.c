@@ -2,7 +2,7 @@
  *
  * The QEMU provenance regression (make qemu-provenance) boots the real kernel
  * with a signed openwinkrnl.owx embedded in the image and its matching
- * openwinkrnl.chk provisioned beside it, so the wired Phase 5d check
+ * openwinkrnl.chk provisioned beside it, so the wired pre-init check
  * (OwSentinelVerifyKernelProvenanceFromVolume) runs against a known artifact
  * instead of against whatever happens to be on the volume.
  *

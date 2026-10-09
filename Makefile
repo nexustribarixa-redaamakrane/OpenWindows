@@ -391,13 +391,15 @@ EMERGENCY_CFLAGS += $(CIS_DEV_CFLAGS)
 CIS_STAMP = $(EMERGENCY_DIR)/.cis_dev_trust
 CIS_STAMP_VALUE = CIS_DEV_TRUST=$(CIS_DEV_TRUST) SIGN_ARGS=$(OWX_SIGN_ARGS)
 
-# Runs every time.  Compares before writing: a changed value updates the
-# timestamp and so forces the images to be rebuilt, while an unchanged value
-# leaves the timestamp alone and the images stay cached.  Touching it
-# unconditionally would rebuild every image on every invocation, which is the
-# opposite of the point.
-.PHONY: $(CIS_STAMP)
-$(CIS_STAMP):
+# Runs every time (FORCE), but rewrites only on change: a changed value updates
+# the timestamp and so forces the affected objects and generated images to
+# rebuild, while an unchanged value leaves the timestamp alone and everything
+# stays cached.  $(CIS_STAMP) itself must NOT be .PHONY -- make treats a phony
+# prerequisite as always newer, which would rebuild every dependent on every run.
+.PHONY: FORCE
+FORCE:
+
+$(CIS_STAMP): FORCE
 	@mkdir -p $(EMERGENCY_DIR)
 	@printf '%s\n' '$(CIS_STAMP_VALUE)' > $@.new
 	@cmp -s $@.new $@ || mv $@.new $@
@@ -409,11 +411,19 @@ OWINITV_SEED_OBJ = boot/owinitv_seed.o
 OWRS_SEED_OBJ    = boot/owrs_seed.o
 # openwinkrnl.chk is the sentinel's kernel-checksum fixture.  It is not a
 # userspace image, so it is not part of the per-image set, but every seeded test
-# image needs it: Phase 5d halts with a fatal integrity code when it is absent,
-# and that halt lands AFTER the init is entered, so an image that omits this
-# looks like a kernel-integrity failure rather than a missing fixture.
+# image needs it: the kernel-integrity phase (Phase 5c.2, before the init
+# hand-off) halts with a fatal integrity code when it is absent, so an image
+# that omits this looks like a kernel-integrity failure rather than a missing
+# fixture.
 OWCHK_SEED_OBJ   = boot/owchk_seed.o
 SEED_OBJS        = $(OWINIT_SEED_OBJ) $(OWINITV_SEED_OBJ) $(OWRS_SEED_OBJ) $(OWCHK_SEED_OBJ)
+
+# CIS_DEV_TRUST changes CFLAGS for every kernel and seed object, but make cannot
+# see a flag change on its own.  Depend on the value-stamped CIS_STAMP so that
+# flipping the flag rebuilds these objects; without it, a plain `make` after a
+# CIS_DEV_TRUST build relinks the kernel from development-trust objects and packs
+# a production image that still pins the development key.
+$(ALL_OBJS) $(SEED_OBJS): $(CIS_STAMP)
 
 MAKEFILE_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Defaults to a neighboring checkout; override either variable for other layouts.
@@ -568,7 +578,7 @@ qemu-emergency: $(QEMU_EMERG_BIN)
 # it).  Each is embedded into its own boot/kprov_seed.c object -- which provides
 # the strong OwDiskSeedTestChk hook that writes openwinkrnl.chk + openwinkrnl.owx
 # on the test volume, and therefore links IN PLACE OF boot/owchk_seed.o -- and
-# booted through the real Phase 5d provenance path:
+# booted through the real Phase 5c.2 provenance path:
 #
 #   control (GPL-3.0-or-later)  CIS trusts it; the boot must reach the shell
 #                               hand-off.
