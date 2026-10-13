@@ -34,6 +34,16 @@
 #define OW_PS_PID_INIT          1U
 #define OW_PS_TID_SYSTEM        0U
 
+/* Security principals for the OWFS permission model.  UID 0 is the superuser
+ * and bypasses every permission and hidden-file check
+ * (OpenWindows-Storage/common/include/ow_sec.h).  Every process is created
+ * unprivileged; OwPsLoadImage promotes a process according to its image's OWX
+ * subsystem, which is the same byte the CIS measurement already records. */
+#define OW_PS_UID_ROOT          0U
+#define OW_PS_GID_ROOT          0U
+#define OW_PS_UID_USER          1000U
+#define OW_PS_GID_USER          1000U
+
 /* ---- Process / thread states (NT-flavored, non-POSIX) ------------------- */
 typedef enum _OW_PROCESS_STATE {
     OW_PS_PROC_CREATED = 0,
@@ -131,6 +141,18 @@ struct _OW_PROCESS_OBJECT {
     uint64_t            UserBrk;        /* next free user heap byte       */
     uint64_t            UserStackTop;   /* top of this process's user stack */
     uint64_t            EntryReturn;    /* C-ABI return address for the image entry */
+
+    /* ---- Security principal (OWFS permission model) ----------------------
+     * OWFS makes its access decisions against a single global current identity
+     * (ow_sec.h), which is superuser by default and which the kernel never
+     * changed -- so every OWFS check was decided against root.  Pinning the
+     * caller's identity on the process and loading it around each filesystem
+     * call the dispatcher makes on that process's behalf is what makes an OWFS
+     * permission decision a decision about the caller.  Uid 0 is the superuser.
+     * Both default to 0 for the kernel's own boot context; ordinary processes
+     * are seeded unprivileged at creation. */
+    uint32_t            Uid;
+    uint32_t            Gid;
 };
 
 /* ---- API ---------------------------------------------------------------- */
@@ -167,9 +189,48 @@ OW_THREAD_OBJECT*  OwPsCreateUserThreadFrame(OW_PROCESS_OBJECT* Proc,
                                              uint64_t ResumeRsp,
                                              uint64_t ReturnAddress);
 
+/* Maximum number of arguments the launcher will place on a user stack.  A fixed
+ * bound (not derived from the page size) keeps the per-string VA table on the
+ * kernel stack and turns an absurd argc into a clean refusal rather than an
+ * arithmetic surprise. */
+#define OW_ARGV_MAX 64
+
 /* Bring a loaded image to CPL3: declares/maps this process's stack and guard
  * band, writes the initial return address, and enqueues the entry thread. */
 OW_STATUS    OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc);
+
+/* As OwPsLaunchUserImage(), but the entry thread is handed a documented
+ * process-entry argc/argv: RCX = argc, RDX = &argv[0], R8 = 0 (no envp), with
+ * the strings and the NULL-terminated argv[] array copied into this process's
+ * own user stack page above the initial RSP.  `argv` entries must point at
+ * kernel memory; the launcher copies them into the new address space, so no
+ * user pointer supplied by a spawning process is ever dereferenced or trusted.
+ *
+ * The register choice is the Microsoft x64 ABI, not SysV: every .owx image is
+ * built by the MinGW-w64 GCC target (x86_64-w64-mingw32) and its PE entry point
+ * is the compiled C `main`, which reads argc from RCX and argv from RDX.  A
+ * SysV image would read RDI/RSI instead and therefore is not supported by this
+ * contract. */
+OW_STATUS    OwPsLaunchUserImageEx(OW_PROCESS_OBJECT* Proc, int argc,
+                                   const char* const argv[]);
+
+/* Pure, host-testable stamp for the process-entry argument registers.  Sets the
+ * Microsoft x64 slots in `Context` that ow_ps_resume_thread loads at CPL3:
+ * Gpr[1] = RCX = argc, Gpr[2] = RDX = argv (the VA of argv[0] as returned by
+ * OwPsBuildArgv), Gpr[5] = R8 = envp = 0.  OwPsLaunchUserImageEx calls exactly
+ * this, so the host harness asserts the same code the launcher runs. */
+void         OwPsStampEntryArgs(OW_THREAD_CONTEXT* Context, int argc,
+                                uint64_t argv_va);
+
+/* Pure, host-testable argv block builder.  Lays `argc` NUL-terminated strings
+ * and a NULL-terminated argv[] pointer array into the top of a single user stack
+ * page: `page` is exactly OW_PAGE_SIZE bytes and `page_top_va` is the user VA one
+ * past page[OW_PAGE_SIZE-1].  Returns OW_SUCCESS and the VA of argv[0] in
+ * *out_argv_va.  Rejects a NULL argument, argc outside 0..OW_ARGV_MAX, a
+ * non-page-aligned page_top_va, and any block that does not fit in the page; it
+ * never truncates. */
+OW_STATUS    OwPsBuildArgv(uint8_t* page, uint64_t page_top_va, int argc,
+                           const char* const argv[], uint64_t* out_argv_va);
 
 void          OwPsExitThread(uint64_t ExitStatus);
 void          OwPsTerminateProcess(OW_PROCESS_OBJECT* Proc, uint64_t ExitStatus);

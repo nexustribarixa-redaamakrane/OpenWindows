@@ -1,6 +1,7 @@
 /* kprintf.c - Kernel Formatted Output (UART Console) */
 #include "../inc/ow_kprintf.h"
 #include "../inc/ow_hal.h"
+#include "../inc/ow_io.h"
 #include <stdarg.h>
 
 static int kfmt_out(void (*putc)(char, void*), void* ctx, const char* fmt, va_list ap) {
@@ -132,9 +133,14 @@ static void uart_putc(char c, void* ctx) { (void)ctx; OwHalUartWriteChar(c); }
 int ow_kprintf(const char* fmt, ...) {
     va_list ap;
     int r;
+    /* Hold IF across the whole formatted line so a concurrent writer cannot
+     * splice its bytes into this one.  Same uniprocessor scope as
+     * OwHalUartWriteString(): local preemption only, not an SMP lock. */
+    uint64_t flags = ow_irq_save();
     va_start(ap, fmt);
     r = kfmt_out(uart_putc, (void*)0, fmt, ap);
     va_end(ap);
+    ow_irq_restore(flags);
     return r;
 }
 

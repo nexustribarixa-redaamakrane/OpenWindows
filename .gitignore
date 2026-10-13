@@ -40,6 +40,10 @@ compile_commands.json
 /boot/owinit_image.chk
 /emergency/owinitv_image.h
 /emergency/owrs_image.h
+/boot/owargv_image.h
+/boot/owargv_image.chk
+/boot/owbh_image.h
+/boot/owbh_image.chk
 *.cislm
 *.digest
 openwinkrnl_manifest.*

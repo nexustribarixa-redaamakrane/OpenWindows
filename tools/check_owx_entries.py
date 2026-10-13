@@ -5,36 +5,44 @@ Two populations, two different questions, because they are built two different
 ways:
 
   Essentials (13 targets, built by OpenWindows-Essentials/CMakeLists.txt)
-      owinit.owx is the one target that enters its real function directly; the
-      other twelve still enter owx_entry_stub.  Both are "an .owx entry that
+      owinit.owx enters owinit_main; owsh.owx, kconfctl.owx,
+      banhammer_cli.owx and bancat.owx enter their own real functions directly;
+      the other nine still enter owx_entry_stub.  All are "an .owx entry that
       returns", so a boot test that only proves "some entry ran at CPL3" cannot
       tell them apart.  This compares the instruction bytes actually sitting at
       each PE's entry point.
 
           owinit.owx        entry RVA 0x1000, owinit_main's prologue, import-free
+          owsh.owx          a real entry, import-free, not the stub
+          kconfctl.owx      a real entry, import-free, not the stub
+          banhammer_cli.owx a real entry, import-free, not the stub
+          bancat.owx        a real entry, import-free, not the stub
           everything else   owx_entry_stub's `xor eax,%eax; ret`
 
-  Emergency pair (2 targets, built by this repository's Makefile from emergency/)
-      owinitv.owx and owrs.owx are compiled -O2 here, so their prologues are the
-      compiler's business and pinning five bytes of one would make the audit fail
-      on a toolchain bump rather than on a real regression.  What has to hold for
-      them is the two properties that would each break the rescue path outright:
+  Real-entry targets (owsh.owx, kconfctl.owx, banhammer_cli.owx and
+  bancat.owx here; owinitv.owx and owrs.owx built by this repository's
+  Makefile from emergency/)
+      These are compiled so their prologues are the compiler's business and
+      pinning five bytes of one would make the audit fail on a toolchain bump
+      rather than on a real regression.  What has to hold for them is the two
+      properties that would each break the launch outright:
 
           import-free       the loader binds nothing and REJECTS an image with
-                            imports, so an import here is an unloadable rescue
-                            shell discovered only at the moment of need
+                            imports, so an import here is an unloadable program
+                            discovered only at the moment it is launched
           not the stub      owx_entry_stub is `xor eax,%eax; ret`.  Entered as
-                            PID 1 that is a one-instruction emergency init that
-                            exits immediately; spawned as a shell it is a shell
-                            that never prints a prompt.  Both present as "the
-                            emergency path did nothing".
+                            PID 1 that is a one-instruction init that exits
+                            immediately; spawned as a shell it is a shell that
+                            never prints a prompt.  Both present as "the program
+                            did nothing".
 
 Run with --self-test to exercise the rule engine against synthetic images that
 mimic the regressions it exists to catch (owinit silently reverted to the stub,
-entry moved off owinit_main, a non-owinit target repointed at the real code, an
-emergency image that grew an import, an emergency image left on the stub).  The
-self-test needs no artifacts and no mutation, so it is safe to run on every
-build; it is the reason a signature that stopped matching cannot pass quietly.
+entry moved off owinit_main, a still-stubbed target repointed at real code, an
+owsh image left on the stub or grown an import, an emergency image that grew an
+import, an emergency image left on the stub).  The self-test needs no artifacts
+and no mutation, so it is safe to run on every build; it is the reason a
+signature that stopped matching cannot pass quietly.
 """
 
 import os
@@ -48,20 +56,29 @@ OWINIT_SIG = bytes((0x48, 0x83, 0xEC, 0x28, 0xE8))
 OWINIT_ENTRY_RVA = 0x1000
 OWINIT_BASENAME = "owinit.owx"
 
-# The twelve targets that must keep using owx_entry_stub. ow_owx_props() defaults
-# its optional entry_symbol argument to the stub, so every call site that omits
-# the argument lands here; only owinit.owx passes owinit_main.
+# The targets that have been repointed at their own real entry point and are
+# built statically (import-free).  ow_owx_props() no longer defaults their entry
+# to the stub; like the emergency pair they are checked by the properties that
+# matter rather than by pinned bytes, because their prologue is the compiler's.
+REAL_ENTRY_TARGETS = ("owsh.owx", "kconfctl.owx", "banhammer_cli.owx",
+                      "bancat.owx")
+
+# The remaining targets that must keep using owx_entry_stub. ow_owx_props()
+# defaults its optional entry_symbol argument to the stub, so every call site
+# that omits the argument lands here; owinit.owx passes owinit_main and the
+# targets in REAL_ENTRY_TARGETS have been repointed to their own entries.
 STUB_TARGETS = (
-    "bancat.owx", "banhammer_cli.owx", "kconfctl.owx", "kextctl.owx",
-    "owedit.owx", "owkill.owx", "owsh.owx", "owwm.owx", "sfontview.owx",
+    "kextctl.owx",
+    "owedit.owx", "owkill.owx", "owwm.owx", "sfontview.owx",
     "startwm.owx", "vipmount.owx", "win.owx",
 )
 
 # The emergency pair, built by this repository.  Checked by the rules in
-# check_emergency() rather than by a byte signature: see the module docstring.
+# check_real_entry() rather than by a byte signature: see the module docstring.
 EMERGENCY_TARGETS = ("owinitv.owx", "owrs.owx")
 
-ALL_TARGETS = (OWINIT_BASENAME,) + STUB_TARGETS + EMERGENCY_TARGETS
+ALL_TARGETS = ((OWINIT_BASENAME,) + REAL_ENTRY_TARGETS + STUB_TARGETS
+               + EMERGENCY_TARGETS)
 
 
 class PeError(Exception):
@@ -217,8 +234,8 @@ def read_image(path):
 
 def check(name, info):
     """Return a list of failure strings for one target (empty == pass)."""
-    if name in EMERGENCY_TARGETS:
-        return check_emergency(name, info)
+    if name in EMERGENCY_TARGETS or name in REAL_ENTRY_TARGETS:
+        return check_real_entry(name, info)
     return check_essentials(name, info)
 
 
@@ -248,27 +265,25 @@ def check_essentials(name, info):
     return bad
 
 
-def check_emergency(name, info):
-    """The two properties without which the rescue path is a no-op.
+def check_real_entry(name, info):
+    """The two properties without which a repointed program is a no-op.
 
-    Deliberately not a prologue signature.  These two targets are compiled -O2 by
-    this repository's Makefile, so their first instructions are the toolchain's
-    choice; pinning bytes would turn every compiler update into a failure that
-    looks like a code defect.  What is worth asserting is what the loader and the
-    boot policy actually depend on.
+    Deliberately not a prologue signature.  The real-entry targets (owsh.owx,
+    owinitv.owx, owrs.owx) are compiled so their first instructions are the
+    toolchain's choice; pinning bytes would turn every compiler update into a
+    failure that looks like a code defect.  What is worth asserting is what the
+    loader and the launch policy actually depend on.
     """
     bad = []
     sig = info["sig"]
-    hexsig = " ".join("%02X" % b for b in sig)
 
     if info["import_descriptors"] != 0:
         bad.append("%d import descriptor(s); the OWX1 loader binds nothing and "
-                   "would REFUSE this image at the moment it is needed"
+                   "would REFUSE this image at the moment it is launched"
                    % info["import_descriptors"])
     if sig.startswith(STUB_SIG):
         bad.append("entry is owx_entry_stub (31 C0 C3) -- %s would return "
-                   "immediately, which is a rescue path that does nothing"
-                   % name)
+                   "immediately instead of running its real entry" % name)
     if info["entry_rva"] == 0:
         bad.append("entry RVA is 0; the loader rejects a zero entry point")
     return bad
@@ -345,10 +360,32 @@ def self_test():
          "owinit entry is an unrelated prologue"),
         ("owinit.owx", build_pe(OWINIT_ENTRY_RVA, OWINIT_SIG + b"\x00" * 4, 1),
          "owinit carrying an import descriptor"),
-        ("owsh.owx", build_pe(0x1450, OWINIT_SIG + b"\x00" * 4),
-         "owsh repointed at the real entry"),
         ("win.owx", build_pe(0x1000, bytes((0xE9, 0, 0, 0, 0))),
          "win entry is a bare jmp"),
+        # owsh is now a real-entry target: the two ways it silently stops
+        # working, plus an import that would make it unloadable.
+        ("owsh.owx", build_pe(0x1450, STUB_SIG + b"\x90" * 5),
+         "owsh left on owx_entry_stub -- launches then returns at once"),
+        ("owsh.owx", build_pe(0x1450, bytes((0x55, 0x48, 0x89, 0xE5, 0x90)), 1),
+         "owsh carrying import descriptors -- unloadable when launched"),
+        # kconfctl is a real-entry target too: same two silent no-op modes and
+        # the import that would make it unloadable.
+        ("kconfctl.owx", build_pe(0x1000, STUB_SIG + b"\x90" * 5),
+         "kconfctl left on owx_entry_stub -- launches then returns at once"),
+        ("kconfctl.owx", build_pe(0x1000, bytes((0x56, 0x48, 0x83, 0xEC, 0x20)), 1),
+         "kconfctl carrying import descriptors -- unloadable when launched"),
+        # banhammer_cli is a real-entry target as well: the same two silent
+        # no-op modes and the import that would make it unloadable.
+        ("banhammer_cli.owx", build_pe(0x11A0, STUB_SIG + b"\x90" * 5),
+         "banhammer_cli left on owx_entry_stub -- launches then returns at once"),
+        ("banhammer_cli.owx", build_pe(0x11A0, bytes((0x53, 0x48, 0x89, 0xCB, 0x90)), 1),
+         "banhammer_cli carrying import descriptors -- unloadable when launched"),
+        # bancat is a real-entry target as well: the same two silent no-op modes
+        # and the import that would make it unloadable.
+        ("bancat.owx", build_pe(0x1450, STUB_SIG + b"\x90" * 5),
+         "bancat left on owx_entry_stub -- launches then returns at once"),
+        ("bancat.owx", build_pe(0x1450, bytes((0x41, 0x57, 0x41, 0x56, 0x41)), 1),
+         "bancat carrying import descriptors -- unloadable when launched"),
         # The emergency pair: the two ways it silently stops working.
         ("owinitv.owx", build_pe(0x1000, STUB_SIG + b"\x90" * 4),
          "owinitv left on owx_entry_stub -- PID 1 that returns immediately"),
@@ -363,9 +400,16 @@ def self_test():
     ]
     good = [
         ("owinit.owx", build_pe(OWINIT_ENTRY_RVA, OWINIT_SIG + b"\xF7\x04\x00\x00")),
-        ("owsh.owx", build_pe(0x1450, STUB_SIG + b"\x90" * 5)),
-        # Any non-stub prologue is acceptable for the emergency pair; only the
-        # import count and the stub bytes are asserted.
+        # Any non-stub, import-free prologue is acceptable for a real-entry
+        # target; only the import count and the stub bytes are asserted.
+        ("owsh.owx", build_pe(0x1450, bytes((0x55, 0x48, 0x89, 0xE5, 0x90))
+                              + b"\x00" * 4)),
+        ("kconfctl.owx", build_pe(0x1000, bytes((0x56, 0x48, 0x83, 0xEC, 0x20))
+                                  + b"\x00" * 4)),
+        ("banhammer_cli.owx", build_pe(0x11A0, bytes((0x53, 0x48, 0x89, 0xCB, 0x90))
+                                       + b"\x00" * 4)),
+        ("bancat.owx", build_pe(0x1450, bytes((0x41, 0x57, 0x41, 0x56, 0x41))
+                                + b"\x00" * 4)),
         ("owinitv.owx", build_pe(0x10E0, bytes((0x55, 0x48, 0x89, 0xE5, 0x90))
                                  + b"\x00" * 4)),
         ("owrs.owx", build_pe(0x1220, bytes((0x48, 0x83, 0xEC, 0x28, 0xE8))
@@ -383,6 +427,10 @@ def self_test():
          {"entry_rva": 0, "image_base": 0x140000000,
           "sig": bytes((0x55, 0x48, 0x89, 0xE5, 0x90)), "import_descriptors": 0},
          "owinitv with a zero entry RVA"),
+        ("owsh.owx",
+         {"entry_rva": 0, "image_base": 0x140000000,
+          "sig": bytes((0x55, 0x48, 0x89, 0xE5, 0x90)), "import_descriptors": 0},
+         "owsh with a zero entry RVA"),
     ]
 
     for name, info, why in synthetic:
@@ -442,7 +490,7 @@ def main(argv):
     if is_emergency:
         targets = list(EMERGENCY_TARGETS)
     else:
-        targets = [OWINIT_BASENAME] + list(STUB_TARGETS)
+        targets = [OWINIT_BASENAME] + list(REAL_ENTRY_TARGETS) + list(STUB_TARGETS)
     print("=== OWX entry audit (%s) ===" % root)
 
     failures = 0
@@ -458,7 +506,7 @@ def main(argv):
 
         bad = check(name, info)
         checked += 1
-        if name in EMERGENCY_TARGETS:
+        if name in EMERGENCY_TARGETS or name in REAL_ENTRY_TARGETS:
             role = "real entry"
         elif name == OWINIT_BASENAME:
             role = "owinit_main"

@@ -457,9 +457,23 @@ void OwHalUartWriteChar(char c) {
     OwHalVgaWriteChar(c);
 }
 
+/* Console writers share one UART.  Holding the caller's interrupt-enable state
+ * disabled for the whole string keeps its bytes contiguous, so a scheduler tick
+ * cannot splice another writer's output into the middle of a line.  ow_irq_save/
+ * ow_irq_restore preserve the prior IF state exactly, so a nested call does not
+ * re-enable interrupts while an outer section is still active, and a caller that
+ * already has IF=0 (an interrupt handler) never gets interrupts turned on.
+ *
+ * UNIPROCESSOR ASSUMPTION: this serializes against local preemption only.  A
+ * second CPU could still interleave its own COM1 writes between these
+ * instructions; the kernel is configured and validated single-CPU (-smp 1).  A
+ * shared console on SMP would need a cross-CPU lock, not this. */
 void OwHalUartWriteString(const char* str) {
+    uint64_t flags;
     if (!str) return;
+    flags = ow_irq_save();
     while (*str) { OwHalUartWriteChar(*str); str++; }
+    ow_irq_restore(flags);
 }
 
 /* 8254 PIT.  Channel 0 is reprogrammed by OwPsStartScheduler() to PERIODIC

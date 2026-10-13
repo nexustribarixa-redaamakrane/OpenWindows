@@ -528,6 +528,22 @@ OW_STATUS OwPsLoadImage(OW_PROCESS_OBJECT* Proc,
         }
     }
 
+    /* Pin the process's OWFS identity from the image's own subsystem byte -- the
+     * same byte the CIS measurement just recorded.  A BOOT or RECOVERY image is
+     * trusted to run with superuser authority (UID 0), which is what admits it
+     * to root-owned, hidden OWFS objects such as the crash dump; every other
+     * subsystem runs as an unprivileged principal.  This is placed after the
+     * gate so an unsigned image never acquires authority, and before any mapping
+     * or VAD so the identity is fixed for the whole life of the process. */
+    if (hdr->subsystem == (uint8_t)OWX_SUBSYSTEM_BOOT ||
+        hdr->subsystem == (uint8_t)OWX_SUBSYSTEM_RECOVERY) {
+        Proc->Uid = OW_PS_UID_ROOT;
+        Proc->Gid = OW_PS_GID_ROOT;
+    } else {
+        Proc->Uid = OW_PS_UID_USER;
+        Proc->Gid = OW_PS_GID_USER;
+    }
+
     secs = (const owx_section_entry_t*)(const void*)
                (OwxBuffer + hdr->section_table_offset);
 

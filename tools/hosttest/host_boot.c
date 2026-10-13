@@ -71,6 +71,15 @@ int test_cis_loader_run(int* out_passed);
 #include "../../inc/ow_types.h"
 #include "../../inc/ow_vfs.h"
 #include "../../storage/owdisk.h"
+#include "kconfctl_core.h"
+#include "banhammer_cli_core.h"
+/* The crash-dump producer/validator, the same header the kernel seeder and
+ * bancat include, so the harness tests the one definition rather than a copy. */
+#include "bdmp_core.h"
+/* The OWFS permission model and its on-disk flag/error names, so the harness can
+ * assert that a restricted object is refused to a non-owner by the real checks. */
+#include "ow_sec.h"
+#include "owfs_types.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -254,6 +263,226 @@ static void check_window(const char *label, bool got, bool want) {
   }
 }
 
+/* Defined further down beside the other numeric helper; declared here so the
+ * suites above it can compare integers without depending on definition order. */
+static void check_eq(const char *label, unsigned long got, unsigned long want);
+
+/* -------------------------------------------------------------------- */
+/* .bdmp crash-dump producer and validator                               */
+/* -------------------------------------------------------------------- */
+/* bancat decodes whatever bdmp_build produced, and both sides include the same
+ * Extensions/bdmp_core.h.  That makes this suite the place to hold the format
+ * down from both ends at once: the producer emits a dump the validator accepts,
+ * and every single-field corruption the validator is supposed to catch is
+ * introduced here and shown to be caught.  A validator tested only against its
+ * own happy-path output proves the two halves of one header agree with each
+ * other, not that either agrees with the format. */
+static void test_bdmp_core(void) {
+  static uint8_t dump[1024];
+  uint8_t mem[32];
+  bdmp_cpu_frame_t frame;
+  bdmp_trap_record_t traps[2];
+  uint32_t total;
+  uint32_t i;
+
+  printf("\n=== .bdmp crash-dump producer/validator ===\n");
+
+  for (i = 0; i < (uint32_t)sizeof(mem); ++i) {
+    mem[i] = (uint8_t)(0xA0u + i);
+  }
+
+  memset(&frame, 0, sizeof(frame));
+  frame.rax = 0x1122334455667788ULL;
+  frame.rip = 0x0000000000401234ULL;
+  frame.rsp = 0x000000000041FF00ULL;
+  frame.rcx = 3u;
+
+  memset(traps, 0, sizeof(traps));
+  traps[0].bancode = 0x0000BADCu;
+  traps[0].trap_slot = 3u;
+  traps[0].context_ip = 0x0000000000401230ULL;
+  traps[1].bancode = 0x0000BADCu;
+  traps[1].trap_slot = 1u;
+  traps[1].context_ip = 0x00000000004011F0ULL;
+
+  total = bdmp_build(dump, (uint32_t)sizeof(dump), &frame, traps, 2u,
+                     0x0000BADCu, 0u, 0x0000000000001234ULL,
+                     0x0000000000000000ULL, mem, (uint32_t)sizeof(mem));
+
+  /* 256 header + 176 frame + 2*24 traps = 480, aligned, + 32 memory = 512. */
+  check_eq("producer returns the exact body-derived size", (unsigned long)total,
+           512ul);
+  check_window("a produced dump validates", bdmp_validate(dump, total), true);
+
+  {
+    const bdmp_header_t *h = (const bdmp_header_t *)(const void *)dump;
+    check_eq("header magic survives the producer",
+             (unsigned long)h->magic, (unsigned long)BDMP_MAGIC);
+    check_eq("header format version",
+             (unsigned long)h->format_version,
+             (unsigned long)BDMP_FORMAT_VERSION);
+    check_eq("dump_size equals the produced size",
+             (unsigned long)h->dump_size, (unsigned long)total);
+    check_eq("trap_count is recorded", (unsigned long)h->trap_count, 2ul);
+    check_eq("memory_dump_offset is the aligned trap-table end",
+             (unsigned long)h->memory_dump_offset, 480ul);
+    check_eq("memory_dump_size is exactly the input size",
+             (unsigned long)h->memory_dump_size, (unsigned long)sizeof(mem));
+  }
+
+  /* The dump's CRC32c and the kernel VFS's must be the same function over the
+   * same bytes.  The host build already pins the OWX loader's CRC to
+   * OwFsChecksumCalc; this closes the same loop for the crash-dump format. */
+  check_window("bdmp_crc32c agrees with OwFsChecksumCalc over the whole dump",
+               bdmp_crc32c(dump, total) == OwFsChecksumCalc(dump, total), true);
+
+  /* ---- Malformed variants, each introduced into a pristine copy --------- */
+  {
+    uint8_t bad[1024];
+    const bdmp_header_t *h;
+    uint32_t hdr_crc_off;
+
+    memcpy(bad, dump, total);
+
+    check_window("a buffer one byte short is refused", bdmp_validate(bad, total - 1u),
+                 false);
+    check_window("a header-only buffer is refused", bdmp_validate(bad, 255u), false);
+    check_window("a NULL buffer is refused", bdmp_validate(NULL, total), false);
+
+    h = (const bdmp_header_t *)(const void *)bad;
+
+    memcpy(bad, dump, total);
+    ((bdmp_header_t *)(void *)bad)->magic = 0u;
+    check_window("a wrong magic is refused", bdmp_validate(bad, total), false);
+
+    memcpy(bad, dump, total);
+    ((bdmp_header_t *)(void *)bad)->trap_count = 99u; /* > BDMP_MAX_TRAPS */
+    check_window("trap_count past the maximum is refused", bdmp_validate(bad, total),
+                 false);
+
+    memcpy(bad, dump, total);
+    ((bdmp_header_t *)(void *)bad)->memory_dump_offset = 0u;
+    check_window("a memory region overlapping the header is refused",
+                 bdmp_validate(bad, total), false);
+
+    memcpy(bad, dump, total);
+    ((bdmp_header_t *)(void *)bad)->memory_dump_size = total + 1u;
+    check_window("a memory region running past the dump is refused",
+                 bdmp_validate(bad, total), false);
+
+    /* Flip a byte inside a checksum-covered field but outside the checksum
+     * windows' self-reference: the header checksum no longer matches. */
+    memcpy(bad, dump, total);
+    hdr_crc_off = 0x10u; /* primary_bancode, first covered byte */
+    bad[hdr_crc_off] ^= 0xFFu;
+    check_window("a corrupted covered header byte fails the header checksum",
+                 bdmp_validate(bad, total), false);
+
+    /* Flip a body byte: header checksum still holds, dump checksum does not. */
+    memcpy(bad, dump, total);
+    bad[BDMP_TRAP_TABLE_OFFSET + 1u] ^= 0xFFu;
+    check_window("a corrupted body byte fails the dump checksum",
+                 bdmp_validate(bad, total), false);
+
+    memcpy(bad, dump, total);
+    ((bdmp_header_t *)(void *)bad)->header_checksum ^= 0x1u;
+    check_window("a wrong stored header checksum is refused",
+                 bdmp_validate(bad, total), false);
+
+    memcpy(bad, dump, total);
+    ((bdmp_header_t *)(void *)bad)->dump_checksum ^= 0x1u;
+    check_window("a wrong stored dump checksum is refused",
+                 bdmp_validate(bad, total), false);
+
+    (void)h;
+  }
+
+  /* ---- Producer refusals ------------------------------------------------- */
+  check_eq("producer refuses a cap smaller than the dump",
+           (unsigned long)bdmp_build(dump, 16u, &frame, traps, 2u, 0u, 0u, 0u,
+                                     0u, mem, (uint32_t)sizeof(mem)),
+           0ul);
+  check_eq("producer refuses more traps than the format allows",
+           (unsigned long)bdmp_build(dump, (uint32_t)sizeof(dump), &frame, traps,
+                                     99u, 0u, 0u, 0u, 0u, mem,
+                                     (uint32_t)sizeof(mem)),
+           0ul);
+  check_eq("producer refuses a missing register frame",
+           (unsigned long)bdmp_build(dump, (uint32_t)sizeof(dump), NULL, traps,
+                                     2u, 0u, 0u, 0u, 0u, mem,
+                                     (uint32_t)sizeof(mem)),
+           0ul);
+}
+
+/* -------------------------------------------------------------------- */
+/* OWFS hidden / restricted read permissions                             */
+/* -------------------------------------------------------------------- */
+/* The syscall read path (OW_SYS_VFS_READ) is only as strong as the OWFS check it
+ * leans on, so this suite pins that check directly at the storage layer: a
+ * root-owned OWFS_SEC_HIDDEN object must be unspeakable by a non-root caller,
+ * and a root-owned mode-0600 object must be named but denied.  OwFsOwfsCreateRestricted
+ * is what the crash-dump seeder uses, so a regression here is a regression in
+ * what bancat is allowed to read.  Runs after OwDiskInitialize, on the real
+ * mounted volume. */
+static void test_owfs_read_permissions(void) {
+  static uint8_t buf[64];
+  ow_identity_t saved;
+  ow_identity_t user;
+  uint32_t got;
+  OW_STATUS st;
+
+  printf("\n=== OWFS hidden/restricted read permissions ===\n");
+
+  saved = ow_sec_current(); /* the superuser, by default */
+
+  /* Root-owned, mode 0600, hidden -- the crash-dump protection exactly. */
+  st = OwFsOwfsCreateRestricted(
+      "permhidden.dat",
+      (uint16_t)(OWFS_MODE_OWNER_READ | OWFS_MODE_OWNER_WRITE),
+      (uint8_t)OWFS_SEC_HIDDEN, (const uint8_t *)"secret", 6u);
+  check_window("a root 0600 hidden file is created", ow_status_success(st), true);
+
+  /* Root-owned, mode 0600, NOT hidden -- nameable, but not readable. */
+  st = OwFsOwfsCreateRestricted(
+      "permpriv.dat",
+      (uint16_t)(OWFS_MODE_OWNER_READ | OWFS_MODE_OWNER_WRITE), 0u,
+      (const uint8_t *)"private", 7u);
+  check_window("a root 0600 unhidden file is created", ow_status_success(st), true);
+
+  user.uid = 1000u;
+  user.gid = 1000u;
+
+  ow_sec_set_identity(&user);
+  got = 0u;
+  st = OwFsOwfsReadOffset("permhidden.dat", buf, 0u, (uint32_t)sizeof(buf), &got);
+  check_eq("a non-root caller cannot even name the hidden file",
+           (unsigned long)st, (unsigned long)OWFS_ERR_NOT_FOUND);
+
+  got = 0u;
+  st = OwFsOwfsReadOffset("permpriv.dat", buf, 0u, (uint32_t)sizeof(buf), &got);
+  check_eq("a non-root caller is denied a 0600 file by its access check",
+           (unsigned long)st, (unsigned long)OWFS_ERR_ACCESS_DENIED);
+
+  ow_sec_set_identity(&saved); /* back to the superuser */
+
+  got = 0u;
+  st = OwFsOwfsReadOffset("permhidden.dat", buf, 0u, (uint32_t)sizeof(buf), &got);
+  check_window("the owner (superuser) reads the hidden file",
+               ow_status_success(st), true);
+  check_eq("the hidden file returns its exact length", (unsigned long)got, 6ul);
+  check_window("the hidden file returns its exact bytes",
+               memcmp(buf, "secret", 6u) == 0, true);
+
+  got = 0u;
+  st = OwFsOwfsReadOffset("permpriv.dat", buf, 0u, (uint32_t)sizeof(buf), &got);
+  check_window("the owner reads the 0600 file", ow_status_success(st), true);
+  check_eq("the private file returns its exact length", (unsigned long)got, 7ul);
+  check_window("the private file returns its exact bytes",
+               memcmp(buf, "private", 7u) == 0, true);
+
+  ow_sec_set_identity(&saved);
+}
+
 /* -------------------------------------------------------------------- */
 /* Import rejection (regression)                                         */
 /* -------------------------------------------------------------------- */
@@ -334,7 +563,7 @@ static int bytes_are_entry_stub(const unsigned char *p) {
   return (p[0] == 0x31u && p[1] == 0xC0u && p[2] == 0xC3u);
 }
 
-/* owinit_main opens with the SysV frame setup `sub $0x28,%rsp`
+/* owinit_main opens with the MS x64 frame setup `sub $0x28,%rsp`
  * (48 83 EC 28) followed by a direct relative call (E8) to kconf64_init.
  * Asserting the call opcode too means an unrelated 3-byte stack adjustment
  * cannot masquerade as the real entry. */
@@ -3203,6 +3432,601 @@ static void test_ed25519_verify(void) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Process-entry argc/argv block layout                                       */
+/* ------------------------------------------------------------------------- */
+/* The launcher lays the entry program's arguments into the top user stack page
+ * and (see test_entry_arg_regs) points the Microsoft x64 argument registers at
+ * them.  OwPsBuildArgv() is the pure half -- the layout -- so it is exercised
+ * here against a plain byte buffer: page bounds, the NULL terminator,
+ * per-argument length, alignment, and every refusal path.  A launcher bug in
+ * this arithmetic would otherwise surface only as a program reading a wild
+ * argv[0] at CPL3, which is very hard to attribute. */
+static uint64_t htest_le64(const uint8_t* p) {
+  uint64_t v = 0u;
+  unsigned i;
+  for (i = 0u; i < 8u; i++) v |= (uint64_t)p[i] << (8u * i);
+  return v;
+}
+
+static bool htest_streq_at(const uint8_t* page, uint32_t off, const char* want) {
+  uint32_t i = 0u;
+  while (want[i] != '\0') {
+    if (page[off + i] != (uint8_t)want[i]) return false;
+    i++;
+  }
+  return page[off + i] == 0u;
+}
+
+static void test_argv_layout(void) {
+  static uint8_t page[OW_PAGE_SIZE];
+  static char    big[OW_PAGE_SIZE + 1u];
+  const uint64_t top  = 0x4200000ULL; /* page aligned; models OW_USER_WINDOW_END */
+  const uint64_t base = top - (uint64_t)OW_PAGE_SIZE;
+  uint64_t argv_va = 0u;
+  uint32_t off;
+  unsigned i;
+
+  printf("\n=== process-entry argc/argv layout ===\n");
+
+  /* argc == 0: argv is a single NULL slot. */
+  argv_va = 0xDEADBEEFULL;
+  memset(page, 0xAA, sizeof(page));
+  check_window("OwPsBuildArgv(argc=0) is accepted",
+               ow_status_success(OwPsBuildArgv(page, top, 0, NULL, &argv_va)), true);
+  check_window("OwPsBuildArgv(argc=0) stays inside the page",
+               argv_va >= base && argv_va + 8u <= top, true);
+  check_window("OwPsBuildArgv(argc=0) writes argv[0] == NULL",
+               htest_le64(page + (uint32_t)(argv_va - base)) == 0u, true);
+
+  /* argc == 1. */
+  {
+    const char* a[1];
+    a[0] = "owsh.owx";
+    memset(page, 0, sizeof(page));
+    check_window("OwPsBuildArgv(argc=1) is accepted",
+                 ow_status_success(OwPsBuildArgv(page, top, 1, a, &argv_va)), true);
+    off = (uint32_t)(argv_va - base);
+    check_window("argc=1 argv[1] == NULL",
+                 htest_le64(page + off + 8u) == 0u, true);
+    check_window("argc=1 argv[0] points at its own string",
+                 htest_streq_at(page,
+                                (uint32_t)(htest_le64(page + off) - base),
+                                "owsh.owx"), true);
+  }
+
+  /* argc == 3, argument order preserved. */
+  {
+    const char* a[3];
+    a[0] = "startwm";
+    a[1] = "--safe";
+    a[2] = "--res";
+    memset(page, 0, sizeof(page));
+    check_window("OwPsBuildArgv(argc=3) is accepted",
+                 ow_status_success(OwPsBuildArgv(page, top, 3, a, &argv_va)), true);
+    off = (uint32_t)(argv_va - base);
+    check_window("argc=3 argv[0]",
+                 htest_streq_at(page,
+                                (uint32_t)(htest_le64(page + off) - base),
+                                "startwm"), true);
+    check_window("argc=3 argv[1]",
+                 htest_streq_at(page,
+                                (uint32_t)(htest_le64(page + off + 8u) - base),
+                                "--safe"), true);
+    check_window("argc=3 argv[2]",
+                 htest_streq_at(page,
+                                (uint32_t)(htest_le64(page + off + 16u) - base),
+                                "--res"), true);
+    check_window("argc=3 argv[3] == NULL",
+                 htest_le64(page + off + 24u) == 0u, true);
+  }
+
+  /* Refusals: every one must be a clean error, never a partial layout. */
+  check_window("a NULL page is refused",
+               ow_status_error(OwPsBuildArgv(NULL, top, 0, NULL, &argv_va)), true);
+  check_window("a NULL out-pointer is refused",
+               ow_status_error(OwPsBuildArgv(page, top, 0, NULL, NULL)), true);
+  check_window("a non-page-aligned page_top_va is refused",
+               ow_status_error(OwPsBuildArgv(page, top + 8u, 0, NULL, &argv_va)), true);
+  check_window("argc above OW_ARGV_MAX is refused",
+               ow_status_error(OwPsBuildArgv(page, top, (int)OW_ARGV_MAX + 1,
+                                             NULL, &argv_va)), true);
+  check_window("a negative argc is refused",
+               ow_status_error(OwPsBuildArgv(page, top, -1, NULL, &argv_va)), true);
+  {
+    const char* a[1];
+    a[0] = NULL;
+    check_window("a NULL argv entry is refused",
+                 ow_status_error(OwPsBuildArgv(page, top, 1, a, &argv_va)), true);
+  }
+  check_window("argv == NULL with argc > 0 is refused",
+               ow_status_error(OwPsBuildArgv(page, top, 1, NULL, &argv_va)), true);
+
+  /* A string with no NUL inside the page is refused, not read past its end. */
+  for (i = 0u; i < (unsigned)OW_PAGE_SIZE; i++) big[i] = 'A';
+  big[OW_PAGE_SIZE] = '\0';
+  {
+    const char* a[1];
+    a[0] = big;
+    check_window("an argument longer than the page is refused",
+                 ow_status_error(OwPsBuildArgv(page, top, 1, a, &argv_va)), true);
+  }
+
+  /* More bytes than a page cannot fit: refused, never truncated. */
+  {
+    static char chunk[100];
+    const char* a[OW_ARGV_MAX];
+    memset(chunk, 'x', sizeof(chunk));
+    chunk[sizeof(chunk) - 1u] = '\0';
+    for (i = 0u; i < (unsigned)OW_ARGV_MAX; i++) a[i] = chunk;
+    check_window("a block larger than one page is refused",
+                 ow_status_error(OwPsBuildArgv(page, top, (int)OW_ARGV_MAX, a,
+                                               &argv_va)), true);
+  }
+
+  printf("--- argv layout verified\n");
+}
+
+/* ------------------------------------------------------------------------- */
+/* Process-entry argument registers                                            */
+/* ------------------------------------------------------------------------- */
+/* The argv-layout suite above proves the block is built correctly, but not that
+ * the launcher points the entry at it.  That delivery step is where a real bug
+ * hid: the launcher stamped the x86-64 SysV register file (argc in RDI, argv in
+ * RSI) while every MinGW-built .owx reads the Microsoft x64 registers (argc in
+ * RCX, argv in RDX, envp in R8), so an emulated boot reported argc=0 for a
+ * four-argument vector.  OwPsStampEntryArgs is the exact function the launcher
+ * calls; this test pins the slot-by-slot mapping so the regression cannot recur
+ * silently.  (The indices are not arbitrary: ps/switch.S restores Gpr[1] to RCX,
+ * Gpr[2] to RDX, Gpr[5] to R8.) */
+static void test_entry_arg_regs(void) {
+  OW_THREAD_CONTEXT ctx;
+  const uint64_t sentinel = 0xDEADBEEFDEADBEEFULL;
+  const uint64_t argv_va  = 0x7FFF00001234ULL;
+  uint32_t k;
+
+  printf("\n=== Process-entry argument registers ===\n");
+
+  for (k = 0u; k < (uint32_t)OW_THREAD_FRAME_GPS; k++) ctx.Gpr[k] = sentinel;
+
+  OwPsStampEntryArgs(&ctx, 4, argv_va);
+
+  check_window("Gpr[1] (RCX) holds argc", ctx.Gpr[1] == 4u, true);
+  check_window("Gpr[2] (RDX) holds the argv VA", ctx.Gpr[2] == argv_va, true);
+  check_window("Gpr[5] (R8) holds envp == 0", ctx.Gpr[5] == 0u, true);
+
+  /* The SysV argument slots must be left untouched: stamping RDI/RSI is the
+   * exact bug being guarded against, and a nonzero RDI here would mean the
+   * launcher regressed to the convention a MinGW image never reads. */
+  check_window("Gpr[4] (RDI) is left untouched, not argc", ctx.Gpr[4] == sentinel, true);
+  check_window("Gpr[3] (RSI) is left untouched, not argv", ctx.Gpr[3] == sentinel, true);
+  check_window("Gpr[0] (RAX) is left untouched", ctx.Gpr[0] == sentinel, true);
+
+  /* argc = 0 is the documented empty-vector state: RCX = 0, still RDX = argv_va
+   * (the builder emits a lone NULL slot) and R8 = 0. */
+  for (k = 0u; k < (uint32_t)OW_THREAD_FRAME_GPS; k++) ctx.Gpr[k] = sentinel;
+  OwPsStampEntryArgs(&ctx, 0, argv_va);
+  check_window("argc=0 stamps Gpr[1] (RCX) == 0", ctx.Gpr[1] == 0u, true);
+  check_window("argc=0 still stamps Gpr[2] (RDX) == argv VA", ctx.Gpr[2] == argv_va, true);
+  check_window("argc=0 still stamps Gpr[5] (R8) == 0", ctx.Gpr[5] == 0u, true);
+
+  /* A large positive argc must land zero-extended in RCX, not sign/partial. */
+  for (k = 0u; k < (uint32_t)OW_THREAD_FRAME_GPS; k++) ctx.Gpr[k] = sentinel;
+  OwPsStampEntryArgs(&ctx, 0x7FFF1234, argv_va);
+  check_window("a large argc is zero-extended into Gpr[1]",
+               ctx.Gpr[1] == 0x7FFF1234ULL, true);
+
+  /* Defensive: a NULL context is a no-op, not a fault. */
+  OwPsStampEntryArgs(NULL, 4, argv_va);
+  check_window("a NULL context is accepted without crashing", true, true);
+
+  printf("--- entry argument registers verified\n");
+}
+
+/* -------------------------------------------------------------------- */
+/* kconfctl config core (regression)                                     */
+/* -------------------------------------------------------------------- */
+/* kconfctl is the first `.owx` repointed at a real entry whose decision
+ * logic was split into an I/O-free header, so the harness can drive the same
+ * functions the CLI runs against the same kconf64 the CLI statically links.
+ * The cases pin three things at once: the verb classifier, the query/apply
+ * rules (including the key/value length bound that kconf_set_* would otherwise
+ * enforce by silent truncation), and the base-10 parser.  Persistence is
+ * deliberately not claimed, so every set below is verified by a read-back
+ * rather than by the setter's own return value.
+ *
+ * The registry is process-global, so the read-only cases run first and the
+ * cases that add keys assert the exact count transitions (4 -> 5 -> 6). */
+static bool kconfctl_core_int_is(const char *key, int64_t want) {
+  int64_t v = 0;
+  return kconfctl_query_int(key, &v) && v == want;
+}
+
+static void test_kconfctl_core(void) {
+  char longkey[(size_t)KCONF_MAX_KEY_LEN + 1u];
+  char longval[KCONF_MAX_VAL_LEN + 1u];
+  size_t i;
+
+  printf("\n=== kconfctl config core ===\n");
+
+  kconf64_init();
+  check_window("registry seeds with 4 default keys",
+               kconf64_count() == 4u, true);
+
+  /* Verb classification.  NONE (no argument) and UNKNOWN (a bad verb) are kept
+   * distinct so the CLI can print usage for one and name the other. */
+  check_window("classify(NULL) is NONE",
+               kconfctl_classify((const char *)0) == KCONFCTL_CMD_NONE, true);
+  check_window("classify(\"help\") is HELP",
+               kconfctl_classify("help") == KCONFCTL_CMD_HELP, true);
+  check_window("classify(\"get\") is GET",
+               kconfctl_classify("get") == KCONFCTL_CMD_GET, true);
+  check_window("classify(\"getint\") is GETINT",
+               kconfctl_classify("getint") == KCONFCTL_CMD_GETINT, true);
+  check_window("classify(\"set\") is SET",
+               kconfctl_classify("set") == KCONFCTL_CMD_SET, true);
+  check_window("classify(\"setint\") is SETINT",
+               kconfctl_classify("setint") == KCONFCTL_CMD_SETINT, true);
+  check_window("classify(\"count\") is COUNT",
+               kconfctl_classify("count") == KCONFCTL_CMD_COUNT, true);
+  check_window("classify(\"frobnicate\") is UNKNOWN",
+               kconfctl_classify("frobnicate") == KCONFCTL_CMD_UNKNOWN, true);
+
+  /* Built-in string defaults resolve; a missing key and a non-string node both
+   * read back as absent. */
+  check_window("default kernel/panic/action == \"banhammer\"",
+               kconfctl_str_eq(kconfctl_query_string("kernel/panic/action"),
+                               "banhammer"), true);
+  check_window("default ui/wm/theme == \"classic_azure\"",
+               kconfctl_str_eq(kconfctl_query_string("ui/wm/theme"),
+                               "classic_azure"), true);
+  check_window("missing string key reads back NULL",
+               kconfctl_query_string("no/such/key") == (const char *)0, true);
+  check_window("integer node is not a string",
+               kconfctl_query_string("drivers/sio/baud_rate") ==
+                   (const char *)0, true);
+  check_window("NULL key reads back NULL",
+               kconfctl_query_string((const char *)0) == (const char *)0, true);
+
+  /* Built-in integer defaults, plus the two absent cases: a missing key and a
+   * node of the wrong type. */
+  check_window("default drivers/sio/baud_rate == 115200",
+               kconfctl_core_int_is("drivers/sio/baud_rate", 115200), true);
+  check_window("default kernel/memory/pool_size == 67108864",
+               kconfctl_core_int_is("kernel/memory/pool_size", 67108864), true);
+  check_window("missing integer key is absent",
+               kconfctl_core_int_is("no/such/key", 0), false);
+  check_window("string node is not an integer",
+               kconfctl_core_int_is("kernel/panic/action", 0), false);
+  check_window("NULL integer key is absent",
+               kconfctl_core_int_is((const char *)0, 0), false);
+
+  /* Overwriting an existing key keeps the count; adding a new key grows it. */
+  check_window("set an existing key returns true",
+               kconfctl_apply_string("ui/wm/theme", "custom_theme"), true);
+  check_window("overwritten value reads back",
+               kconfctl_str_eq(kconfctl_query_string("ui/wm/theme"),
+                               "custom_theme"), true);
+  check_window("overwrite did not change the count",
+               kconf64_count() == 4u, true);
+
+  check_window("set a new string key returns true",
+               kconfctl_apply_string("user/test/name", "abc"), true);
+  check_window("new string key reads back",
+               kconfctl_str_eq(kconfctl_query_string("user/test/name"), "abc"),
+               true);
+  check_window("new string key grew the count to 5",
+               kconf64_count() == 5u, true);
+
+  check_window("setint a new key returns true",
+               kconfctl_apply_int("user/test/count", 42), true);
+  check_window("setint reads back through the query helper",
+               kconfctl_core_int_is("user/test/count", 42), true);
+  check_window("setint added a sixth key",
+               kconf64_count() == 6u, true);
+
+  /* A set of the wrong type replaces the node's type; the old accessor then
+   * reports it absent.  This pins that kconf_set_str/int overwrite in place
+   * rather than shadow a key with a second node. */
+  check_window("setint onto an existing string key returns true",
+               kconfctl_apply_int("user/test/name", 7), true);
+  check_window("the old string accessor now reports absent",
+               kconfctl_query_string("user/test/name") == (const char *)0, true);
+  check_window("the integer accessor reads the new value",
+               kconfctl_core_int_is("user/test/name", 7), true);
+  check_window("the type swap did not change the count",
+               kconf64_count() == 6u, true);
+
+  /* Length bounds.  The engine truncates silently past the fixed width, so the
+   * core rejects at exactly KCONF_MAX_*_LEN where that truncation would begin. */
+  for (i = 0u; i < (size_t)KCONF_MAX_KEY_LEN; ++i) longkey[i] = 'k';
+  longkey[KCONF_MAX_KEY_LEN] = '\0';
+  check_window("a 128-char key is rejected",
+               kconfctl_apply_string(longkey, "v"), false);
+
+  for (i = 0u; i < (size_t)KCONF_MAX_VAL_LEN; ++i) longval[i] = 'v';
+  longval[KCONF_MAX_VAL_LEN] = '\0';
+  check_window("a 128-char value is rejected",
+               kconfctl_apply_string("user/test/val", longval), false);
+  check_window("a 127-char value is accepted",
+               kconfctl_apply_string("user/test/val", longval + 1), true);
+
+  check_window("apply_string(NULL key) is rejected",
+               kconfctl_apply_string((const char *)0, "v"), false);
+  check_window("apply_string(NULL value) is rejected",
+               kconfctl_apply_string("user/test/x", (const char *)0), false);
+  check_window("apply_int(NULL key) is rejected",
+               kconfctl_apply_int((const char *)0, 1), false);
+
+  /* Strict base-10 signed 64-bit parser: accepted forms first, then every shape
+   * of malformed input, then the two overflow boundaries. */
+  {
+    int64_t v = 0;
+    check_window("parse \"0\"", kconfctl_parse_i64("0", &v) && v == 0, true);
+    check_window("parse \"42\"", kconfctl_parse_i64("42", &v) && v == 42, true);
+    check_window("parse \"-7\"", kconfctl_parse_i64("-7", &v) && v == -7, true);
+    check_window("parse \"+5\"", kconfctl_parse_i64("+5", &v) && v == 5, true);
+    check_window("parse INT64_MAX",
+                 kconfctl_parse_i64("9223372036854775807", &v) &&
+                     v == INT64_MAX, true);
+    check_window("parse INT64_MIN",
+                 kconfctl_parse_i64("-9223372036854775808", &v) &&
+                     v == INT64_MIN, true);
+
+    check_window("parse \"\" fails", kconfctl_parse_i64("", &v), false);
+    check_window("parse \"+\" fails", kconfctl_parse_i64("+", &v), false);
+    check_window("parse \"-\" fails", kconfctl_parse_i64("-", &v), false);
+    check_window("parse \"12a\" fails", kconfctl_parse_i64("12a", &v), false);
+    check_window("parse \"1.5\" fails", kconfctl_parse_i64("1.5", &v), false);
+    check_window("parse \" 12\" fails", kconfctl_parse_i64(" 12", &v), false);
+    check_window("parse overflow fails",
+                 kconfctl_parse_i64("9223372036854775808", &v), false);
+    check_window("parse underflow fails",
+                 kconfctl_parse_i64("-9223372036854775809", &v), false);
+    check_window("parse(NULL) fails",
+                 kconfctl_parse_i64((const char *)0, &v), false);
+    check_window("parse with NULL out fails",
+                 kconfctl_parse_i64("1", (int64_t *)0), false);
+  }
+
+  printf("--- kconfctl config core verified\n");
+}
+
+/*
+ * banhammer_cli_core - the panic-text selector's pure logic.
+ *
+ * It has no state and no I/O, so this drives the command classifier, the
+ * category parser (including the unbacked `recovery` name and case sensitivity),
+ * the table sizes, every table slot, the selector's agreement with the table at
+ * the index its LCG names, and the unsigned seed parser including both overflow
+ * boundaries.  The LCG is re-derived here independently so the test pins the
+ * selector's choice rather than echoing the header's own computation.
+ */
+static uint64_t banhammer_cli_core_lcg(uint64_t seed) {
+  return (seed ^ 0x5DEECE66DULL) * 0x27BB2EE687BULL + 0xBULL;
+}
+
+static void test_banhammer_cli_core(void) {
+  uint64_t v = 0u;
+
+  printf("\n=== banhammer_cli panic-text core ===\n");
+
+  check_window("classify(NULL) is NONE",
+               bh_cli_classify((const char *)0) == BH_CLI_CMD_NONE, true);
+  check_window("classify(\"help\") is HELP",
+               bh_cli_classify("help") == BH_CLI_CMD_HELP, true);
+  check_window("classify(\"quote\") is QUOTE",
+               bh_cli_classify("quote") == BH_CLI_CMD_QUOTE, true);
+  check_window("classify(\"list\") is LIST",
+               bh_cli_classify("list") == BH_CLI_CMD_LIST, true);
+  check_window("classify(\"count\") is COUNT",
+               bh_cli_classify("count") == BH_CLI_CMD_COUNT, true);
+  check_window("classify(\"categories\") is CATEGORIES",
+               bh_cli_classify("categories") == BH_CLI_CMD_CATEGORIES, true);
+  check_window("classify(\"frobnicate\") is UNKNOWN",
+               bh_cli_classify("frobnicate") == BH_CLI_CMD_UNKNOWN, true);
+
+  /* Category names.  "recovery" is declared by the text header's enum but has
+   * no distinct table, so it must resolve to UNSUPPORTED, not to a real
+   * category and not to UNKNOWN.  Matching is case- and whitespace-sensitive. */
+  check_window("category(NULL) is UNKNOWN",
+               bh_cli_category((const char *)0) == BH_CLI_CAT_UNKNOWN, true);
+  check_window("category(\"sarcastic\") is SARCASTIC",
+               bh_cli_category("sarcastic") == BH_CLI_CAT_SARCASTIC, true);
+  check_window("category(\"informational\") is INFORMATIONAL",
+               bh_cli_category("informational") == BH_CLI_CAT_INFORMATIONAL, true);
+  check_window("category(\"recovery\") is UNSUPPORTED",
+               bh_cli_category("recovery") == BH_CLI_CAT_UNSUPPORTED, true);
+  check_window("category(\"Sarcastic\") is UNKNOWN (case-sensitive)",
+               bh_cli_category("Sarcastic") == BH_CLI_CAT_UNKNOWN, true);
+  check_window("category(\"sarcastic \") is UNKNOWN (no trimming)",
+               bh_cli_category("sarcastic ") == BH_CLI_CAT_UNKNOWN, true);
+
+  check_window("name(SARCASTIC) == \"sarcastic\"",
+               bh_cli_str_eq(bh_cli_category_name(BH_CLI_CAT_SARCASTIC),
+                             "sarcastic"), true);
+  check_window("name(INFORMATIONAL) == \"informational\"",
+               bh_cli_str_eq(bh_cli_category_name(BH_CLI_CAT_INFORMATIONAL),
+                             "informational"), true);
+  check_window("name(UNSUPPORTED) == NULL",
+               bh_cli_category_name(BH_CLI_CAT_UNSUPPORTED) == (const char *)0,
+               true);
+
+  /* Table sizes: the counts the header's sizeof-derived macros report. */
+  check_window("sarcastic count == 10",
+               bh_cli_count(BH_CLI_CAT_SARCASTIC) == 10u, true);
+  check_window("informational count == 8",
+               bh_cli_count(BH_CLI_CAT_INFORMATIONAL) == 8u, true);
+  check_window("unsupported category count == 0",
+               bh_cli_count(BH_CLI_CAT_UNSUPPORTED) == 0u, true);
+  check_window("unknown category count == 0",
+               bh_cli_count(BH_CLI_CAT_UNKNOWN) == 0u, true);
+
+  /* Direct table access: first and last entries reachable, first past-the-end
+   * and every unbacked category are NULL. */
+  check_window("sarcastic[0] is \"Well, that was graceful.\"",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 0u),
+                             "Well, that was graceful."), true);
+  check_window("sarcastic[9] is the last quote",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 9u),
+                             "You have unlocked the secret BANhammer emergency "
+                             "halt achievement."), true);
+  check_window("sarcastic[10] is past the end",
+               bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 10u) == (const char *)0,
+               true);
+  check_window("informational[0] is present",
+               bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 0u) != (const char *)0,
+               true);
+  check_window("informational[7] is the last quote",
+               bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 7u) != (const char *)0,
+               true);
+  check_window("informational[8] is past the end",
+               bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 8u) == (const char *)0,
+               true);
+  check_window("unsupported category has no entries",
+               bh_cli_quote_at(BH_CLI_CAT_UNSUPPORTED, 0u) == (const char *)0,
+               true);
+
+  /* Every quote, verbatim and in order.  The expected literals are respelled
+   * here so a dropped entry, a reordered row, or a changed word in the header
+   * fails the harness instead of silently changing what the kernel prints. */
+  check_window("sarcastic[0] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 0u),
+                             "Well, that was graceful."), true);
+  check_window("sarcastic[1] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 1u),
+                             "Congratulations, you hit the B+ trap jackpot!"),
+               true);
+  check_window("sarcastic[2] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 2u),
+                             "Have you tried turning the kernel off and never "
+                             "turning it on again?"), true);
+  check_window("sarcastic[3] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 3u),
+                             "Kernel went out for milk. It is not coming back."),
+               true);
+  check_window("sarcastic[4] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 4u),
+                             "A wild BANcode appeared! It was super effective."),
+               true);
+  check_window("sarcastic[5] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 5u),
+                             "Oops, all traps."), true);
+  check_window("sarcastic[6] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 6u),
+                             "The kernel has encountered a fatal moment of "
+                             "philosophical self-doubt."), true);
+  check_window("sarcastic[7] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 7u),
+                             "System crashed successfully. No humans were harmed "
+                             "in this disaster."), true);
+  check_window("sarcastic[8] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 8u),
+                             "Divide by cucumber error. Please reinstall universe "
+                             "and reboot."), true);
+  check_window("sarcastic[9] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 9u),
+                             "You have unlocked the secret BANhammer emergency "
+                             "halt achievement."), true);
+  check_window("informational[0] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 0u),
+                             "Hardware Translation Layer reported unrecoverable "
+                             "bus stall."), true);
+  check_window("informational[1] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 1u),
+                             "Sentinel recovery was invoked, but damage exceeded "
+                             "threshold."), true);
+  check_window("informational[2] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 2u),
+                             "Page fault in ring-0 without matching PML4 "
+                             "descriptor."), true);
+  check_window("informational[3] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 3u),
+                             "Kernel integrity trap triggered by invalid state "
+                             "vector."), true);
+  check_window("informational[4] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 4u),
+                             "Zero-allocation static buffer bounds overrun "
+                             "intercepted by guard page."), true);
+  check_window("informational[5] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 5u),
+                             "Volume Indexing Protocol (VIP) root partition "
+                             "checksum mismatch."), true);
+  check_window("informational[6] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 6u),
+                             "Modular Bootloader handoff descriptor corrupted in "
+                             "early stage."), true);
+  check_window("informational[7] verbatim",
+               bh_cli_str_eq(bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 7u),
+                             "Non-maskable interrupt fired during critical "
+                             "spinlock acquisition."), true);
+
+  /* The selector must land on exactly the slot the LCG names, for a seed whose
+   * residue is 0 (seed 0) and one whose residue is non-zero (seed 1).  This
+   * catches an off-by-one or a wrong modulus that a "returns something"
+   * assertion would miss. */
+  check_window("select(sarcastic, seed 0) is slot 0",
+               bh_cli_str_eq(bh_cli_select(BH_CLI_CAT_SARCASTIC, 0u),
+                             bh_cli_quote_at(BH_CLI_CAT_SARCASTIC,
+                                             (uint32_t)(banhammer_cli_core_lcg(0u)
+                                                        % 10u))), true);
+  check_window("select(sarcastic, seed 1) is slot 7",
+               bh_cli_str_eq(bh_cli_select(BH_CLI_CAT_SARCASTIC, 1u),
+                             bh_cli_quote_at(BH_CLI_CAT_SARCASTIC, 7u)), true);
+  check_window("select(sarcastic, seed 1) is the crash quote",
+               bh_cli_str_eq(bh_cli_select(BH_CLI_CAT_SARCASTIC, 1u),
+                             "System crashed successfully. No humans were "
+                             "harmed in this disaster."), true);
+  check_window("select(informational, seed 1) is slot 7",
+               bh_cli_str_eq(bh_cli_select(BH_CLI_CAT_INFORMATIONAL, 1u),
+                             bh_cli_quote_at(BH_CLI_CAT_INFORMATIONAL, 7u)),
+               true);
+  check_window("select on an unbacked category is NULL",
+               bh_cli_select(BH_CLI_CAT_UNSUPPORTED, 0u) == (const char *)0,
+               true);
+  check_window("select on an unknown category is NULL",
+               bh_cli_select(BH_CLI_CAT_UNKNOWN, 0u) == (const char *)0, true);
+
+  /* Unsigned seed parsing: decimal and 0x-hex accepted, every malformed shape
+   * rejected, and both overflow boundaries pinned. */
+  check_window("parse \"0\"", bh_cli_parse_u64("0", &v) && v == 0u, true);
+  check_window("parse \"12345\"",
+               bh_cli_parse_u64("12345", &v) && v == 12345u, true);
+  check_window("parse \"0x1\"",
+               bh_cli_parse_u64("0x1", &v) && v == 1u, true);
+  check_window("parse \"0xFF\"",
+               bh_cli_parse_u64("0xFF", &v) && v == 255u, true);
+  check_window("parse \"0xdeadBEEF\"",
+               bh_cli_parse_u64("0xdeadBEEF", &v) && v == 0xDEADBEEFu, true);
+  check_window("parse UINT64_MAX decimal",
+               bh_cli_parse_u64("18446744073709551615", &v) &&
+                   v == UINT64_MAX, true);
+  check_window("parse UINT64_MAX hex",
+               bh_cli_parse_u64("0xFFFFFFFFFFFFFFFF", &v) && v == UINT64_MAX,
+               true);
+
+  check_window("parse \"\" fails", bh_cli_parse_u64("", &v), false);
+  check_window("parse \"0x\" fails", bh_cli_parse_u64("0x", &v), false);
+  check_window("parse \"0xg\" fails", bh_cli_parse_u64("0xg", &v), false);
+  check_window("parse \"-1\" fails (no signs)",
+               bh_cli_parse_u64("-1", &v), false);
+  check_window("parse \"+1\" fails",
+               bh_cli_parse_u64("+1", &v), false);
+  check_window("parse \"12a\" fails", bh_cli_parse_u64("12a", &v), false);
+  check_window("parse \" 1\" fails", bh_cli_parse_u64(" 1", &v), false);
+  check_window("parse \"1 \" fails", bh_cli_parse_u64("1 ", &v), false);
+  check_window("parse decimal overflow fails",
+               bh_cli_parse_u64("18446744073709551616", &v), false);
+  check_window("parse hex overflow fails",
+               bh_cli_parse_u64("0x10000000000000000", &v), false);
+  check_window("parse(NULL) fails",
+               bh_cli_parse_u64((const char *)0, &v), false);
+  check_window("parse with NULL out fails",
+               bh_cli_parse_u64("1", (uint64_t *)0), false);
+
+  printf("--- banhammer_cli panic-text core verified\n");
+}
+
+/* ------------------------------------------------------------------------- */
 /* Main                                                                       */
 /* ------------------------------------------------------------------------- */
 
@@ -3366,6 +4190,11 @@ int main(int argc, char **argv) {
     printf("[BOOT] OwDiskInitialize failed\n");
     return 1;
   }
+
+  /* The volume is mounted now, so the OWFS permission checks can be exercised on
+   * real inodes rather than argued about.  Placed before owinit is provisioned so
+   * the fixture files cannot be confused with a boot artifact. */
+  test_owfs_read_permissions();
 
   /* ------------------------------------------------------------------ */
   /* Kernel provenance policy (absence handling)                        */
@@ -3841,6 +4670,31 @@ int main(int argc, char **argv) {
 
   test_userspace_states();
   test_emergency_images();
+
+  /* ------------------------------------------------------------------ */
+  /* Process-entry argc/argv delivery (layout + registers)               */
+  /* ------------------------------------------------------------------ */
+
+  test_argv_layout();
+  test_entry_arg_regs();
+
+  /* ------------------------------------------------------------------ */
+  /* kconfctl configuration core                                         */
+  /* ------------------------------------------------------------------ */
+
+  test_kconfctl_core();
+
+  /* ------------------------------------------------------------------ */
+  /* banhammer_cli panic-text core                                       */
+  /* ------------------------------------------------------------------ */
+
+  test_banhammer_cli_core();
+
+  /* ------------------------------------------------------------------ */
+  /* .bdmp crash-dump format                                             */
+  /* ------------------------------------------------------------------ */
+
+  test_bdmp_core();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */

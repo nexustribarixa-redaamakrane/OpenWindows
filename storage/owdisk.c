@@ -11,6 +11,7 @@
 #include <stdbool.h>
 #include "owfs.h"
 #include "usfs.h"
+#include "ow_sec.h"
 
 static owfs_superblock_t g_owfs_sb;
 static bool g_owfs_formatted;
@@ -89,6 +90,56 @@ OW_STATUS OwFsOwfsCreate(const char* name, uint32_t* out_inode) {
     st = owfs_catalog_create(dev, &g_owfs_sb, OWFS_ROOT_INODE,
                              (const uint8_t*)name, (size_t)ow_strlen(name),
                              out_inode);
+    return map_owfs(st);
+}
+
+OW_STATUS OwFsOwfsCreateRestricted(const char* name, uint16_t permissions,
+                                   uint8_t security_flags,
+                                   const uint8_t* data, uint32_t len) {
+    htl_device_t* dev = OwHalGetPrimaryDisk();
+    owfs_inode_t inode;
+    uint32_t inode_num = 0;
+    uint32_t written = 0;
+    ow_identity_t saved;
+    ow_identity_t root;
+    owfs_status_t st;
+
+    if (!name || !g_owfs_formatted || !g_owfs_mounted)
+        return (OW_STATUS)OWFS_ERR_IO;
+
+    /* owfs_inode_alloc records the owner from the CURRENT identity, so pin the
+     * identity to the superuser across the create; otherwise a caller running as
+     * an unprivileged principal would create a file it could never hide from
+     * itself.  Restore the caller's identity on every exit path. */
+    root.uid = 0u;
+    root.gid = 0u;
+    saved = ow_sec_current();
+    ow_sec_set_identity(&root);
+
+    st = owfs_catalog_create(dev, &g_owfs_sb, OWFS_ROOT_INODE,
+                             (const uint8_t*)name, (size_t)ow_strlen(name),
+                             &inode_num);
+    if (st != OWFS_OK) {
+        ow_sec_set_identity(&saved);
+        return map_owfs(st);
+    }
+
+    /* Rewrite the inode's protection before any content lands: mode and flags
+     * describe the object, not a step applied to it afterwards. */
+    st = owfs_inode_read(dev, &g_owfs_sb, inode_num, &inode);
+    if (st == OWFS_OK) {
+        inode.permissions = permissions;
+        inode.owner_uid = (uint16_t)root.uid;
+        inode.owner_gid = (uint16_t)root.gid;
+        inode.security_flags = security_flags;
+        st = owfs_inode_write(dev, &g_owfs_sb, inode_num, &inode);
+    }
+    if (st == OWFS_OK && data != NULL && len != 0u) {
+        st = owfs_file_write(dev, &g_owfs_sb, &inode, inode_num,
+                             data, 0, len, &written);
+    }
+
+    ow_sec_set_identity(&saved);
     return map_owfs(st);
 }
 
@@ -238,6 +289,13 @@ __attribute__((weak)) bool OwDiskSeedTestOwrs(void)    { return false; }
  * -- failed the integrity phase. */
 __attribute__((weak)) bool OwDiskSeedTestChk(void)     { return false; }
 
+/* crash.bdmp is likewise a volume-level fixture, not an image hook: it is a
+ * protected root-owned artifact the bancat decoder reads, and only the bancat
+ * test image links a real seeder for it.  Defined weak so a stock or multiboot
+ * image simply has no dump, which is the correct state for a machine that has
+ * not crashed. */
+__attribute__((weak)) bool OwDiskSeedTestBdmp(void)    { return false; }
+
 /* One-shot guard per hook: the provisioner must not rewrite an image that the
  * volume already carries, and a failed seed must not turn into a retry loop
  * inside the survey. */
@@ -245,6 +303,7 @@ static bool g_seeded_owinit;
 static bool g_seeded_owinitv;
 static bool g_seeded_owrs;
 static bool g_seeded_chk;
+static bool g_seeded_bdmp;
 
 static bool owdisk_run_seed(bool (*hook)(void), bool* already) {
     if (!hook || *already) return false;   /* absent, or attempted once already */
@@ -375,6 +434,15 @@ void OwDiskProbeUserspace(OW_USERSPACE_PROBE* out) {
     if (!g_seeded_chk) {
         g_seeded_chk = true;
         (void)OwDiskSeedTestChk();
+    }
+
+    /* The crash-dump fixture is seeded last, after the image survey, so that the
+     * dump a build carries is written into a volume that is already known to be
+     * mounted and whose images have been classified.  Weak default: a build with
+     * no crash-dump seeder leaves the volume without one. */
+    if (!g_seeded_bdmp) {
+        g_seeded_bdmp = true;
+        (void)OwDiskSeedTestBdmp();
     }
 }
 

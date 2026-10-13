@@ -33,8 +33,34 @@
 #define OW_SYS_UART_WRITE              0x01BU
 #define OW_SYS_SET_AUTOREBOOT          0x01CU
 #define OW_SYS_SET_KDUMP               0x01DU
-#define OW_SYS_GET_AUTOREBOOT          0x01EU
-#define OW_SYS_GET_KDUMP               0x01FU
+#define OW_SYS_GET_AUTOREBOOT   0x01EU
+#define OW_SYS_GET_KDUMP        0x01FU
+
+/* OW_SYS_VFS_READ (0x005) contract.
+ *
+ *   P1 = NUL-terminated file name in the calling process's own memory
+ *   P2 = writable destination buffer in the calling process's own memory
+ *   P3 = destination capacity in bytes
+ *   returns, on success, the number of bytes copied (>= 0).
+ *
+ * This reads from the primary OWFS volume -- the filesystem that carries the
+ * real user-mode images and data -- not from the in-kernel legacy VFS that the
+ * shell's `write`/`read` verbs use.  Access is decided by the OWFS permission
+ * model against the calling PROCESS's identity (OW_PROCESS_OBJECT.Uid/Gid), not
+ * against the kernel's ambient identity, so an unprivileged process is refused a
+ * file its mode denies it, and cannot even name a file flagged OWFS_SEC_HIDDEN.
+ * Both the name and the buffer are validated against this process's own VAD tree
+ * before either is touched.
+ *
+ * On refusal the return is one of the negative OW_SYS_VFS_E* codes below (or the
+ * generic -1 the dispatcher uses for an unknown/not-ready request).  They are
+ * distinct so a Ring 3 caller can tell a permission refusal from a bad pointer
+ * from a missing file. */
+#define OW_SYS_VFS_EINVAL       (-2)   /* NULL name/buffer, or cap == 0        */
+#define OW_SYS_VFS_EFAULT       (-3)   /* name/buffer not mapped for this proc */
+#define OW_SYS_VFS_EACCES       (-4)   /* OWFS permission denied (mode)        */
+#define OW_SYS_VFS_ENOENT       (-5)   /* no such file, or hidden from caller  */
+#define OW_SYS_VFS_EIO          (-6)   /* backend I/O error / corrupt volume   */
 
 /* Load and enter a named OWX1 image from the primary OWFS volume as a new
  * process.  This is what makes the emergency userspace work: owinitv.owx is

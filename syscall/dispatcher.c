@@ -12,6 +12,8 @@
 #include "../inc/ow_syscall.h"
 #include "../inc/ow_vfs.h"
 #include "../storage/owdisk.h"
+#include "ow_sec.h"
+#include "owfs_types.h"
 
 static bool g_syscall_ready = false;
 
@@ -145,6 +147,75 @@ static OW_PROCESS_OBJECT *spawn_owx_image(const char *image_name,
   return proc;
 }
 
+/* ====================================================================== */
+/* OW_SYS_VFS_READ support                                                */
+/* ====================================================================== */
+/* Staging name for the read path.  A read cannot ask the caller for scratch, so
+ * like the spawn path it copies the caller's name into a fixed kernel buffer
+ * before resolving it. */
+static char s_read_name[OW_USERSPACE_NAME_MAX];
+
+/* True when [Va, Va+Len) lies wholly inside ranges the process has claimed in
+ * its own VAD tree, and inside the guarded user window.
+ *
+ * The kernel must never read or write through an address it has not proven the
+ * caller owns: a stale or forged pointer would either fault the kernel or, far
+ * worse, let the kernel modify memory it does not own.  Every page the range
+ * touches is required to be present in the caller's own VAD tree, so a range
+ * that merely starts inside a mapping but runs off its end is refused. */
+static bool syscall_user_range(OW_PROCESS_OBJECT *Proc, uint64_t Va,
+                               uint64_t Len) {
+  uint64_t End;
+  uint64_t Page;
+
+  if (!Proc || !Proc->VadRoot || Len == 0u)
+    return false;
+  End = Va + Len - 1u;
+  if (End < Va) /* arithmetic overflow */
+    return false;
+  if (!OwMemInUserWindow(Va) || !OwMemInUserWindow(End))
+    return false;
+
+  for (Page = Va & ~(uint64_t)(OW_PAGE_SIZE - 1u); Page <= End;
+       Page += OW_PAGE_SIZE) {
+    if (!OwMemFindVad(Proc->VadRoot, Page))
+      return false;
+  }
+  return true;
+}
+
+/* Copy a caller-supplied NUL-terminated name into `Dst`, validating each page
+ * against the caller's address space as the copy crosses into it.  A name that
+ * is not terminated within `Cap`, or that walks into memory the caller does not
+ * own, is rejected rather than truncated into a string that happens to resolve.
+ * This is the untrusted-caller counterpart of spawn_copy_name. */
+static bool syscall_copy_name(char *Dst, size_t Cap, OW_PROCESS_OBJECT *Proc,
+                              uint64_t Src) {
+  size_t i;
+
+  if (Dst == NULL || Cap == 0u || Proc == NULL)
+    return false;
+
+  for (i = 0u; i + 1u < Cap; ++i) {
+    char c;
+    if ((i & (OW_PAGE_SIZE - 1u)) == 0u) {
+      if (!syscall_user_range(Proc, Src + (uint64_t)i, 1u)) {
+        Dst[i] = '\0';
+        return false;
+      }
+    }
+    c = *(const char *)(uintptr_t)(Src + (uint64_t)i);
+    if (c == '\0') {
+      Dst[i] = '\0';
+      return true;
+    }
+    Dst[i] = c;
+  }
+
+  Dst[Cap - 1u] = '\0';
+  return false;
+}
+
 OW_STATUS OwSyscallInitialize(void) {
   g_syscall_ready = true;
   OwHalUartWriteString("[SYSCALL] Ring 3-to-0 gateway active.\r\n");
@@ -232,9 +303,56 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
                                             (const uint8_t *)P2, (uint32_t)P3))
                ? 1
                : 0;
-  case OW_SYS_VFS_READ:
-    return (int64_t)OwVfsReadFile((const char *)P1, (uint8_t *)P2,
-                                  (uint32_t)P3);
+  case OW_SYS_VFS_READ: {
+    /* Serve a read from the primary OWFS volume, not the in-kernel legacy VFS.
+     *
+     * The legacy path returned whatever the trusted shell had written and made
+     * no access decision at all; OWFS does make one, but decides it against a
+     * single ambient identity that is superuser by default.  The fix is to load
+     * the CALLER's identity for the duration of the call, so the access check is
+     * a check about the caller.  The identity and its permissions are restored
+     * before returning so the swap cannot leak into the rest of the kernel. */
+    OW_PROCESS_OBJECT *proc = syscall_current_process();
+    const char *user_name;
+    uint8_t *user_buf;
+    uint32_t cap;
+    uint32_t got = 0;
+    ow_identity_t caller_id;
+    ow_identity_t saved_id;
+    OW_STATUS st;
+
+    if (proc == NULL)
+      return (int64_t)OW_SYS_VFS_EFAULT;
+
+    user_name = (const char *)(uintptr_t)P1;
+    user_buf = (uint8_t *)(uintptr_t)P2;
+    cap = (uint32_t)P3;
+
+    if (user_name == NULL || user_buf == NULL || cap == 0u)
+      return (int64_t)OW_SYS_VFS_EINVAL;
+
+    if (!syscall_user_range(proc, (uint64_t)(uintptr_t)user_buf, (uint64_t)cap))
+      return (int64_t)OW_SYS_VFS_EFAULT;
+
+    if (!syscall_copy_name(s_read_name, sizeof(s_read_name), proc,
+                           (uint64_t)(uintptr_t)user_name))
+      return (int64_t)OW_SYS_VFS_EFAULT;
+
+    caller_id.uid = proc->Uid;
+    caller_id.gid = proc->Gid;
+    saved_id = ow_sec_current();
+    ow_sec_set_identity(&caller_id);
+    st = OwFsOwfsReadOffset(s_read_name, user_buf, 0u, cap, &got);
+    ow_sec_set_identity(&saved_id);
+
+    if (ow_status_success(st))
+      return (int64_t)got;
+    if (st == (OW_STATUS)OWFS_ERR_ACCESS_DENIED)
+      return (int64_t)OW_SYS_VFS_EACCES;
+    if (st == (OW_STATUS)OWFS_ERR_NOT_FOUND)
+      return (int64_t)OW_SYS_VFS_ENOENT;
+    return (int64_t)OW_SYS_VFS_EIO;
+  }
   case OW_SYS_VFS_DELETE:
     return ow_status_success(OwVfsDeleteFile((const char *)P1)) ? 1 : 0;
   case OW_SYS_ALPC_CREATE:
@@ -391,8 +509,12 @@ OW_STATUS OwApiWriteFile(const char *Path, const uint8_t *Buffer,
 }
 
 uint32_t OwApiReadFile(const char *Path, uint8_t *Buffer, uint32_t MaxSize) {
-  return (uint32_t)OwSyscallDispatch(OW_SYS_VFS_READ, (uint64_t)(uintptr_t)Path,
-                                     (uint64_t)(uintptr_t)Buffer, MaxSize);
+  int64_t r = OwSyscallDispatch(OW_SYS_VFS_READ, (uint64_t)(uintptr_t)Path,
+                                (uint64_t)(uintptr_t)Buffer, MaxSize);
+  /* The in-kernel wrapper keeps its historical "0 means failure" contract for
+   * its existing callers; a Ring 3 caller reads the syscall return directly and
+   * gets the distinguished negative code. */
+  return (r < 0) ? 0u : (uint32_t)r;
 }
 
 uint64_t OwApiAlpcCreatePort(const char *Name, bool IsServer) {

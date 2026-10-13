@@ -427,7 +427,9 @@ $(ALL_OBJS) $(SEED_OBJS): $(CIS_STAMP)
 
 MAKEFILE_ROOT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Defaults to a neighboring checkout; override either variable for other layouts.
-ESSENTIALS_ARTIFACTS ?= $(MAKEFILE_ROOT)../OpenWindows-Essentials/Artifacts/Software
+ESSENTIALS_ROOT ?= $(MAKEFILE_ROOT)../OpenWindows-Essentials
+ESSENTIALS_ARTIFACTS ?= $(ESSENTIALS_ROOT)/Artifacts/Software
+ESSENTIALS_BUILD ?= $(ESSENTIALS_ROOT)/build-gcc
 OWINIT_SOURCE ?= $(ESSENTIALS_ARTIFACTS)/owinit.owx
 OWINIT_IMAGE = boot/owinit_image.owx
 OWINIT_HEADER = boot/owinit_image.h
@@ -678,6 +680,274 @@ qemu-provenance:
 endif
 
 # ==============================================================================
+# QEMU argv regression: hand PID 1 a non-trivial argument vector.
+#
+# The argv block builder is unit-tested on the host (tools/hosttest/host_boot.c),
+# but that only proves the layout arithmetic.  This case proves the round trip
+# through the real CPL3 launch: boot_launch_init() calls the probe hook with a
+# vector the program did not choose, and the real shell prints what it received.
+#
+# The program under test is the actual shell, owsh.owx, built by
+# OpenWindows-Essentials.  It is seeded under OW_INIT_EXEC_NAME ("owinit.owx"),
+# so the Phase 5c survey resolves to state 1 and enters it as PID 1; the bytes on
+# the volume are the shell, the name is the init slot.  boot/owchk_seed.o still
+# supplies the kernel-integrity fixture the kernel halts without.
+#
+# Two images are linked from the same kernel sources, differing only in the probe
+# vector compiled into core/main.c (see boot_test_argv there):
+#
+#   multi   argc = 4, argv = { owsh, --probe, "hello world", "two words" }
+#   zero    argc = 0, no argv[] block at all
+# ==============================================================================
+OWARGV_DIR       = $(QEMU_DIR)/owargv
+OWARGV_ZERO_DIR  = $(QEMU_DIR)/owargv_zero
+OWARGV_IMAGE_HDR = $(OWARGV_DIR)/owargv_image.h
+OWARGV_MULTI_BIN = $(QEMU_DIR)/openwinkrnl_qemu_argv_multi.bin
+OWARGV_ZERO_BIN  = $(QEMU_DIR)/openwinkrnl_qemu_argv_zero.bin
+OWSH_IMAGE       = $(ESSENTIALS_ARTIFACTS)/owsh.owx
+
+$(OWARGV_IMAGE_HDR): $(OWSH_IMAGE) tools/owx_pack.py tools/embed_owx.py \
+                     tools/cis_block.py $(CIS_STAMP)
+	@mkdir -p $(OWARGV_DIR)
+	python tools/embed_owx.py $(OWSH_IMAGE) $@ --packer tools/owx_pack.py \
+	    --subsystem 0x04 --symbol g_owargv_image \
+	    --size-macro OWARGV_IMAGE_SIZE --guard OWARGV_IMAGE_GENERATED_H \
+	    $(if $(OWX_SIGN_ARGS),--pack-arg=--sign-dev,) \
+	    --note "OpenWindows shell (owsh.owx) seeded as PID 1 for the argv regression."
+
+$(OWARGV_DIR)/owargv_seed.o: boot/owargv_seed.c storage/owdisk.h $(OWARGV_IMAGE_HDR)
+	@mkdir -p $(OWARGV_DIR)
+	$(CC) $(CFLAGS) -I$(OWARGV_DIR) -c $< -o $@
+
+# The probe is a compile-time variant of core/main.c, not a weak symbol: the
+# Windows/PE linker does not rebind a weak alias referenced inside the defining
+# object, so a weak hook would keep calling its own definition.  Each case
+# rebuilds core/main.o with the vector baked in and links it in its place.
+$(QEMU_DIR)/main_argv_multi.o: core/main.c
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -DOW_ARGV_REGRESSION -c $< -o $@
+
+$(OWARGV_ZERO_DIR)/main_argv_zero.o: core/main.c
+	@mkdir -p $(OWARGV_ZERO_DIR)
+	$(CC) $(CFLAGS) -DOW_ARGV_REGRESSION -DOW_ARGV_REGRESSION_ZERO -c $< -o $@
+
+# boot/owchk_seed.o supplies the weak kernel-integrity fixture hook; the argv
+# seed replaces only the init image, so this is the normal seed picture minus
+# boot/owinit_seed.o and plus boot/owargv_seed.o.  core/main.o is replaced by the
+# case's probe-bearing object.
+$(OWARGV_MULTI_BIN): $(ALL_OBJS) $(OWARGV_DIR)/owargv_seed.o $(QEMU_DIR)/main_argv_multi.o \
+                     boot/owchk_seed.o $(OWARGV_IMAGE_HDR) \
+                     $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_argv_multi.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    $(OWARGV_DIR)/owargv_seed.o $(QEMU_DIR)/main_argv_multi.o \
+	    boot/owchk_seed.o $(filter-out core/main.o,$(ALL_OBJS)) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_argv_multi.exe $@
+	@echo "QEMU argv multi image (owsh as PID 1, argc=4): $@"
+
+$(OWARGV_ZERO_BIN): $(ALL_OBJS) $(OWARGV_DIR)/owargv_seed.o $(OWARGV_ZERO_DIR)/main_argv_zero.o \
+                    boot/owchk_seed.o $(OWARGV_IMAGE_HDR) \
+                    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_argv_zero.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    $(OWARGV_DIR)/owargv_seed.o $(OWARGV_ZERO_DIR)/main_argv_zero.o \
+	    boot/owchk_seed.o $(filter-out core/main.o,$(ALL_OBJS)) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_argv_zero.exe $@
+	@echo "QEMU argv zero image (owsh as PID 1, argc=0): $@"
+
+# kconfctl regression: same launch seam, a third program.  The vector asks the
+# real config CLI for a built-in default (see boot_test_argv).  It proves that a
+# `.owx` whose logic depends on a statically linked library and argv (not just
+# what a bare stub prints) boots, queries and reports at CPL3.
+OWKCONF_DIR       = $(QEMU_DIR)/owkconf
+OWKCONF_IMAGE_HDR = $(OWKCONF_DIR)/owkconf_image.h
+OWKCONF_BIN       = $(QEMU_DIR)/openwinkrnl_qemu_kconf.bin
+KCONFCTL_IMAGE    = $(ESSENTIALS_ARTIFACTS)/kconfctl.owx
+
+$(OWKCONF_IMAGE_HDR): $(KCONFCTL_IMAGE) tools/owx_pack.py tools/embed_owx.py \
+                      tools/cis_block.py $(CIS_STAMP)
+	@mkdir -p $(OWKCONF_DIR)
+	python tools/embed_owx.py $(KCONFCTL_IMAGE) $@ --packer tools/owx_pack.py \
+	    --subsystem 0x04 --symbol g_owkconf_image \
+	    --size-macro OWKCONF_IMAGE_SIZE --guard OWKCONF_IMAGE_GENERATED_H \
+	    $(if $(OWX_SIGN_ARGS),--pack-arg=--sign-dev,) \
+	    --note "OpenWindows configuration CLI (kconfctl.owx) seeded as PID 1 for the kconfctl regression."
+
+$(OWKCONF_DIR)/owkconf_seed.o: boot/owkconf_seed.c storage/owdisk.h $(OWKCONF_IMAGE_HDR)
+	@mkdir -p $(OWKCONF_DIR)
+	$(CC) $(CFLAGS) -I$(OWKCONF_DIR) -c $< -o $@
+
+$(OWKCONF_DIR)/owkconf_main.o: core/main.c
+	@mkdir -p $(OWKCONF_DIR)
+	$(CC) $(CFLAGS) -DOW_ARGV_REGRESSION -DOW_ARGV_REGRESSION_KCONF -c $< -o $@
+
+$(OWKCONF_BIN): $(ALL_OBJS) $(OWKCONF_DIR)/owkconf_seed.o $(OWKCONF_DIR)/owkconf_main.o \
+                boot/owchk_seed.o $(OWKCONF_IMAGE_HDR) \
+                $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_kconf.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    $(OWKCONF_DIR)/owkconf_seed.o $(OWKCONF_DIR)/owkconf_main.o \
+	    boot/owchk_seed.o $(filter-out core/main.o,$(ALL_OBJS)) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_kconf.exe $@
+	@echo "QEMU kconfctl image (kconfctl as PID 1, query): $@"
+
+OWKCONF_SET_BIN   = $(QEMU_DIR)/openwinkrnl_qemu_kconfset.bin
+
+$(OWKCONF_DIR)/owkconfset_main.o: core/main.c
+	@mkdir -p $(OWKCONF_DIR)
+	$(CC) $(CFLAGS) -DOW_ARGV_REGRESSION -DOW_ARGV_REGRESSION_KCONFSET -c $< -o $@
+
+$(OWKCONF_SET_BIN): $(ALL_OBJS) $(OWKCONF_DIR)/owkconf_seed.o $(OWKCONF_DIR)/owkconfset_main.o \
+                boot/owchk_seed.o $(OWKCONF_IMAGE_HDR) \
+                $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_kconfset.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    $(OWKCONF_DIR)/owkconf_seed.o $(OWKCONF_DIR)/owkconfset_main.o \
+	    boot/owchk_seed.o $(filter-out core/main.o,$(ALL_OBJS)) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_kconfset.exe $@
+	@echo "QEMU kconfctl image (kconfctl as PID 1, set+read-back): $@"
+
+# banhammer_cli regression: same launch seam, a fourth program.  The vector asks
+# the real quote CLI to select a panic quote for a fixed seed (see boot_test_argv);
+# the answer is a table lookup keyed on that seed, so the line proves argv drove a
+# real computation at CPL3 rather than a stub returning immediately.
+OWBH_DIR        = $(QEMU_DIR)/owbh
+OWBH_IMAGE_HDR  = $(OWBH_DIR)/owbh_image.h
+OWBH_BIN        = $(QEMU_DIR)/openwinkrnl_qemu_owbh.bin
+BANHAMMER_IMAGE = $(ESSENTIALS_ARTIFACTS)/banhammer_cli.owx
+
+$(OWBH_IMAGE_HDR): $(BANHAMMER_IMAGE) tools/owx_pack.py tools/embed_owx.py \
+                   tools/cis_block.py $(CIS_STAMP)
+	@mkdir -p $(OWBH_DIR)
+	python tools/embed_owx.py $(BANHAMMER_IMAGE) $@ --packer tools/owx_pack.py \
+	    --subsystem 0x04 --symbol g_owbh_image \
+	    --size-macro OWBH_IMAGE_SIZE --guard OWBH_IMAGE_GENERATED_H \
+	    $(if $(OWX_SIGN_ARGS),--pack-arg=--sign-dev,) \
+	    --note "OpenWindows Banhammer CLI (banhammer_cli.owx) seeded as PID 1 for the banhammer regression."
+
+$(OWBH_DIR)/owbh_seed.o: boot/owbh_seed.c storage/owdisk.h $(OWBH_IMAGE_HDR)
+	@mkdir -p $(OWBH_DIR)
+	$(CC) $(CFLAGS) -I$(OWBH_DIR) -c $< -o $@
+
+$(OWBH_DIR)/owbh_main.o: core/main.c
+	@mkdir -p $(OWBH_DIR)
+	$(CC) $(CFLAGS) -DOW_ARGV_REGRESSION -DOW_ARGV_REGRESSION_BANHAMMER -c $< -o $@
+
+$(OWBH_BIN): $(ALL_OBJS) $(OWBH_DIR)/owbh_seed.o $(OWBH_DIR)/owbh_main.o \
+                boot/owchk_seed.o $(OWBH_IMAGE_HDR) \
+                $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_owbh.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    $(OWBH_DIR)/owbh_seed.o $(OWBH_DIR)/owbh_main.o \
+	    boot/owchk_seed.o $(filter-out core/main.o,$(ALL_OBJS)) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_owbh.exe $@
+	@echo "QEMU banhammer_cli image (banhammer_cli as PID 1, quote): $@"
+
+ifeq ($(CIS_DEV_TRUST),1)
+qemu-argv: $(OWARGV_MULTI_BIN) $(OWARGV_ZERO_BIN) $(OWKCONF_BIN) $(OWKCONF_SET_BIN) $(OWBH_BIN)
+	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_argv_test.ps1 \
+	    $(OWARGV_MULTI_BIN) $(OWARGV_ZERO_BIN) $(OWKCONF_BIN) $(OWKCONF_SET_BIN) $(OWBH_BIN)
+else
+qemu-argv:
+	@echo "qemu-argv requires CIS_DEV_TRUST=1: the shell image is signed with the"
+	@echo "development key, which only a CIS_DEV_TRUST build pins in the trust store."
+	@echo "Run: make CIS_DEV_TRUST=1 qemu-argv"
+	@exit 1
+endif
+
+# ==============================================================================
+# QEMU bancat regression: a real .owx that reads the primary OWFS volume.
+#
+# bancat reaches userspace two ways no earlier regression did: it reads a file
+# from the primary OWFS volume through the syscall gateway (OW_SYS_VFS_READ),
+# and it is admitted to a root-owned, hidden object because it runs with the
+# authority its BOOT subsystem grants.  The seeded volume carries bancat.owx as
+# OW_INIT_EXEC_NAME plus a protected crash.bdmp; the decoder prints the decoded
+# fields, and tools/qemu_bancat_test.ps1 asserts they are the fixture's exact
+# values, which can only happen if the read landed the real bytes and the
+# permission check admitted the caller.
+#
+# boot/owbancat_seed.c compiles against Extensions/bdmp_core.h (the shared
+# producer) and the embedded bancat image header, so this rule is the one place
+# that needs the Essentials include path.
+# ==============================================================================
+OWBANCAT_DIR       = $(QEMU_DIR)/bancat
+OWBANCAT_IMAGE_HDR = $(OWBANCAT_DIR)/bancat_image.h
+OWBANCAT_BIN       = $(QEMU_DIR)/openwinkrnl_qemu_bancat.bin
+BANCAT_IMAGE       = $(ESSENTIALS_ARTIFACTS)/bancat.owx
+BANCAT_BUILD_IMAGE = $(ESSENTIALS_BUILD)/Software/bancat.owx
+
+# The image embedded below is $(BANCAT_IMAGE), under the Essentials Artifacts
+# tree, but the file is produced by the Essentials CMake build in a separate
+# tree.  Stage it from that build output so `make qemu-bancat` cannot silently
+# embed a stale copy: the rule copies source over destination only when their
+# SHA-256 differ, and the qemu-bancat recipe re-verifies equality immediately
+# before booting.  If the build output does not exist there is nothing to verify
+# against, so the dedicated rule below fails with the command that produces it
+# instead of guessing a path.
+$(BANCAT_BUILD_IMAGE):
+	@echo "error: Essentials build output not found: $(BANCAT_BUILD_IMAGE)"
+	@echo "       build it with:"
+	@echo "         cmake --build \"$(ESSENTIALS_BUILD)\" --target bancat.owx"
+	@echo "       or set ESSENTIALS_BUILD to the Essentials CMake binary directory."
+	@exit 1
+
+$(BANCAT_IMAGE): $(BANCAT_BUILD_IMAGE)
+	python tools/stage_owx.py "$(BANCAT_BUILD_IMAGE)" "$@"
+
+.PHONY: stage-bancat
+stage-bancat:
+	python tools/stage_owx.py "$(BANCAT_BUILD_IMAGE)" "$(BANCAT_IMAGE)"
+
+$(OWBANCAT_IMAGE_HDR): $(BANCAT_IMAGE) tools/owx_pack.py tools/embed_owx.py \
+                       tools/cis_block.py $(CIS_STAMP)
+	@mkdir -p $(OWBANCAT_DIR)
+	python tools/embed_owx.py $(BANCAT_IMAGE) $@ --packer tools/owx_pack.py \
+	    --subsystem 0x04 --symbol g_bancat_image \
+	    --size-macro BANCAT_IMAGE_SIZE --guard BANCAT_IMAGE_GENERATED_H \
+	    $(if $(OWX_SIGN_ARGS),--pack-arg=--sign-dev,) \
+	    --note "OpenWindows bancat crash-dump decoder (bancat.owx) seeded as PID 1 for the bancat regression."
+
+$(OWBANCAT_DIR)/owbancat_seed.o: boot/owbancat_seed.c storage/owdisk.h \
+                                 $(OWBANCAT_IMAGE_HDR)
+	@mkdir -p $(OWBANCAT_DIR)
+	$(CC) $(CFLAGS) -I$(OWBANCAT_DIR) -I$(ESSENTIALS_ROOT)/Extensions -c $< -o $@
+
+$(OWBANCAT_BIN): $(ALL_OBJS) $(OWBANCAT_DIR)/owbancat_seed.o \
+                 boot/owchk_seed.o $(OWBANCAT_IMAGE_HDR) \
+                 $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o boot/qemu.ld
+	@mkdir -p $(QEMU_DIR)
+	$(CC) $(CFLAGS) -nostdlib "-Wl,-T,boot/qemu.ld" "-Wl,-e,qboot_entry" \
+	    -o $(QEMU_DIR)/qemu_bancat.exe \
+	    $(QEMU_DIR)/qboot.o $(QEMU_DIR)/qemu_entry.o \
+	    $(OWBANCAT_DIR)/owbancat_seed.o \
+	    boot/owchk_seed.o $(ALL_OBJS) -lgcc
+	objcopy -O binary $(QEMU_DIR)/qemu_bancat.exe $@
+	@echo "QEMU bancat image (bancat as PID 1, reads crash.bdmp): $@"
+
+ifeq ($(CIS_DEV_TRUST),1)
+qemu-bancat: $(OWBANCAT_BIN)
+	python tools/stage_owx.py --verify "$(BANCAT_BUILD_IMAGE)" "$(BANCAT_IMAGE)"
+	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_bancat_test.ps1 $(OWBANCAT_BIN)
+else
+qemu-bancat:
+	@echo "qemu-bancat requires CIS_DEV_TRUST=1: the decoder image is signed with the"
+	@echo "development key, which only a CIS_DEV_TRUST build pins in the trust store."
+	@echo "Run: make CIS_DEV_TRUST=1 qemu-bancat"
+	@exit 1
+endif
+
+# ==============================================================================
 # VirtualBox floppy boot test: relinks the same flat kernel (boot/qboot.S +
 # boot/qemu_entry.c + ALL_OBJS) at 0x10000 via boot/vbox.ld, packs stage1.S +
 # the flat image into a 1.44MB floppy (tools/mkboot.py), and launches it in
@@ -788,8 +1058,9 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                $(OWFS_DIR)/src/owfs_sync.c \
                $(USFS_DIR)/src/usfs_bitmap.c $(USFS_DIR)/src/usfs_blockio.c \
                $(USFS_DIR)/src/usfs_entry.c $(USFS_DIR)/src/usfs_file.c \
-               $(USFS_DIR)/src/usfs_format.c $(USFS_DIR)/src/usfs_superblock.c \
-               $(USFS_DIR)/src/usfs_sync.c
+                $(USFS_DIR)/src/usfs_format.c $(USFS_DIR)/src/usfs_superblock.c \
+                $(USFS_DIR)/src/usfs_sync.c \
+                $(ESSENTIALS_ROOT)/DLL/kconf64/kconf64.c
 
 # hosttest-asan builds the identical source list with the address and undefined
 # behaviour sanitizers.  It exists because several CIS bounds guards cannot be
@@ -805,7 +1076,10 @@ HOSTTEST_INCLUDES = -I./boot -I./inc -I./inc/bancode -I$(BANCODE_DIR) \
                     -I../superunicode/sutf/include -I../vip \
                     -I../OpenWindows-Storage/common/include \
                     -I../OpenWindows-Storage/owfs/include \
-                    -I../OpenWindows-Storage/usfs/include
+                    -I../OpenWindows-Storage/usfs/include \
+                    -I$(ESSENTIALS_ROOT)/Software/kconfctl \
+                    -I$(ESSENTIALS_ROOT)/Software/banhammer \
+                    -I$(ESSENTIALS_ROOT)/Extensions
 
 HOSTTEST_ASAN_FLAGS = -std=c99 -Wall -Wextra -Werror -fno-pie -g \
                       -fsanitize=address,undefined -fno-omit-frame-pointer \
@@ -846,5 +1120,5 @@ emergency: $(EMERGENCY_OWX)
 	python tools/check_owx_entries.py --self-test
 	python tools/check_owx_entries.py $(EMERGENCY_DIR)
 
-.PHONY: all clean vm hosttest qemu qemu-emergency qemu-provenance vbox vbox-image vdi vdi-test \
+.PHONY: all clean vm hosttest qemu qemu-emergency qemu-provenance qemu-argv qemu-bancat vbox vbox-image vdi vdi-test \
         owx-entries emergency

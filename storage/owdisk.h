@@ -37,6 +37,13 @@
  * by this so a caller-supplied name can never drive an unbounded walk. */
 #define OW_USERSPACE_NAME_MAX   64U
 
+/* The protected root-owned crash dump.  The crash path writes it and the
+ * userspace crash decoder (bancat) reads it, so both sides agree on one name
+ * here rather than each spelling the string.  A name is only a hint: what makes
+ * the dump private is its OWFS mode and OWFS_SEC_HIDDEN flag, set by
+ * OwFsOwfsCreateRestricted, not the string. */
+#define OW_CRASH_DUMP_NAME      "crash.bdmp"
+
 OW_STATUS OwDiskInitialize(void);        /* auto format+mount OWFS & USFS */
 
 bool OwDiskOwfsMounted(void);
@@ -62,6 +69,17 @@ OW_STATUS OwFsOwfsMount(void);
 OW_STATUS OwFsOwfsUnmount(void);
 OW_STATUS OwFsOwfsMkdir(const char* name, uint32_t* out_inode);
 OW_STATUS OwFsOwfsCreate(const char* name, uint32_t* out_inode);
+
+/* Create a file that is owned by the superuser (UID/GID 0) with an explicit
+ * 9-bit mode and OWFS_SEC_* flag byte, then write `len` bytes of it.  Unlike
+ * OwFsOwfsCreate, the owner is forced to root whatever the ambient identity is,
+ * so a mode like 0600 or the OWFS_SEC_HIDDEN flag actually confines the object:
+ * a non-root process is then neither group/other-readable nor even able to name
+ * it.  This is how the crash dump is published. */
+OW_STATUS OwFsOwfsCreateRestricted(const char* name, uint16_t permissions,
+                                   uint8_t security_flags,
+                                   const uint8_t* data, uint32_t len);
+
 OW_STATUS OwFsOwfsWrite(const char* name, const uint8_t* data, uint32_t len);
 OW_STATUS OwFsOwfsRead(const char* name, uint8_t* buf, uint32_t cap,
                        uint32_t* out_read);

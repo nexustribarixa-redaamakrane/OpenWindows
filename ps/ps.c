@@ -152,6 +152,9 @@ OW_STATUS OwPsInitialize(void) {
          * the root is wrong, the very first scheduler tick triple-faults. */
         P->Pml4Phys      = OwMemCreateAddressSpace();
         ow_memcpy(P->Header.Name, "Kernel", 7);
+        /* The kernel effect is the superuser. */
+        P->Uid           = OW_PS_UID_ROOT;
+        P->Gid           = OW_PS_GID_ROOT;
     }
 
     /* Thread 0: system / shell thread (boot context). */
@@ -256,6 +259,13 @@ OW_PROCESS_OBJECT* OwPsCreateProcess(const char* Name, uint32_t ParentPid) {
     P->UserBrk        = OW_USER_HEAP_BASE;
     P->UserStackTop   = OW_USER_STACK_TOP;
     P->EntryReturn    = 0;
+
+    /* Every process starts unprivileged.  OwPsLoadImage promotes it to root
+     * for a BOOT or RECOVERY subsystem image, which is what lets the init
+     * orchestrator and a userspace crash decoder reach the protected OWFS
+     * objects while an ordinary application cannot. */
+    P->Uid            = OW_PS_UID_USER;
+    P->Gid            = OW_PS_GID_USER;
 
     /* Per-process CR3 root (Phase 2).  Built here rather than lazily in
      * OwPsCreateUserThread so that EVERY process owns a root, which is what
@@ -517,6 +527,86 @@ OW_THREAD_OBJECT* OwPsCreateUserThreadFrame(OW_PROCESS_OBJECT* Proc,
 }
 
 /* ====================================================================== */
+/* OwPsBuildArgv - lay a process-entry argc/argv block into one user stack page */
+/* ====================================================================== */
+/* Pure on purpose: the ring-3 launcher is the only caller, but the part worth
+ * testing -- bounds, alignment, the NULL terminator, per-argument length -- has
+ * nothing to do with CR3, so it takes a plain byte buffer and the host harness
+ * drives it directly.
+ *
+ * The block grows DOWN from the top of the page, exactly as an exec-time stack
+ * does.  The launcher copies the page into the process's own frame and leaves
+ * the C-ABI return slot just below this block:
+ *
+ *          page_top_va -> +------------------------+
+ *                         | "arg0\0" .. "argN-1\0" |
+ *                         | (8-byte aligned)       |
+ *                         | argv[0..N-1]           |
+ *                         | NULL                   |  <- *out_argv_va
+ *                         +------------------------+
+ *
+ * Every subtraction is preceded by a bounds check against `base`, so an
+ * over-long argument is a refusal and never an unsigned underflow that wraps the
+ * cursor back to the top of the page. */
+OW_STATUS OwPsBuildArgv(uint8_t* page, uint64_t page_top_va, int argc,
+                        const char* const argv[], uint64_t* out_argv_va) {
+    uint64_t base;
+    uint64_t cursor;
+    uint64_t str_va[OW_ARGV_MAX] = {0};
+    int i;
+
+    if (!page || !out_argv_va) return OW_ERR_NULL_POINTER;
+    if (argc < 0 || argc > (int)OW_ARGV_MAX) return OW_ERR_INVALID_PARAM;
+    if (argc > 0 && !argv) return OW_ERR_NULL_POINTER;
+    if ((page_top_va & (uint64_t)(OW_PAGE_SIZE - 1u)) != 0u)
+        return OW_ERR_INVALID_PARAM;
+
+    base = page_top_va - (uint64_t)OW_PAGE_SIZE;
+    cursor = page_top_va;
+
+    /* 1. Strings, first argument at the highest address. */
+    for (i = 0; i < argc; i++) {
+        const char* s = argv[i];
+        uint64_t len = 0u;
+        uint64_t k;
+
+        if (!s) return OW_ERR_NULL_POINTER;
+        /* Bound the scan to the page BEFORE each read, so a string with no NUL
+         * in the first page is refused rather than read past its end. */
+        for (;;) {
+            if (len >= (uint64_t)OW_PAGE_SIZE) return OW_ERR_INVALID_PARAM;
+            if (s[len] == '\0') break;
+            len++;
+        }
+        len++; /* include the NUL */
+        if (cursor < base + len) return OW_ERR_INSUFFICIENT;
+        cursor -= len;
+        for (k = 0u; k < len; k++)
+            page[(uint32_t)(cursor - base) + (uint32_t)k] = (uint8_t)s[k];
+        str_va[i] = cursor;
+    }
+
+    /* 2. The argv[] array, 8-byte aligned, terminated by argv[argc] == NULL. */
+    cursor &= ~(uint64_t)7u;
+    if (cursor < base + (uint64_t)(argc + 1) * 8u) return OW_ERR_INSUFFICIENT;
+    cursor -= 8u;
+    {
+        uint32_t k;
+        for (k = 0u; k < 8u; k++) page[(uint32_t)(cursor - base) + k] = 0u;
+    }
+    for (i = argc - 1; i >= 0; i--) {
+        uint32_t k;
+        cursor -= 8u;
+        for (k = 0u; k < 8u; k++)
+            page[(uint32_t)(cursor - base) + k] =
+                (uint8_t)(str_va[i] >> (uint8_t)(8u * k));
+    }
+
+    *out_argv_va = cursor;
+    return OW_SUCCESS;
+}
+
+/* ====================================================================== */
 /* OwPsLaunchUserImage - bring a loaded image to CPL3                       */
 /* ====================================================================== */
 /* Declare one VAD covering a range, refusing anything outside the window.  The
@@ -537,14 +627,51 @@ static OW_STATUS ps_declare_vad(OW_PROCESS_OBJECT* Proc, uint64_t Start,
 }
 #endif
 
+/* ====================================================================== */
+/* OwPsStampEntryArgs - seed the process-entry argument registers          */
+/* ====================================================================== */
+/* Every .owx is built by the MinGW-w64 GCC target (x86_64-w64-mingw32) and its
+ * PE entry symbol is the compiled C `main` itself (linker `-e,<main>`, no CRT
+ * startup and no shim), so the image reads its arguments per the Microsoft x64
+ * ABI: RCX = argc, RDX = argv, R8 = envp (R9 = 4th arg, unused).  At CPL3 the
+ * values arrive only through ow_ps_resume_thread, which restores the global
+ * registers from Context.Gpr[] before iretq; the Gpr index order is fixed by
+ * ps/switch.S, giving Gpr[1] = RCX, Gpr[2] = RDX, Gpr[5] = R8.
+ *
+ * Seeding the x86-64 SysV registers (RDI/RSI/RDX) instead is the bug this helper
+ * replaces: RDI is never read by a MinGW image, so an argc of 4 placed there was
+ * invisible while ECX still held the zeroed context default and every program
+ * saw argc = 0.  Kept as a standalone function, outside the OW_HOST_HAL guard,
+ * so the host harness can assert the exact slots the launcher writes without a
+ * real user address space. */
+void OwPsStampEntryArgs(OW_THREAD_CONTEXT* Context, int argc, uint64_t argv_va) {
+    if (!Context) return;
+    Context->Gpr[1] = (uint64_t)(uint32_t)argc; /* RCX = argc     */
+    Context->Gpr[2] = argv_va;                  /* RDX = &argv[0] */
+    Context->Gpr[5] = 0u;                       /* R8  = envp     */
+}
+
 OW_STATUS OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc) {
+    /* argv[0] is this process's own image name, which the loader already
+     * bounded when it built Proc->Header.Name.  Kernel memory, copied again by
+     * the launcher, so no user pointer is involved. */
+    const char* argv[1];
+    argv[0] = (Proc && Proc->Header.Name[0]) ? Proc->Header.Name : "owx";
+    return OwPsLaunchUserImageEx(Proc, 1, argv);
+}
+
+OW_STATUS OwPsLaunchUserImageEx(OW_PROCESS_OBJECT* Proc, int argc,
+                                const char* const argv[]) {
 #ifdef OW_HOST_HAL
-    (void)Proc;
+    (void)Proc; (void)argc; (void)argv;
     return OW_ERR_NOT_INITIALIZED;
 #else
     uint64_t           resume_rsp;
     uint64_t           frame = 0;
     uint64_t           ret_frame = 0;
+    uint64_t           top_frame = 0;
+    uint64_t           argv_va = 0;
+    int                launch_argc = 0;
     uint32_t           i;
     OW_THREAD_OBJECT*  T;
 
@@ -582,8 +709,9 @@ OW_STATUS OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc) {
      * retires, not the address of a frame written by hand: ow_ps_resume_thread
      * builds [rip][cs][rflags][rsp][ss] itself at ResumeRsp-40.  So a `ret`
      * out of the image entry must find the trampoline at [ResumeRsp] exactly
-     * as the SysV ABI requires, which also keeps the whole landing zone
-     * contiguous with the free stack below it. */
+     * as the C calling convention requires (both SysV and MS x64 place the
+     * return address at [RSP] on entry), which also keeps the whole landing
+     * zone contiguous with the free stack below it. */
     resume_rsp = Proc->UserStackTop - 8u;
 
     /* Both stack pages are mapped EAGERLY here, unlike the rest of the user
@@ -615,6 +743,12 @@ OW_STATUS OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc) {
         if ((resume_rsp & ~(uint64_t)(OW_PAGE_SIZE - 1u)) == page) {
             ret_frame = frame;
         }
+        /* And the frame backing the TOP page: the argv block lives there,
+         * above the initial RSP, which is what lets it outlive the program's
+         * own pushes (the stack grows down from rsp, away from the block). */
+        if (page == (uint64_t)Proc->UserStackTop) {
+            top_frame = frame;
+        }
     }
 
     if (Proc->EntryReturn) {
@@ -632,9 +766,41 @@ OW_STATUS OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc) {
         *(volatile uint64_t*)(uintptr_t)slot = Proc->EntryReturn;
     }
 
+    /* argv: build the block in a scratch page, then copy it into the top stack
+     * page's FRAME for the same reason the return slot is written through the
+     * frame -- CR3 is still the kernel's here, so a store to the process's
+     * virtual address would resolve through the wrong tables.  A build failure
+     * is not fatal: the program is entered with argc=0 and argv[0]==NULL, a
+     * documented, safe state, rather than being stranded un-launched. */
+    {
+        static uint8_t s_argv_page[OW_PAGE_SIZE];
+        const uint64_t stack_top_va =
+            (uint64_t)Proc->UserStackTop + (uint64_t)OW_PAGE_SIZE;
+        OW_STATUS ast =
+            OwPsBuildArgv(s_argv_page, stack_top_va, argc, argv, &argv_va);
+
+        if (ow_status_success(ast) && top_frame != 0u) {
+            volatile uint8_t* dst = (volatile uint8_t*)(uintptr_t)top_frame;
+            const uint8_t*    src = s_argv_page;
+            uint32_t k;
+            for (k = 0u; k < (uint32_t)OW_PAGE_SIZE; k++) dst[k] = src[k];
+            launch_argc = argc;
+        } else {
+            ow_kprintf("[PS] %s: argv build failed (st=0x%X); entering argc=0\r\n",
+                       Proc->Header.Name, (unsigned)ast);
+            argv_va = 0u;
+            launch_argc = 0;
+        }
+    }
+
     T = OwPsCreateUserThreadFrame(Proc, Proc->EntryPoint, resume_rsp,
                                   Proc->EntryReturn);
     if (!T) return OW_ERR_INSUFFICIENT;
+
+    /* Hand the program its arguments the way its compiler expects to read them.
+     * OwPsStampEntryArgs owns the exact Microsoft x64 slot mapping and explains
+     * why a MinGW-built .owx needs it rather than the x86-64 SysV registers. */
+    OwPsStampEntryArgs(&T->Context, launch_argc, argv_va);
 
     ow_kprintf("[PS] %s: image entered at CPL3, rsp 0x%llX, exit 0x%llX\r\n",
                Proc->Header.Name,

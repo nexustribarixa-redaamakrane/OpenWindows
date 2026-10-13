@@ -286,6 +286,77 @@ static void log_ow_image(const char* label, bool present, bool valid,
  *
  * `out` receives the process so the caller can say which image it entered, or
  * NULL when the hand-off did not happen. */
+/* Boot-time argv injection seam.
+ *
+ * The kernel hands PID 1 its argument vector through OwPsLaunchUserImageEx; in
+ * production that vector is exactly argv[0] == the init's image name.  The
+ * emulation argv regression needs to drive a non-trivial vector (zero arguments;
+ * several, including strings with embedded spaces) through the real launch path,
+ * and it must do so without changing what a production boot does.
+ *
+ * The seam is a compile-time variant of THIS translation unit rather than a
+ * weak symbol overridden at link time: the Windows/PE linker does not rebind a
+ * weak alias referenced inside the object that defined it, so a weak function
+ * here would keep calling its own definition no matter what the argv image
+ * linked.  The argv images instead compile core/main.c with -DOW_ARGV_REGRESSION
+ * (and -DOW_ARGV_REGRESSION_ZERO for the empty case, -DOW_ARGV_REGRESSION_KCONF
+ * for the kconfctl query case, -DOW_ARGV_REGRESSION_KCONFSET for the kconfctl
+ * set case, -DOW_ARGV_REGRESSION_BANHAMMER for the banhammer_cli case) into a
+ * replaceable core/main.o.  Every normal
+ * build gets the `return 0` variant and is byte-for-byte unchanged.  This is a
+ * boot-time seam, not a syscall, so it adds nothing to the Ring 3 ABI. */
+#if defined(OW_ARGV_REGRESSION)
+#  if defined(OW_ARGV_REGRESSION_ZERO)
+static int boot_test_argv(int* argc, const char* const** argv) {
+    if (argc) *argc = 0;
+    if (argv) *argv = (const char* const*)0;
+    return 1;
+}
+#  elif defined(OW_ARGV_REGRESSION_KCONF)
+static int boot_test_argv(int* argc, const char* const** argv) {
+    static const char* const argv_probe[] = {
+        "kconfctl", "get", "kernel/panic/action"
+    };
+    if (argc) *argc = (int)(sizeof(argv_probe) / sizeof(argv_probe[0]));
+    if (argv) *argv = argv_probe;
+    return 1;
+}
+#  elif defined(OW_ARGV_REGRESSION_KCONFSET)
+static int boot_test_argv(int* argc, const char* const** argv) {
+    static const char* const argv_probe[] = {
+        "kconfctl", "set", "ui/wm/theme", "custom_at_cpl3"
+    };
+    if (argc) *argc = (int)(sizeof(argv_probe) / sizeof(argv_probe[0]));
+    if (argv) *argv = argv_probe;
+    return 1;
+}
+#  elif defined(OW_ARGV_REGRESSION_BANHAMMER)
+static int boot_test_argv(int* argc, const char* const** argv) {
+    static const char* const argv_probe[] = {
+        "banhammer_cli", "quote", "sarcastic", "1"
+    };
+    if (argc) *argc = (int)(sizeof(argv_probe) / sizeof(argv_probe[0]));
+    if (argv) *argv = argv_probe;
+    return 1;
+}
+#  else
+static int boot_test_argv(int* argc, const char* const** argv) {
+    static const char* const argv_probe[] = {
+        "owsh", "--probe", "hello world", "two words"
+    };
+    if (argc) *argc = (int)(sizeof(argv_probe) / sizeof(argv_probe[0]));
+    if (argv) *argv = argv_probe;
+    return 1;
+}
+#  endif
+#else
+static int boot_test_argv(int* argc, const char* const** argv) {
+    (void)argc;
+    (void)argv;
+    return 0;
+}
+#endif
+
 static OW_PROCESS_OBJECT* boot_launch_init(const char* image_name,
                                            const char* process_name) {
     static uint8_t s_init_image[OW_USERSPACE_IMAGE_MAX];
@@ -345,9 +416,20 @@ static OW_PROCESS_OBJECT* boot_launch_init(const char* image_name,
         km_line(0x0C, "[OWINIT]", "USER WINDOW AUDIT FAILED");
     }
 
-    if (ow_status_error(OwPsLaunchUserImage(oproc))) {
-        km_line(0x0C, "[OWINIT]", "%s CPL3 launch FAILED", process_name);
-        return (OW_PROCESS_OBJECT*)0;
+    {
+        int                test_argc = 0;
+        const char* const* test_argv = (const char* const*)0;
+        OW_STATUS          lres;
+
+        if (boot_test_argv(&test_argc, &test_argv)) {
+            lres = OwPsLaunchUserImageEx(oproc, test_argc, test_argv);
+        } else {
+            lres = OwPsLaunchUserImage(oproc);
+        }
+        if (ow_status_error(lres)) {
+            km_line(0x0C, "[OWINIT]", "%s CPL3 launch FAILED", process_name);
+            return (OW_PROCESS_OBJECT*)0;
+        }
     }
     return oproc;
 }
