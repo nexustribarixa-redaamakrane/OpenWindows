@@ -64,25 +64,32 @@ static const char *const k_InitScript[] = {
      * asserted by tools/qemu_run.ps1, so a regression in any of them fails
      * `make qemu` instead of only turning up in a manual session:
      *   pwd/cd/ls     navigation commands, which did not exist before;
+     *   ls <dir>      lists the named directory and reports a missing one,
+     *                 instead of silently printing the CWD;
      *   write/read    the VFS facade, now the same on-disk truth as `fs`;
      *   fs read       cross-check that a file written through the VFS facade is
      *                 visible to the OWFS path (the original two-stack
      *                 divergence: `write` and `fs` could not see each other);
      *   sucs commit   applies the mode staged by `sucs ext` with no reboot;
-     *   alloc         succeeds for a real size and refuses an oversized one;
+     *   alloc         succeeds for a real size, refuses an oversized one, and
+     *                 rejects a near-UINT64_MAX size instead of wrapping the
+     *                 page count to zero;
      *   status        reports the managed arena and firmware RAM separately. */
     "pwd",
     "cd System",
     "pwd",
     "ls",
+    "ls /",          /* the path argument lists the named dir, not the CWD */
     "cd ..",
     "pwd",
+    "ls /nope",      /* a missing path is reported, not silently the CWD */
     "write interop.txt via-vfs-facade",
     "read interop.txt",
     "fs read interop.txt",
     "sucs commit",
     "sucs",
     "alloc 33554432",
+    "alloc 18446744073709551615", /* near-UINT64_MAX must not wrap to 0 pages */
     "status"};
 
 static const uint32_t k_InitScriptCount =
@@ -161,7 +168,7 @@ void OwShellPrintHelp(void) {
   ow_kprintf("  load <path> <tier>- Load driver (1/2/3)\r\n");
   ow_kprintf("  pwd / cwd         - Print the current working directory\r\n");
   ow_kprintf("  cd <dir|..|/>     - Change the current working directory\r\n");
-  ow_kprintf("  ls / dir          - List the current directory\r\n");
+  ow_kprintf("  ls / dir [dir]    - List the current or named directory\r\n");
   ow_kprintf("  write <name> <txt>- Create file in the root VFS catalog\r\n");
   ow_kprintf("  read <name>       - Read file from the root VFS catalog\r\n");
   ow_kprintf("  route <hex>       - Query route table\r\n");
@@ -216,20 +223,23 @@ static void execute_trap(const char *name, uint32_t vector, const char *desc) {
   g_ShellRunning = false;
 }
 
-/* Resolve a '/'-separated path from the current directory (or from root when it
- * starts with '/'), walking each component through the OWFS catalog, and update
- * g_CwdInode/g_CwdPath on success.  ".." uses the inode's recorded parent.
- * Returns false, leaving the CWD untouched, when any component is missing or is
- * not a catalog. */
-static bool shell_cd_apply(const char *path) {
-  uint32_t inode = g_CwdInode;
+/* Resolve a '/'-separated path against a base directory (or from root when it
+ * starts with '/'), walking each component through the OWFS catalog.  The result
+ * is written to the caller's out parameters and the shell's current directory is
+ * left untouched, so `cd` (which commits the result) and `ls <dir>` (which only
+ * reads it) share one resolver.  ".." uses the inode's recorded parent.  Returns
+ * false when any component is missing or is not a catalog. */
+static bool shell_resolve_path(uint32_t base_inode, const char *base_path,
+                               const char *path, uint32_t *out_inode,
+                               char *out_path, size_t out_cap) {
+  uint32_t inode = base_inode;
   char newpath[sizeof(g_CwdPath)];
   const char *p = path;
 
-  if (!path || *path == '\0')
+  if (!path || *path == '\0' || !out_inode || !out_path || out_cap == 0u)
     return false;
 
-  ow_strncpy(newpath, g_CwdPath, sizeof(newpath));
+  ow_strncpy(newpath, base_path ? base_path : "/", sizeof(newpath));
   newpath[sizeof(newpath) - 1] = '\0';
 
   if (*p == '/') {
@@ -297,6 +307,22 @@ static bool shell_cd_apply(const char *path) {
     }
     p += len;
   }
+
+  ow_strncpy(out_path, newpath, out_cap);
+  out_path[out_cap - 1] = '\0';
+  *out_inode = inode;
+  return true;
+}
+
+/* Change the shell's current directory by resolving `path` against it.  Leaves
+ * the CWD untouched when the path does not resolve. */
+static bool shell_cd_apply(const char *path) {
+  uint32_t inode;
+  char newpath[sizeof(g_CwdPath)];
+
+  if (!shell_resolve_path(g_CwdInode, g_CwdPath, path, &inode, newpath,
+                          sizeof(newpath)))
+    return false;
 
   g_CwdInode = inode;
   ow_strncpy(g_CwdPath, newpath, sizeof(g_CwdPath));
@@ -373,14 +399,29 @@ OW_STATUS OwShellRun(void) {
       } else if (ow_strcmp(cmd, "pwd") == 0 || ow_strcmp(cmd, "cwd") == 0) {
         ow_kprintf("%s\r\n", g_CwdPath);
       } else if (ow_strcmp(cmd, "ls") == 0 || ow_strcmp(cmd, "dir") == 0) {
-        uint32_t count = 0;
-        OW_STATUS lst = OwFsOwfsListIn(g_CwdInode, &count);
-        if (ow_status_success(lst)) {
-          ow_kprintf("[FS] %s: %u entr%s\r\n", g_CwdPath, count,
-                     count == 1u ? "y" : "ies");
+        /* Optional directory argument: `ls` lists the CWD, `ls <dir>` lists the
+         * named directory.  The argument used to be parsed and then ignored, so
+         * `ls /missing` silently printed the CWD; now it resolves the path and
+         * reports a miss instead. */
+        char *target = ow_strtok((void *)0, " ");
+        uint32_t inode = g_CwdInode;
+        char path[sizeof(g_CwdPath)];
+        ow_strncpy(path, g_CwdPath, sizeof(path));
+        path[sizeof(path) - 1] = '\0';
+        if (target &&
+            !shell_resolve_path(g_CwdInode, g_CwdPath, target, &inode, path,
+                                sizeof(path))) {
+          ow_kprintf("[FS] ls '%s': no such directory\r\n", target);
         } else {
-          ow_kprintf("[FS] ls %s: FAILED (code 0x%X)\r\n", g_CwdPath,
-                     (unsigned int)lst);
+          uint32_t count = 0;
+          OW_STATUS lst = OwFsOwfsListIn(inode, &count);
+          if (ow_status_success(lst)) {
+            ow_kprintf("[FS] %s: %u entr%s\r\n", path, count,
+                       count == 1u ? "y" : "ies");
+          } else {
+            ow_kprintf("[FS] ls %s: FAILED (code 0x%X)\r\n", path,
+                       (unsigned int)lst);
+          }
         }
       } else if (ow_strcmp(cmd, "cd") == 0) {
         char *target = ow_strtok((void *)0, " ");
@@ -440,6 +481,16 @@ OW_STATUS OwShellRun(void) {
         size = ow_strtoull(size_str, (void *)0, 10);
         if (size == 0u) {
           ow_kprintf("[FAIL] alloc: size must be greater than zero\r\n");
+          continue;
+        }
+        /* Rounding up adds (OW_PAGE_SIZE - 1).  Reject sizes where that would
+         * wrap before computing the page count: for a near-UINT64_MAX request
+         * `size + 4095` wraps to a tiny value, `want` becomes zero, and the
+         * allocator reports a bogus zero-page "frame allocator refused" instead
+         * of the honest "too large". */
+        if (size > (uint64_t)-1 - (uint64_t)(OW_PAGE_SIZE - 1u)) {
+          ow_kprintf("[FAIL] alloc %llu bytes: request is too large to size\r\n",
+                     (unsigned long long)size);
           continue;
         }
         /* The shell runs at Ring 0, so it takes frames straight from the

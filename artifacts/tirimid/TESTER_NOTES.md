@@ -61,15 +61,23 @@ Consequences a tester must keep in mind:
 
 ## 4. Known defects
 
-### 4.1 `alloc 4096` fails
+### 4.1 `alloc 4096` fails — **fixed 2026-10-15**
+
+The shell is Ring 0, but it used to call `OwSyscallDispatch(OW_SYS_ALLOC, …)`,
+which needs a CPL3 process and so was rejected for every size. It now allocates
+kernel frames directly via `OwMemAllocatePages`:
 
 ```
 ow-krnl> alloc 4096
-[FAIL] Allocation rejected.
+[OK] Allocated 1 page(s) (4096 bytes) at 0x186000; pool 282/4096 pages used
+ow-krnl> alloc 18446744073709551615
+[FAIL] alloc 18446744073709551615 bytes: request is too large to size
 ```
 
-Reproduced on every image in this package. See `screenshots/07-alloc.txt`.
-Still open.
+See `screenshots/07-alloc.txt`. A near-`UINT64_MAX` size is now refused up front
+(previously `size + 4095` wrapped, the page count became zero, and the allocator
+reported a misleading "frame allocator refused"). Both behaviours are asserted
+by the `make qemu` gate.
 
 ### 4.2 Kernel timestamps are not wall-clock
 
@@ -118,7 +126,7 @@ Scope of the bug — callers of `OwHalDelayMs` only:
 (the delays are now near-free) and would require re-tuning every validation
 timeout in `tools/qemu_run.ps1` and `tools/tirimid_capture.ps1`.
 
-### 4.3 Disk and floppy images did not boot before a memory fix
+### 4.3 Disk and floppy images did not boot before a memory fix (fixed, committed)
 
 The static physical-RAM pool `g_PhysicalRam[16MB]` is linked immediately after
 the kernel. In the `boot/vbox.ld` build (link base `0x10000`) the pool spans
@@ -135,47 +143,60 @@ overlapped, which is why it always passed while floppy/disk crashed.
 
 Fixed in `core/memory.c` by skipping `0x00000–0x0FFFF` and `0xA0000–0xFFFFF`
 when bump-allocating. Both the qemu and the disk/floppy paths are exercised
-after the fix.
+after the fix. This change is now **committed** in `a1961d5` — it is no longer a
+local modification required to make the package boot.
 
-### 4.4 CIS license enforcement is userspace-only at boot (kernel path not wired)
+### 4.4 CIS enforcement — the kernel provenance gate **is** wired (corrected 2026-10-15)
 
-CIS enforces its license policy on images that go through the **userspace OWX
-loader**, but the kernel's own license/provenance check is **not invoked during
-live boot**. Do not read this package — or `docs/CIS.md` — as evidence that a
-non-GPL kernel is refused at boot. It is not, today.
+> Corrected during the 2026-10-15 refresh. The 2026-10-08 snapshot stated that
+> the kernel provenance/license verifier had zero callers. That was true of the
+> tree the snapshot was cut from, but it is **obsolete**. The superseding
+> write-up is `artifacts/tirimid-provenance-addendum-2026-10-09/ADDENDUM.md`.
+
+CIS applies its license/provenance policy on the **live kernel boot path** as
+well as through the userspace OWX loader.
 
 **Working**
 
 - Userspace `.owx` policy + license enforcement, wired through the OWX loader:
   `OwCisVerifyImage()` is called from `ps/owx_loader.c:399`.
 - The host-side CIS policy engine: `make CIS_DEV_TRUST=1 hosttest` reports
-  **771 passed, 0 failed**, including `kernel_mit_refused produces
+  **974 passed, 0 failed**, including `kernel_mit_refused produces
   REJECT_POLICY`.
-- Kernel **checksum** verification at boot: `core/main.c:700` calls
+- Kernel **checksum** verification at boot: `core/main.c:751` calls
   `OwSentinelVerifyKernelChecksum()` (SHA-256 against `openwinkrnl.chk`). This
   is an integrity check, **not** a license check.
 - Development-key signing of the test images (`CIS_DEV_TRUST=1`).
 
-**Not currently wired**
+**Live kernel path (wired).**
 
-- Live kernel license/provenance enforcement.
-  `OwSentinelVerifyKernelProvenance()` (`sentinel/damagecntrl.c:126`) is the
-  function that applies the `CORE_KERNEL` / `GPL-3.0-or-later` rule to the
-  kernel. It currently has **zero callers**: the boot path calls the checksum
-  verifier and never the provenance/license verifier. Its sibling
-  `OwSentinelVerifyRecoveryKernel()` (`sentinel/damagecntrl.c:155`) likewise has
-  no caller.
-- The kernel's CIS release block is **not carried by the bootable images**. The
-  QEMU/floppy/disk images are `objcopy -O binary` of the linked PE
-  (`Makefile:532-537`), and never pass through `tools/owx_pack.py`; only
-  `openwinkrnl.owx` is packed with `--policy-class CORE_KERNEL
-  --cis-licence GPL-3.0-or-later` (`Makefile:180-185`).
+- `core/main.c:767` calls `OwSentinelVerifyKernelProvenanceFromVolume()`, which
+  reads `openwinkrnl.owx` from the volume and applies the `CORE_KERNEL` /
+  `GPL-3.0-or-later` policy via `OwSentinelVerifyKernelProvenance()`
+  (`sentinel/damagecntrl.c:132`).
+- The recovery hand-off calls `OwSentinelVerifyRecoveryKernel()`
+  (`core/main.c:382`, `sentinel/damagecntrl.c:219`).
+- The kernel **checksum** verifier still runs first (`core/main.c:751`,
+  `OwSentinelVerifyKernelChecksum()`).
 
-**Consequence — empirically verified.** A kernel image repacked with
-`POLICY_CLASS = CORE_KERNEL`, `LICENSE = Apache-2.0`, signed with the dev key,
-parses back with exactly those tags and **still boots to `ow-krnl>`** with
-`violations=0`. The kernel's declared license is simply not inspected on the
-live boot path.
+**Development-policy caveat — what these images actually show.** The bootable
+images do **not** carry a packed kernel CIS release block: they are
+`objcopy -O binary` of the linked PE, and only `openwinkrnl.owx` passes through
+`tools/owx_pack.py` with `--policy-class CORE_KERNEL --cis-licence
+GPL-3.0-or-later`. Under `CIS_DEV_TRUST=1` the kernel gate therefore reports:
+
+```
+[CIS] kernel image provenance: openwinkrnl.owx optional (development policy)
+[SENTINEL] kernel provenance NOT verified: openwinkrnl.owx absent from the volume
+           (development policy tolerates absence; enforcement skipped)
+```
+
+The gate **runs**; it finds no kernel `.owx` and (under dev policy only)
+tolerates the absence. A production build without `CIS_DEV_TRUST` does not
+tolerate it. The 2026-10-08 audit result — a `CORE_KERNEL` / `Apache-2.0`
+dev-signed kernel image booted to `ow-krnl>` — no longer holds on the current
+tree: that image is refused by the gate before PID 1 is created (see the
+addendum).
 
 **Live userspace enforcement — empirically verified.** Regenerating
 `boot/owinit_image.h` so the embedded `owinit.owx` declares
@@ -197,9 +218,9 @@ This proves a non-permissive userspace image is actively rejected by CIS.
 **Build-system caveat.** `$(CIS_STAMP)` is a `.PHONY` target (`Makefile:399`), so
 `make` regenerates `boot/owinit_image.h` on every build (rule at
 `Makefile:425-431`). Preserving an experimental header therefore required
-building with `make -o boot/owinit_image.h …`. This behavior was left unchanged,
-and the tester images in this package were **not** rebuilt during this
-investigation.
+building with `make -o boot/owinit_image.h …`. This behavior was left unchanged. (The tester
+images *were* rebuilt for the 2026-10-15 refresh, but no experimental header is
+involved there.)
 
 ---
 
@@ -209,22 +230,26 @@ investigation.
   Mitigation: every screenshot ships with a `.txt` decoded from the raw
   `0xB8000` dump, and each `.txt` was programmatically checked against the
   state it is captioned as.
-- **`make CIS_DEV_TRUST=1 vdi`.** Not built. Note it links `$(VBOX_DISK_KERNEL)`
-  *without* `$(TEST_SEED_OBJS)`, so it would be a different, unseeded image
-  with no `owinit` payload. The packaged disk image here is built from the
-  seeded floppy kernel instead.
-- **`make CIS_DEV_TRUST=1 qemu-emergency`** — not run for this package
-  (optional follow-up).
 
-`make CIS_DEV_TRUST=1 hosttest` **was** run during the follow-up CIS
-investigation (see §4.4): **771 passed, 0 failed**. It drives the CIS policy
-engine on the host and is the evidence that the engine refuses a non-GPL kernel
-*when the verifier is invoked* — even though, as §4.4 records, the live boot path
-does not currently invoke it.
+Everything else this section previously listed as un-run has now been run for
+the 2026-10-15 refresh:
 
-VirtualBox 7.2.16 **was** available and the `.vdi` **was** booted and validated
-(`transcripts/05_virtualbox_boot.txt`, `screenshots/09-vbox-boot.png`). Note for
-automation: `VBoxManage` is not on `PATH` on this host — it lives at
+- **`make CIS_DEV_TRUST=1 qemu-emergency`** — PASS, **8 checks**.
+- **`make CIS_DEV_TRUST=1 vdi`.** Built and validated. Note it links
+  `$(VBOX_DISK_KERNEL)` *without* `$(TEST_SEED_OBJS)`, so it is a different,
+  **program-free production** image with no `owinit` payload; it correctly halts
+  at the `U+11A005` owinit gate (8-check validation). It is a git-ignored local
+  artefact and is deliberately not distributed inside this seeded package — the
+  packaged disk image is still built from the seeded floppy kernel.
+
+`make CIS_DEV_TRUST=1 hosttest` **was** also run: **974 passed, 0 failed**. It
+drives the CIS policy engine on the host and is the evidence that the engine
+refuses a non-GPL kernel *when the verifier is invoked* — even though, as §4.4
+records, the live boot path does not currently invoke it.
+
+VirtualBox 7.2.16 **was** available and the packaged `.vdi` **was** booted and
+validated (`transcripts/05_virtualbox_boot.txt`, `screenshots/09-vbox-boot.png`).
+Note for automation: `VBoxManage` is not on `PATH` on this host — it lives at
 `C:\Program Files\Oracle\VirtualBox\VBoxManage.exe`, so `Get-Command VBoxManage`
 fails and scripts must be given the full path.
 
@@ -243,13 +268,15 @@ fails and scripts must be given the full path.
 - The VGA console is an 80×25 mirror of the serial log (rows 0–3 logo, 4–22
   log, 24 HUD). It is a text buffer, not a compositor — there is no graphical
   window system on screen.
-- `07-alloc` deliberately shows a **failure**. That is the real behaviour.
+- `07-alloc` now shows a **success** (`alloc 4096` → `[OK] Allocated 1 page(s) (4096 bytes) …`).
+  It showed a failure in the previous package; that defect is fixed.
 
 ---
 
 ## 7. Recommendation
 
-Safe to use for: booting, inspecting the serial log, checking the shell, the
+Safe to use for: booting, inspecting the serial log, checking the shell (now
+including `pwd` / `cd` / `ls [dir]` / `sucs commit` and a working `alloc`), the
 init/runlevel sequence, the filesystem verbs, and the shutdown path.
 
 Do **not** use for: correctness claims about the twelve stub `.owx` programs,
@@ -259,6 +286,5 @@ Suggested follow-up order:
 
 1. Fix `OwHalDelayMs` (divide accumulated ticks by 1193) and re-tune the
    validation timeouts.
-2. Fix `alloc 4096`.
-3. Convert the twelve `.owx` stubs to real programs — first inventory
+2. Convert the twelve `.owx` stubs to real programs — first inventory
    `OpenWindows-Essentials` per file and decide the syscall surface needed.

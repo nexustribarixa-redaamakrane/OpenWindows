@@ -2,7 +2,6 @@
                         O P E N W I N D O W S
                      Kernel 0.1.0 - Boot Monitor
 ===================================================================
-[RUNLVL]   + DIAG
 [RUNLVL]   + ALPC
 [RUNLVL]   + SUCS
 [RUNLVL]   + VFS
@@ -20,6 +19,7 @@
 ow-krnl> fs list
   [DIR ] System (ino 1)
   [FILE] bootvid.owd (ino 2)
-[FS] list root: OK (2 entries)
+  [FILE] interop.txt (ino 3)
+[FS] list root: OK (3 entries)
 ow-krnl>
 OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

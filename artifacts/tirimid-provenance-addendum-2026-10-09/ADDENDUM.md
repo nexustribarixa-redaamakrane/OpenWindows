@@ -4,6 +4,12 @@ Date: 2026-10-09
 Applies to: `artifacts/tirimid/` (frozen snapshot produced 2026-10-08)
 Status: informational correction. The snapshot itself is NOT modified.
 
+> Update 2026-10-15: the Tirimid snapshot **was** refreshed (see
+> `artifacts/tirimid/CHANGELOG.md`) and now incorporates this correction
+> directly — its `TESTER_NOTES.md` §4.4 records the wired kernel provenance gate.
+> The "snapshot itself is NOT modified" line above describes the state when this
+> addendum was written; it is superseded by the refresh.
+
 ## 1. Why this addendum exists
 
 The Tirimid tester snapshot in `artifacts/tirimid/` was packaged on 2026-10-08,

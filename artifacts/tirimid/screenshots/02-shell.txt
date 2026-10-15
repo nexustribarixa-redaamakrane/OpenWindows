@@ -3,23 +3,23 @@
                      Kernel 0.1.0 - Boot Monitor
 ===================================================================
 ---
-OpenWindows storage live
+via-vfs-facade
 ---
-ow-krnl> fs list
-  [DIR ] System (ino 1)
-  [FILE] bootvid.owd (ino 2)
-[FS] list root: OK (2 entries)
-ow-krnl> fs status
-[FS] OWFS: MOUNTED  free blocks: 1772
-[FS] USFS: MOUNTED  free blocks: 2029
-ow-krnl> fs umount
-[FS] owfs umount: OK (code 0x0)
-ow-krnl> fs mount
-[FS] owfs mount: OK (code 0x0)
-ow-krnl> fs read bootvid.owd
-[FS] read 'bootvid.owd' (24 bytes):
----
-OpenWindows storage live
----
+ow-krnl> sucs commit
+[SUCS] committed: active=EXTENDED pending=EXTENDED reboot=0 changes=1
+ow-krnl> sucs
+[SUCS] active=EXTENDED pending=EXTENDED reboot=0 changes=1
+ow-krnl> alloc 33554432
+[FAIL] alloc 33554432 bytes (8192 page(s)): kernel pool exhausted (3815 of 4096
+4-KiB pages free)
+ow-krnl> alloc 18446744073709551615
+[FAIL] alloc 18446744073709551615 bytes: request is too large to size
+ow-krnl> status
+--- SYSTEM STATUS ---
+Memory (kernel pool): 281 / 4096 pages used (16 MiB 4-KiB arena)
+Memory (firmware):    unknown (no bootloader memory map)
+VFS Primary:   MOUNTED (OWFS)
+VFS Secure:    MOUNTED (USFS)
+CWD:           /
 ow-krnl>
 OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

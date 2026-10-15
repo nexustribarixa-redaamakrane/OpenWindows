@@ -1,60 +1,69 @@
 OpenWindows - Tirimid test package - PROVENANCE
 ================================================
 
-Produced:  2026-10-08 20:11:43 +00:00
-Host:      DESKTOP-GI1JNJN  Windows  PowerShell 7.6.6
+Produced:  2026-10-15 (refresh)
+Host:      DESKTOP-GI1JNJN  Windows  PowerShell 7.6.7
 Repo:      C:\Users\KARIMABENDA\Documents\OpenWindows
-Commit:    06984b4da27caa5cce64112e0a0a97466ae93b7a
-Subject:   docs: rewrite README with implementation details
+Commit:    a1961d5303a71abb2766be89a39022badee7d4dd
+Subject:   Refactor OWFS and VFS integration; enhance shell navigation and memory reporting
+Package:   2026-10-08 package, rebuilt 2026-10-15 (see CHANGELOG.md)
 
-Working tree at packaging time:
-   M boot/stage1.S
-   M boot/stage1disk.S
-   M core/memory.c
-  ?? artifacts/
-  ?? tools/ppm2png.py
-  ?? tools/tirimid_capture.ps1
-  ?? tools/vgatext.py
+Working tree at packaging time (uncommitted, intentional — this refresh):
+   M shell/shell.c
+   M tools/qemu_run.ps1
+   M artifacts/tirimid/README.md
+   M artifacts/tirimid/TESTER_NOTES.md
+   M artifacts/tirimid/images/openwinkrnl_tirimid_qemu.bin
+   M artifacts/tirimid/images/openwinkrnl_tirimid_floppy.flp
+   M artifacts/tirimid/images/openwinkrnl_tirimid_disk.img
+   M artifacts/tirimid/images/openwinkrnl_tirimid_disk.vdi
+   M artifacts/tirimid/screenshots/*
+   M artifacts/tirimid/transcripts/*
+  ?? artifacts/tirimid/CHANGELOG.md
+
+  The three boot-enabling fixes this package originally shipped as local
+  modifications (core/memory.c ISA-window skip; boot/stage1.S and
+  boot/stage1disk.S .bss zeroing) are now committed in a1961d5 and no longer
+  appear as local changes.
 
 Toolchain:
-  gcc     gcc.exe (GCC) 15.2.0
-  nasm    NASM version 3.01 compiled on Oct 10 2025
-  python  Python 3.14.5
-  qemu    QEMU emulator version 11.1.0 (v11.1.0-12130-ge470268ff4)
-  qemu-imgqemu-img version 11.1.0 (v11.1.0-12130-ge470268ff4)
+  gcc      gcc.exe (GCC) 15.2.0
+  nasm     NASM version 3.01 compiled on Oct 10 2025
+  python   Python 3.14.5
+  qemu     QEMU emulator version 11.1.0 (v11.1.0-12130-ge470268ff4)
+  qemu-img qemu-img version 11.1.0 (v11.1.0-12130-ge470268ff4)
+  vbox     VirtualBox 7.2.16r174877
 
 Build commands:
-  make CIS_DEV_TRUST=1 qemu
-  make CIS_DEV_TRUST=1 vbox-image
-  make CIS_DEV_TRUST=1 owx-entries
-  nasm -f bin boot\stage1disk.S -o stage1disk.bin
+  make CIS_DEV_TRUST=1 qemu          (flat -> images/openwinkrnl_tirimid_qemu.bin)
+  make CIS_DEV_TRUST=1 vbox-image    (floppy -> images/openwinkrnl_tirimid_floppy.flp)
+  make CIS_DEV_TRUST=1 owx-entries   (13 targets, 0 failures)
+  make CIS_DEV_TRUST=1 hosttest      (974 passed, 0 failed)
+  make CIS_DEV_TRUST=1 qemu-emergency(8 checks passed)
+
+Disk image recipe (seeded kernel, not the program-free `make vdi` output):
+  nasm -f bin -w-no-error=label-redef-late -w-label-redef-late boot\stage1disk.S -o stage1disk.bin
   python tools\mkboot.py stage1disk.bin <openwinkrnl_vbox.bin> openwinkrnl_tirimid_disk.img 4194304
   qemu-img convert -f raw -O vdi openwinkrnl_tirimid_disk.img openwinkrnl_tirimid_disk.vdi
 
-Capture commands:
-  pwsh -File tools\tirimid_capture.ps1 -Image <disk.img> -Media disk -OutDir <dir>
-  python tools\ppm2png.py --dir <dir>
-  python tools\vgatext.py <dir>\<name>.vgabin -o <dir>\<name>.txt
+Capture recipe (QEMU 11.1.0):
+  pwsh -ExecutionPolicy Bypass -File tools\tirimid_capture.ps1 `
+      -Image artifacts\tirimid\images\openwinkrnl_tirimid_disk.img -Media disk -OutDir <out>
+  python tools\ppm2png.py --dir <out>
+  python tools\vgatext.py <out>\<name>.vgabin -o <out>\<name>.txt
 
-Modified source files (required for disk/floppy boot):
-  core/memory.c     skip ISA reserved window when bump-allocating the RAM pool
-  boot/stage1.S     zero .bss from multiboot header end fields
-  boot/stage1disk.S zero .bss from multiboot header end fields
-  tools/tirimid_capture.ps1  (new) screenshot capture driver
-  tools/ppm2png.py           (new) PPM -> PNG
-  tools/vgatext.py           (new) 0xB8000 dump -> 80x25 text
+VirtualBox capture recipe (VirtualBox 7.2.16, headless):
+  VBoxManage storageattach OpenWindows-Tirimid --storagectl SATA --port 0 --device 0 --type hdd --medium <disk.vdi>
+  VBoxManage modifyvm OpenWindows-Tirimid --uart1 0x3F8 4 --uartmode1 file <serial.log>
+  VBoxManage startvm OpenWindows-Tirimid --type headless
+  VBoxManage controlvm OpenWindows-Tirimid screenshotpng screenshots\09-vbox-boot.png
+  VBoxManage controlvm OpenWindows-Tirimid poweroff
 
-Follow-up investigation (post-packaging); the historical provenance above is unchanged:
-  - make CIS_DEV_TRUST=1 hosttest: 771 passed, 0 failed.
-  - CIS enforcement-scope findings recorded in artifacts/tirimid/TESTER_NOTES.md
-    section 4.4 and docs/CIS.md (Enforcement scope):
-      * Userspace .owx license/policy enforcement: ACTIVE (ps/owx_loader.c).
-      * Live kernel license/provenance enforcement during boot: NOT WIRED
-        (OwSentinelVerifyKernelProvenance has zero callers; the boot path calls
-        only OwSentinelVerifyKernelChecksum).
-      * Empirically: a CORE_KERNEL / Apache-2.0 dev-signed kernel image boots;
-        a Proprietary dev-signed userspace owinit.owx is refused (POLICY-REFUSED).
-      * Known issue: the halt reason is reported as OWINIT_MISSING when the
-        actual cause is POLICY-REFUSED.
-  - No source-code behavior was changed, and the packaged tester images were
-    not rebuilt, for this investigation.
+Notes:
+  * VBoxManage is not on PATH on this host; use
+    "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe".
+  - The program-free production image `make CIS_DEV_TRUST=1 vdi`
+    (vbox/openwinkrnl.vdi, git-ignored) was rebuilt and validated at the same
+    time (8-check U+11A005 owinit gate) but is NOT distributed in this package.
+  - make hosttest-asan does not build on this host (w64devkit ships no ASAN
+    runtime) — pre-existing, not a regression.

@@ -2,7 +2,6 @@
                         O P E N W I N D O W S
                      Kernel 0.1.0 - Boot Monitor
 ===================================================================
-[RUNLVL]   + SUCS
 [RUNLVL]   + VFS
 [RUNLVL]   + USFS
 [RUNLVL]   + STORAGE
@@ -18,8 +17,9 @@
 ow-krnl> fs list
   [DIR ] System (ino 1)
   [FILE] bootvid.owd (ino 2)
-[FS] list root: OK (2 entries)
+  [FILE] interop.txt (ino 3)
+[FS] list root: OK (3 entries)
 ow-krnl> sucs
-[SUCS] active=BASE pending=EXTENDED reboot=1 changes=0
+[SUCS] active=EXTENDED pending=EXTENDED reboot=0 changes=1
 ow-krnl>
 OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

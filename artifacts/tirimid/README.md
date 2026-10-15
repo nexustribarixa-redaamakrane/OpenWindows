@@ -8,18 +8,25 @@ is signed with the public development key (`CIS_DEV_TRUST=1`). Read
 [`TESTER_NOTES.md`](TESTER_NOTES.md) before drawing conclusions from anything in
 this directory.
 
+> **Refreshed 2026-10-15** against commit `a1961d5` plus the uncommitted
+> testing-report fixes. The shell `alloc` command that previously failed on every
+> image now works, the previously missing navigation verbs (`pwd` / `cd` /
+> `ls [dir]`) and `sucs commit` are present, `status` reports the managed arena
+> and the firmware RAM separately, and the `make qemu` gate now asserts **31**
+> checks. See [`CHANGELOG.md`](CHANGELOG.md) for the full delta.
+
 ---
 
 ## 1. Contents
 
 | Path | What it is |
 |---|---|
-| `images/openwinkrnl_tirimid_qemu.bin` | Flat kernel image, 257 KB, loaded with QEMU `-kernel` (no boot sector) |
+| `images/openwinkrnl_tirimid_qemu.bin` | Flat kernel image, 272 KB, loaded with QEMU `-kernel` (no boot sector) |
 | `images/openwinkrnl_tirimid_floppy.flp` | 1.44 MB boot floppy (`stage1.S` + kernel), QEMU `-fda -boot a` |
 | `images/openwinkrnl_tirimid_disk.img` | 4 MB raw IDE disk (`stage1disk.S` LBA loader + kernel), QEMU `-drive -boot c` |
-| `images/openwinkrnl_tirimid_disk.vdi` | Same 4 MB disk converted to VirtualBox VDI format — **not validated, see notes** |
-| `transcripts/` | Full serial-console transcripts of the boot / capture sessions |
-| `screenshots/*.png` | 9 VGA screenshots (PPM → PNG), 720×400 stdvga text mode |
+| `images/openwinkrnl_tirimid_disk.vdi` | Same 4 MB disk converted to VirtualBox VDI format (booted and validated under VirtualBox 7.2.16) |
+| `transcripts/` | Boot / capture serial transcripts, plus the `make qemu` validation report |
+| `screenshots/*.png` | 10 VGA screenshots (PPM → PNG), 720×400 stdvga text mode |
 | `screenshots/*.txt` | The same screens decoded from the raw 80×25 text buffer (`0xB8000`) |
 | `screenshots/*.vgabin` | Raw 4000-byte VGA text dumps — the source the `.txt` files are decoded from |
 | `MANIFEST.sha256` | SHA-256 of every file above |
@@ -114,6 +121,13 @@ prompt, no fatal/halt markers. Screenshot:
 Note the ACPI firmware is reported as `OEM 'VBOX  '` — the ACPI path is
 exercised against real VirtualBox tables, not QEMU's.
 
+Note also that on the **floppy, disk and VDI** boots the auto-init `status` line
+reads `Memory (firmware): unknown (no bootloader memory map)`. That is expected:
+only the QEMU `-kernel` path enters the kernel through the multiboot protocol
+that carries `mem_upper`; `stage1.S` / `stage1disk.S` jump straight to the
+kernel, so the boot-info parser correctly declines to invent a figure. The
+managed arena line (`Memory (kernel pool): …`) is correct on every medium.
+
 ---
 
 ## 3. Reproducing the screenshots
@@ -141,11 +155,11 @@ treats a backslash as a string escape.
 | `01-boot` | Boot-monitor banner, HUD `BOOT [......] 0%` — before the kernel log starts |
 | `01b-bootcomplete` | End of the boot log (`kernel boot complete`, scheduler start, `user-hello: process created (PID 2)`), HUD `100%` |
 | `02-shell` | Auto-init script finished, `ow-krnl>` prompt |
-| `03-help` | Output of `help` |
+| `03-help` | Output of `help` (the long menu scrolls; only its lower half fits the 19-line log area) |
 | `04-runlevel` | Output of `runlevel features` |
-| `05-fs` | Output of `fs list` |
+| `05-fs` | Output of `fs list` (note `interop.txt`, written through the VFS facade, is now visible to the OWFS path) |
 | `06-sucs` | Output of `sucs` |
-| `07-alloc` | Output of `alloc 4096` — **known failure**, see notes |
+| `07-alloc` | Output of `alloc 4096` — **succeeds** (the testing-report `alloc` defect is fixed), see notes |
 | `08-poweroff` | `You can safely power off your device now.` after `safeoff on` + `exit` |
 | `09-vbox-boot` | Same disk image booted under **VirtualBox** 7.2.16 (`controlvm screenshotpng`) |
 
@@ -158,14 +172,11 @@ can be checked independently of the PNG render.
 
 Source commit: see `PROVENANCE.txt` (generated with this package).
 
-Three files differ from the committed tree and are required for the disk/floppy
-images to boot at all:
-
-| File | Change |
-|---|---|
-| `core/memory.c` | Skip the ISA reserved window (`0x00000–0x0FFFF`, `0xA0000–0xFFFFF`) when bump-allocating from the physical-RAM pool |
-| `boot/stage1.S` | Zero `.bss` from the multiboot header's `_end_of_file` / `_end_of_bss` fields |
-| `boot/stage1disk.S` | Same `.bss` zeroing for the disk loader |
+The three boot-enabling fixes this package originally shipped as *local*
+modifications — the ISA-reserved-window skip in `core/memory.c`, and the `.bss`
+zeroing in `boot/stage1.S` / `boot/stage1disk.S` — are now **committed** in
+`a1961d5`. The working tree that produced this refresh differs from `HEAD` only
+by the testing-report fixes listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 Build commands:
 
@@ -185,21 +196,33 @@ qemu-img convert -f raw -O vdi openwinkrnl_tirimid_disk.img openwinkrnl_tirimid_
 ```
 
 This matters: the Makefile's own `vdi` target links `$(VBOX_DISK_KERNEL)`
-without `$(TEST_SEED_OBJS)`, so `make CIS_DEV_TRUST=1 vdi` produces a
-**different, unseeded** disk image with no `owinit` payload. That image was not
-built or validated here.
+**without** `$(TEST_SEED_OBJS)`, so `make CIS_DEV_TRUST=1 vdi` produces a
+different, **program-free production** image that carries no `owinit` payload and
+must halt at the `U+11A005` owinit gate. That production image
+(`vbox/openwinkrnl.vdi`, a local git-ignored artefact) was rebuilt and validated
+alongside this package but is deliberately **not** distributed inside this
+seeded test package.
 
 ---
 
 ## 5. Validation performed
 
+Refreshed 2026-10-15 (`a1961d5` plus the uncommitted testing-report fixes):
+
 | Check | Result |
 |---|---|
-| `make CIS_DEV_TRUST=1 qemu` | PASS — 18 checks, including ACPI S5 shutdown and the safe-power-off screen |
+| `make CIS_DEV_TRUST=1 qemu` | PASS — **31 checks**, including ACPI S5 shutdown, the safe-power-off screen, and the fixed `alloc` / `ls <dir>` / `status` behaviour |
+| `make CIS_DEV_TRUST=1 qemu-emergency` | PASS — 8 checks |
+| `make CIS_DEV_TRUST=1 hosttest` | PASS — 974 passed, 0 failed |
 | `make CIS_DEV_TRUST=1 owx-entries` | PASS — 13 targets, 0 failures |
+| Kernel boot (`-kernel`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | Floppy boot (`-fda -boot a`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | Disk boot (`-drive -boot c`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | **VirtualBox 7.2.16 VDI boot** | **PASS** — `ow-krnl>` prompt, `violations=0`, `[CIS] owinit: TRUSTED`, ACPI `OEM 'VBOX  '` |
 | Screenshot content (all 10) | PASS — each `.txt` matches the state it is captioned as |
+
+`make hosttest-asan` does **not** build on this host (the w64devkit toolchain
+ships no ASAN runtime); that is pre-existing, not a regression, and its absence
+is recorded rather than worked around.
 
 Re-run the reference validation yourself with `make CIS_DEV_TRUST=1 qemu`.

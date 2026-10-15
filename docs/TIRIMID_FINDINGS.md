@@ -13,10 +13,17 @@ artifacts under `artifacts/tirimid/`.
   `%TEMP%\ow_probe_final.txt`; runlevel-6 transcript: `%TEMP%\ow_probe_rl6.txt`.
 * **Regression gates** (both must stay green):
   * `make hosttest CIS_DEV_TRUST=1` — **974 passed, 0 failed**
-    (961 before this pass; +13 new assertions).
-  * `make qemu CIS_DEV_TRUST=1` — **QEMU BOOT VALIDATION PASSED (28 checks)**
-    (18 before; +10 new auto-init checks).
+    (961 before the prior pass; +13 new assertions).
+  * `make qemu CIS_DEV_TRUST=1` — **QEMU BOOT VALIDATION PASSED (31 checks)**
+    (18 before the prior pass; +10 there, +3 in this follow-up pass).
   * `make qemu-emergency CIS_DEV_TRUST=1` — 8 checks passed.
+* **Follow-up pass (2026-10-15).** After the prior changes were committed as
+  `a1961d5`, the same probe was re-run against the fixed tree and two more
+  defects were demonstrated and fixed (see §3 and §8 below): `ls <dir>` ignored
+  its argument, and an `alloc` size just below `UINT64_MAX` wrapped the page
+  count to zero and produced a misleading "frame allocator refused". The
+  production VDI and the Tirimid test package were rebuilt and re-validated (see
+  "Final artefacts" below).
 * **Base commit.** The pass started at `db3fee3`. One unrelated commit landed
   during the pass, `b0ff4a4` ("Set explicit entry point for PE image"), which
   edits only the PE link line in `Makefile`/`CMakeLists.txt`; it touches none of
@@ -77,6 +84,21 @@ ow-krnl> cd ..
 [FS] cd: /
 ```
 Regression: `make qemu` asserts `[FS] cd: /System` and `[FS] /System: 0 entries`.
+
+**Follow-up (2026-10-15).** `ls` / `dir` accepted a path token and then ignored
+it, so `ls System` listed the *current* directory. Path handling was factored
+into a pure resolver shared with `cd`, and `ls [dir]` now resolves the argument
+and reports a miss:
+
+```
+ow-krnl> ls /
+[FS] /: 2 entries
+ow-krnl> ls /nope
+[FS] ls '/nope': no such directory
+```
+
+Regression: `make qemu` additionally asserts `[FS] /: ` (the root listing while
+the CWD is `/System`) and `[FS] ls '/nope': no such directory`.
 
 ### 6 & 7. VFS vs the physical filesystem — 🟥 → 🟩
 
@@ -149,6 +171,19 @@ ow-krnl> alloc 33554432
 ```
 Regression: `make qemu` asserts `[OK] Allocated 1 page(s) (4096 bytes)` and
 `[FAIL] alloc 33554432 bytes`.
+
+**Follow-up (2026-10-15).** A size within 4095 of `UINT64_MAX` made
+`size + (OW_PAGE_SIZE - 1)` wrap; the page count became zero and the allocator
+reported a misleading zero-page "frame allocator refused". Requests too large to
+size are now rejected up front:
+
+```
+ow-krnl> alloc 18446744073709551615
+[FAIL] alloc 18446744073709551615 bytes: request is too large to size
+```
+
+Regression: `make qemu` additionally asserts
+`[FAIL] alloc 18446744073709551615 bytes: request is too large to size`.
 
 ### 11. SUCS mode — 🟥 → 🟩 (with a documented limit)
 
@@ -291,14 +326,30 @@ runlevel halt, ACPI S5, and the safe power-off screen) works. Unchanged.
 
 | File | Change |
 |------|--------|
-| `shell/shell.c` | `pwd`/`cwd`, `cd`, `ls`/`dir`; `alloc` via frame allocator; `status` arena+firmware+VFS; `sucs commit`; `write` tolerates existing file; `execute_trap` clarification; auto-init regression script |
+| `shell/shell.c` | `pwd`/`cwd`, `cd`, `ls [dir]` (shared pure path resolver); `alloc` via frame allocator + too-large guard; `status` arena+firmware+VFS; `sucs commit`; `write` tolerates existing file; `execute_trap` clarification; auto-init regression script |
 | `vfs/vfs.c` | `OwVfs*` facade delegates to OWFS/USFS (one on-disk truth) |
 | `storage/owdisk.c` / `.h` | OWFS lookup/list/parent/delete primitives for the shell + VFS |
 | `core/memory.c` / `inc/ow_memory.h` | firmware-RAM reporting API; multiboot `mem_upper` parse |
 | `boot/qemu_entry.c` | forward `(magic, mbi)` to the memory manager |
 | `lib/sucs.c` / `inc/ow_ecosys.h` | `OwSucsCommitNow`; request keys off committed mode |
 | `tools/hosttest/host_boot.c` | +13 assertions (firmware parse, SUCS live commit/reversibility) |
-| `tools/qemu_run.ps1` | +10 asserted auto-init markers |
+| `tools/qemu_run.ps1` | +13 asserted auto-init markers (10 before this pass, +3) |
+
+## Final artefacts (2026-10-15)
+
+* **Production VDI** `vbox/openwinkrnl.vdi` — rebuilt program-free (built
+  without `$(TEST_SEED_OBJS)`) from `a1961d5` plus these fixes. SHA-256
+  `131f1f8cc1d0ec829b3917c8c1d2bf86764f26bc3d786c3d40bcce1545e5b287`,
+  1,049,600 bytes. Validated with `tools/vdi_run.ps1`: it reaches the expected
+  owinit gate (`CRITICAL ERROR CODE: U+11A005`, `[FATAL] SYSTEM HALTED`,
+  `state ABSENT`) in **8 checks**. This is a local git-ignored artefact and is
+  deliberately not committed.
+* **Tirimid test package** `artifacts/tirimid/` — all four *seeded* images
+  rebuilt, all transcripts and screenshots regenerated (including the
+  VirtualBox capture), docs corrected, and `MANIFEST.sha256` regenerated (41
+  entries). See the package `CHANGELOG.md`. Verified: the kernel, floppy, disk
+  and VirtualBox VDI boots all reach `ow-krnl>`; the refreshed
+  `make CIS_DEV_TRUST=1 qemu` report passes 31 checks.
 
 ## Honest limitations carried forward
 
@@ -308,3 +359,4 @@ runlevel halt, ACPI S5, and the safe power-off screen) works. Unchanged.
 4. **Scrollback** is the terminal's job; not solvable from the guest.
 5. **No sample user program** shipped for the scheduler/process test.
 6. `make hosttest-asan` cannot link on this host (the w64devkit toolchain ships no `libasan`/`libubsan`); the non-ASan host and QEMU suites cover the changes. This is a toolchain limitation, not a change in behaviour.
+7. **Firmware RAM is reported `unknown` on floppy/disk/VDI boots.** Only the QEMU `-kernel` path enters the kernel through the multiboot hand-off that carries `mem_upper`; `stage1.S` / `stage1disk.S` jump straight to the kernel. `status` therefore reports `Memory (firmware): unknown (no bootloader memory map)` on those media instead of inventing a figure; the managed-arena line is correct everywhere.

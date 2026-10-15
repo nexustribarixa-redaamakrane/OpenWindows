@@ -297,9 +297,14 @@ if (-not $Emergency) {
     #   alloc          used to be rejected for every size (Ring 0 has no CPL3
     #                  process for OW_SYS_ALLOC); now real sizes succeed and an
     #                  oversized one is refused with an honest pool figure;
+    #   alloc overflow a near-UINT64_MAX size used to wrap to a zero-page request
+    #                  and report a bogus "frame allocator refused"; now it is
+    #                  refused up front as too large to size;
     #   status         used to print only a fixed "4096 pages"; now the managed
     #                  arena and the firmware RAM are reported separately;
-    #   pwd/cd/ls      did not exist; now the OWFS catalog tree is navigable;
+    #   pwd/cd/ls      did not exist; now the OWFS catalog tree is navigable and
+    #                  `ls <dir>` honours its argument (a miss is reported rather
+    #                  than the CWD being listed silently);
     #   write/read vs  were two independent on-disk stacks; `fs read` of a file
     #   fs read        written through the VFS facade now proves they agree;
     #   sucs commit    applies the staged mode with no reboot (a RAM-disk reset
@@ -309,8 +314,11 @@ if (-not $Emergency) {
         "4-KiB pages, not managed)",
         "[OK] Allocated 1 page(s) (4096 bytes)",
         "[FAIL] alloc 33554432 bytes",
+        "[FAIL] alloc 18446744073709551615 bytes: request is too large to size",
         "[FS] cd: /System",
         "[FS] /System: 0 entries",
+        "[FS] /: ",                     # `ls /` while the CWD is /System
+        "[FS] ls '/nope': no such directory",
         "[OK] Written to 'interop.txt'.",
         "via-vfs-facade",
         "[FS] read 'interop.txt' (14 bytes):",
