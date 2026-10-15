@@ -199,7 +199,7 @@ $(TARGET): $(PE_IMAGE) tools/owx_pack.py
 endif
 
 $(PE_IMAGE): $(ALL_OBJS)
-	$(CC) $(CFLAGS) -Wl,--image-base=0x200000 -o $(PE_IMAGE) $(ALL_OBJS) -lgcc
+	$(CC) $(CFLAGS) -Wl,--image-base=0x200000 -Wl,-e,_start -o $(PE_IMAGE) $(ALL_OBJS) -lgcc
 
 # Core
 core/%.o: core/%.c

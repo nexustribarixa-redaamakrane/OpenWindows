@@ -334,6 +334,11 @@ target_compile_options(openwinkrnl_pe PRIVATE
 target_link_options(openwinkrnl_pe PRIVATE
     -nostdlib
     -Wl,--image-base=0x200000
+    # Without an explicit entry, lld/ld defaults the PE AddressOfEntryPoint to
+    # the first byte of .text, which is not _start: OWX1 records that field as
+    # the image entry point, so every loader would jump into an arbitrary
+    # function and the kernel would die silently before its first log line.
+    -Wl,-e,_start
 )
 target_link_libraries(openwinkrnl_pe PRIVATE gcc)
 
