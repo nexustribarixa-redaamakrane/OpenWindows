@@ -82,6 +82,27 @@ void         OwMemWalkPml4(uint64_t VirtualAddress);
 uint32_t     OwMemPagesUsed(void);
 uint32_t     OwMemPagesTotal(void);
 
+/* ---- Firmware physical RAM (multiboot) ----------------------------------
+ *
+ * The frame arena above is a fixed static pool whose size is a compile-time
+ * constant (see g_PhysicalRam in memory.c).  That number and the amount of RAM
+ * the firmware actually fitted are two different facts, and the shell must not
+ * present one as the other.  OwMemSetBootInfo is called from the multiboot
+ * entry point with the bootloader magic and the multiboot info pointer; it
+ * records the usable RAM above the first MiB from the memory map.
+ *
+ * OwMemFirmwareBytes returns 0 when no firmware map was seen (the host harness,
+ * or a non-multiboot loader), which callers report as "unknown" rather than
+ * inventing a figure.
+ *
+ * MbiPhys is taken as a 64-bit physical address even though multiboot hands it
+ * over in a 32-bit register: the loader's info block is always below 4 GiB, but
+ * widening the parameter keeps a 64-bit caller (and the host harness's synthetic
+ * block) from having its pointer silently truncated. */
+void         OwMemSetBootInfo(uint32_t Magic, uint64_t MbiPhys);
+uint64_t     OwMemFirmwareBytes(void);
+uint32_t     OwMemFirmwarePages(void);
+
 /* ---- Per-process address spaces (Phase 2) -------------------------------
  *
  * A PML4 "physical address" here is just the identity-mapped virtual address

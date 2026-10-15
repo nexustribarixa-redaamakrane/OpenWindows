@@ -69,6 +69,18 @@ OW_STATUS OwFsOwfsMount(void);
 OW_STATUS OwFsOwfsUnmount(void);
 OW_STATUS OwFsOwfsMkdir(const char* name, uint32_t* out_inode);
 OW_STATUS OwFsOwfsCreate(const char* name, uint32_t* out_inode);
+OW_STATUS OwFsOwfsDelete(const char* name);
+
+/* ---- Catalog navigation helpers ------------------------------------------
+ *
+ * Just enough of the OWFS catalog tree to implement pwd/cd/ls/dir in the Ring 0
+ * shell without pulling the OWFS headers into shell.c.  Inodes are OWFS
+ * identities; the root catalog is inode 0.  A "catalog" here is a directory. */
+uint32_t  OwFsOwfsRootInode(void);
+OW_STATUS OwFsOwfsLookupIn(uint32_t ParentInode, const char* Name,
+                           uint32_t* OutInode, bool* OutIsDir);
+OW_STATUS OwFsOwfsGetParent(uint32_t Inode, uint32_t* OutParent);
+OW_STATUS OwFsOwfsListIn(uint32_t Inode, uint32_t* OutCount);
 
 /* Create a file that is owned by the superuser (UID/GID 0) with an explicit
  * 9-bit mode and OWFS_SEC_* flag byte, then write `len` bytes of it.  Unlike

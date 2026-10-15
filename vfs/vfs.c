@@ -4,6 +4,7 @@
 #include "../inc/ow_mem.h"
 #include "../inc/ow_string.h"
 #include "../inc/ow_kprintf.h"
+#include "../storage/owdisk.h"
 
 static bool g_primary_mounted = false;
 static bool g_secure_mounted = false;
@@ -188,7 +189,24 @@ OW_STATUS OwFsBitmapFreeBlock(htl_device_t* Dev, uint32_t BlockNum) {
     return htl_write_block(Dev, block_num, block) == HTL_OK ? OW_SUCCESS : OW_ERR_IO;
 }
 
-/* VFS Facade */
+/* VFS Facade.
+ *
+ * The facade used to be a second, independent on-disk stack: it wrote an
+ * OW_FS_SUPERBLOCK to block 0 and maintained its own inode/catalog/bitmap
+ * layout, while the `fs` command, the boot image survey and the OWX loader all
+ * spoke the OWFS format on the same disk.  A file created through one was
+ * invisible to the other -- exactly the divergence the testing report hit with
+ * `write`/`read` versus `fs`.
+ *
+ * There is now ONE on-disk truth.  The facade is a thin adapter over the real
+ * OWFS (primary) and USFS (secure) volumes, so VFS read/write/create/delete and
+ * `fs` operate on the same files, and `OwVfsIsPrimaryMounted` reflects the
+ * actual mount rather than a private flag.
+ *
+ * The OwFs* primitives above are retained: OwFsChecksumCalc is the exported
+ * CRC32c contract that the crash-dump writer and the packer both pin against,
+ * and the block/inode/catalog helpers document the historical layout.  They are
+ * no longer reachable from the facade. */
 OW_STATUS OwVfsInitialize(void) {
     g_primary_mounted = false;
     g_secure_mounted = false;
@@ -197,180 +215,72 @@ OW_STATUS OwVfsInitialize(void) {
 
 OW_STATUS OwVfsMountPrimary(void) {
     htl_device_t* dev = OwHalGetPrimaryDisk();
-    OW_FS_SUPERBLOCK sb;
+    OW_STATUS st;
 
     if (!dev) return OW_ERR_NOT_INITIALIZED;
 
-    if (!ow_status_success(OwFsSuperblockRead(dev, &sb))) return OW_ERR_IO;
-
-    if (sb.Magic == OW_FS_MAGIC_PRIMARY) {
-        g_primary_mounted = true;
-        ow_kprintf("[VFS] Primary OWFS volume mounted. Blocks: %u, Free: %u\r\n",
-                   (unsigned)sb.TotalBlocks, (unsigned)sb.FreeBlocks);
-        return OW_SUCCESS;
-    }
-
-    /* No valid superblock - format the volume */
-    ow_memset(&sb, 0, sizeof(OW_FS_SUPERBLOCK));
-    sb.Magic = OW_FS_MAGIC_PRIMARY;
-    sb.Version = 1;
-    sb.TotalBlocks = dev->total_blocks;
-    sb.FreeBlocks = dev->total_blocks - 4;
-    sb.RootInode = 0;
-    sb.CreateEpoch = 0;
-    sb.ModifyEpoch = 0;
-    sb.Checksum = OwFsChecksumCalc(&sb, sizeof(OW_FS_SUPERBLOCK) - 4);
-
-    if (!ow_status_success(OwFsSuperblockWrite(dev, &sb))) return OW_ERR_IO;
+    st = OwFsOwfsMount();
+    if (!ow_status_success(st)) return st;
 
     g_primary_mounted = true;
-    ow_kprintf("[VFS] Primary OWFS volume formatted and mounted.\r\n");
+    ow_kprintf("[VFS] Primary OWFS volume mounted. Blocks: %u, Free: %u\r\n",
+               (unsigned)dev->total_blocks, (unsigned)OwFsOwfsFreeBlocks());
     return OW_SUCCESS;
 }
 
 OW_STATUS OwVfsMountSecure(void) {
-    htl_device_t* dev = OwHalGetSecureDisk();
-    OW_FS_SUPERBLOCK sb;
+    OW_STATUS st;
 
-    if (!dev) return OW_ERR_NOT_INITIALIZED;
+    if (!OwHalGetSecureDisk()) return OW_ERR_NOT_INITIALIZED;
 
-    if (ow_status_success(OwFsSuperblockRead(dev, &sb)) && sb.Magic == OW_FS_MAGIC_SECURE) {
-        g_secure_mounted = true;
-        ow_kprintf("[VFS] Secure USFS volume mounted.\r\n");
-        return OW_SUCCESS;
-    }
-
-    /* Format */
-    ow_memset(&sb, 0, sizeof(OW_FS_SUPERBLOCK));
-    sb.Magic = OW_FS_MAGIC_SECURE;
-    sb.Version = 1;
-    sb.TotalBlocks = dev->total_blocks;
-    sb.FreeBlocks = dev->total_blocks - 4;
-    sb.RootInode = 0;
-    sb.Checksum = OwFsChecksumCalc(&sb, sizeof(OW_FS_SUPERBLOCK) - 4);
-
-    if (!ow_status_success(OwFsSuperblockWrite(dev, &sb))) return OW_ERR_IO;
+    st = OwFsUsfsMount();
+    if (!ow_status_success(st)) return st;
 
     g_secure_mounted = true;
-    ow_kprintf("[VFS] Secure USFS volume formatted and mounted.\r\n");
+    ow_kprintf("[VFS] Secure USFS volume mounted.\r\n");
     return OW_SUCCESS;
 }
 
 OW_STATUS OwVfsCreateFile(const char* Path, uint32_t Attrs) {
-    htl_device_t* dev;
-    uint32_t inode_num;
-    OW_FS_INODE inode;
-    uint32_t data_block;
+    uint32_t inode_num = 0;
     (void)Attrs;
 
     if (!Path) return OW_ERR_NULL_POINTER;
     if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
-
-    dev = OwHalGetPrimaryDisk();
-
-    if (ow_status_success(OwFsCatalogLookup(dev, 0, Path, (void*)0))) {
-        return OW_ERR_ALREADY_EXISTS;
-    }
-
-    if (!ow_status_success(OwFsBitmapAllocBlock(dev, &inode_num))) return OW_ERR_INSUFFICIENT;
-    if (!ow_status_success(OwFsBitmapAllocBlock(dev, &data_block))) return OW_ERR_INSUFFICIENT;
-
-    ow_memset(&inode, 0, sizeof(OW_FS_INODE));
-    inode.InodeNumber = inode_num;
-    inode.Size = 0;
-    inode.Permissions = 0x1B6;
-    inode.SecurityFlags = 0;
-    inode.DirectBlocks[0] = data_block;
-    inode.Checksum = OwFsChecksumCalc(&inode, sizeof(OW_FS_INODE) - 4);
-
-    if (!ow_status_success(OwFsInodeWrite(dev, inode_num, &inode))) return OW_ERR_IO;
-    if (!ow_status_success(OwFsCatalogInsert(dev, 0, Path, inode_num, OW_FS_ENTRY_FILE))) return OW_ERR_IO;
-
-    return OW_SUCCESS;
+    return OwFsOwfsCreate(Path, &inode_num);
 }
 
 OW_STATUS OwVfsWriteFile(const char* Path, const uint8_t* Buffer, uint32_t Size) {
-    htl_device_t* dev;
-    OW_FS_CATALOG_ENTRY cat;
-    OW_FS_INODE inode;
-    uint8_t block[4096];
-
     if (!Path || !Buffer) return OW_ERR_NULL_POINTER;
     if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
-
-    dev = OwHalGetPrimaryDisk();
-
-    if (!ow_status_success(OwFsCatalogLookup(dev, 0, Path, &cat))) return OW_ERR_NOT_FOUND;
-    if (!ow_status_success(OwFsInodeRead(dev, cat.InodeNumber, &inode))) return OW_ERR_IO;
-
-    ow_memset(block, 0, sizeof(block));
-    ow_memcpy(block, Buffer, Size < sizeof(block) ? Size : sizeof(block));
-
-    if (!ow_status_success(OwFsBlockWrite(dev, inode.DirectBlocks[0], block))) return OW_ERR_IO;
-
-    inode.Size = Size;
-    inode.Checksum = OwFsChecksumCalc(&inode, sizeof(OW_FS_INODE) - 4);
-    return OwFsInodeWrite(dev, cat.InodeNumber, &inode);
+    return OwFsOwfsWrite(Path, Buffer, Size);
 }
 
 uint32_t OwVfsReadFile(const char* Path, uint8_t* Buffer, uint32_t MaxSize) {
-    htl_device_t* dev;
-    OW_FS_CATALOG_ENTRY cat;
-    OW_FS_INODE inode;
-    uint8_t block[4096];
-    uint32_t to_read;
+    uint32_t got = 0;
 
     if (!Path || !Buffer || MaxSize == 0) return 0;
     if (!g_primary_mounted) return 0;
-
-    dev = OwHalGetPrimaryDisk();
-
-    if (!ow_status_success(OwFsCatalogLookup(dev, 0, Path, &cat))) return 0;
-    if (!ow_status_success(OwFsInodeRead(dev, cat.InodeNumber, &inode))) return 0;
-    if (!ow_status_success(OwFsBlockRead(dev, inode.DirectBlocks[0], block))) return 0;
-
-    to_read = inode.Size < MaxSize ? inode.Size : MaxSize;
-    ow_memcpy(Buffer, block, to_read);
-    return to_read;
+    if (!ow_status_success(OwFsOwfsRead(Path, Buffer, MaxSize, &got))) return 0;
+    return got;
 }
 
 OW_STATUS OwVfsDeleteFile(const char* Path) {
-    htl_device_t* dev;
-    OW_FS_CATALOG_ENTRY cat;
-    uint8_t block[4096];
-    uint32_t entries_per_block;
-
     if (!Path) return OW_ERR_NULL_POINTER;
     if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
-
-    dev = OwHalGetPrimaryDisk();
-
-    if (!ow_status_success(OwFsCatalogLookup(dev, 0, Path, &cat))) return OW_ERR_NOT_FOUND;
-
-    entries_per_block = dev->block_size / sizeof(OW_FS_CATALOG_ENTRY);
-    if (ow_status_success(OwFsBlockRead(dev, 2, block))) {
-        uint32_t i;
-        for (i = 0; i < entries_per_block; i++) {
-            OW_FS_CATALOG_ENTRY* e = (OW_FS_CATALOG_ENTRY*)(block + i * sizeof(OW_FS_CATALOG_ENTRY));
-            if (ow_strcmp(e->Name, Path) == 0) {
-                e->EntryType = OW_FS_ENTRY_DELETED;
-                OwFsBlockWrite(dev, 2, block);
-                break;
-            }
-        }
-    }
-
-    return OW_SUCCESS;
+    return OwFsOwfsDelete(Path);
 }
 
-bool OwVfsIsPrimaryMounted(void) { return g_primary_mounted; }
-bool OwVfsIsSecureMounted(void) { return g_secure_mounted; }
+bool OwVfsIsPrimaryMounted(void) {
+    return g_primary_mounted && OwDiskOwfsMounted();
+}
+
+bool OwVfsIsSecureMounted(void) {
+    return g_secure_mounted && OwDiskUsfsMounted();
+}
+
 uint32_t OwVfsSecureFreeBlocks(void) {
-    htl_device_t* dev = OwHalGetSecureDisk();
-    OW_FS_SUPERBLOCK sb;
-    if (!g_secure_mounted || !dev) return 0;
-    if (ow_status_success(OwFsSuperblockRead(dev, &sb))) return sb.FreeBlocks;
-    return 0;
+    return g_secure_mounted ? OwFsUsfsFreeBlocks() : 0u;
 }
 
 OW_STATUS OwVfsSecurePurge(void) {

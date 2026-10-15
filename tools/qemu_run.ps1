@@ -289,6 +289,33 @@ if (-not $Emergency) {
         "[ACPI] safe power-off screen: armed",
         "You can safely power off your device now."
     )
+
+    # Regression cover for the testing-report findings, produced by the kernel's
+    # own auto-init script (see k_InitScript in shell/shell.c).  Each of these
+    # was either broken or absent at the report's HEAD, so asserting the fixed
+    # behaviour here makes `make qemu` the regression gate:
+    #   alloc          used to be rejected for every size (Ring 0 has no CPL3
+    #                  process for OW_SYS_ALLOC); now real sizes succeed and an
+    #                  oversized one is refused with an honest pool figure;
+    #   status         used to print only a fixed "4096 pages"; now the managed
+    #                  arena and the firmware RAM are reported separately;
+    #   pwd/cd/ls      did not exist; now the OWFS catalog tree is navigable;
+    #   write/read vs  were two independent on-disk stacks; `fs read` of a file
+    #   fs read        written through the VFS facade now proves they agree;
+    #   sucs commit    applies the staged mode with no reboot (a RAM-disk reset
+    #                  could never re-run the boot-time commit).
+    $checks += @(
+        "Memory (firmware):",
+        "4-KiB pages, not managed)",
+        "[OK] Allocated 1 page(s) (4096 bytes)",
+        "[FAIL] alloc 33554432 bytes",
+        "[FS] cd: /System",
+        "[FS] /System: 0 entries",
+        "[OK] Written to 'interop.txt'.",
+        "via-vfs-facade",
+        "[FS] read 'interop.txt' (14 bytes):",
+        "[SUCS] committed: active=EXTENDED"
+    )
 }
 
 # The init-image lines differ by state, and asserting the wrong set is worse than

@@ -5,9 +5,12 @@
 #include <stdint.h>
 
 extern void _start(void);
+extern void OwMemSetBootInfo(uint32_t Magic, uint64_t MbiPhys);
 
 void kernel_main64(uint32_t magic_ecx, uint32_t mbi_edx) {
-    (void)magic_ecx;
-    (void)mbi_edx;
+    /* Hand the firmware memory map to the memory manager before anything can
+     * ask "how much RAM is there?".  The identity map is live here, so the
+     * multiboot info block is directly readable. */
+    OwMemSetBootInfo(magic_ecx, mbi_edx);
     _start();
 }

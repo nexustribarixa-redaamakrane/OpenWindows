@@ -16,6 +16,12 @@
 static uint8_t g_PhysicalRam[16U * 1024U * 1024U] __attribute__((aligned(4096)));
 static size_t g_RamPointer = 0;
 
+/* Firmware physical RAM as reported by the bootloader, in bytes.  Zero means
+ * "no memory map was supplied" and is displayed as unknown.  This is NOT the
+ * arena size: the arena is the fixed static pool above, and the two numbers are
+ * reported side by side precisely so they are not conflated. */
+static uint64_t s_FirmwareBytes = 0;
+
 #define OW_TOTAL_PAGES (sizeof(g_PhysicalRam) / OW_PAGE_SIZE)
 
 /* Kernel-wide committed-page count (Phase 3).  Declared up here because
@@ -61,6 +67,30 @@ OW_STATUS OwMemInitialize(void) {
   }
 #endif
   return OW_SUCCESS;
+}
+
+/* Record the firmware memory map handed over in the multiboot info block.
+ *
+ * Multiboot1 puts `flags` at offset 0, `mem_lower` (KiB below 1 MiB) at 4 and
+ * `mem_upper` (contiguous usable KiB above 1 MiB) at 8.  We only need the
+ * upper figure: total RAM = 1 MiB + mem_upper.  The identity map established by
+ * the bootstrap still covers the info block at this point, so the raw pointer
+ * is readable.  Nothing here allocates, so it is safe before OwMemInitialize. */
+void OwMemSetBootInfo(uint32_t Magic, uint64_t MbiPhys) {
+  const uint32_t *mbi;
+  uint32_t flags;
+
+  if (Magic != 0x2BADB002u || MbiPhys == 0u) return;
+  mbi = (const uint32_t *)(uintptr_t)MbiPhys;
+  flags = mbi[0];
+  if ((flags & 0x1u) == 0u) return;         /* no mem_* fields present */
+  s_FirmwareBytes = 0x100000ull + (uint64_t)mbi[2] * 1024ull;
+}
+
+uint64_t OwMemFirmwareBytes(void) { return s_FirmwareBytes; }
+
+uint32_t OwMemFirmwarePages(void) {
+  return (uint32_t)(s_FirmwareBytes / OW_PAGE_SIZE);
 }
 
 /* Physical windows that are never plain RAM on PC-class hardware.  The pool

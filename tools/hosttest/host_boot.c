@@ -80,6 +80,7 @@ int test_cis_loader_run(int* out_passed);
  * assert that a restricted object is refused to a non-owner by the real checks. */
 #include "ow_sec.h"
 #include "owfs_types.h"
+#include "sucs_mode.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -4027,6 +4028,89 @@ static void test_banhammer_cli_core(void) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Testing-report regressions                                                 */
+/* ------------------------------------------------------------------------- */
+
+/* Two findings from the external testing report are pure logic and can be
+ * pinned on the host rather than only in a QEMU transcript:
+ *
+ *   1. `status` reported a fixed "4096 pages" because nothing ever parsed the
+ *      bootloader's memory map.  OwMemSetBootInfo() must turn a multiboot info
+ *      block into a firmware-RAM size, and must ignore a block that does not
+ *      carry the mem_* fields (or that is not multiboot at all).
+ *   2. A SUCS mode switch was staged but never applied in the RAM-disk
+ *      environment, so EXTENDED was unreachable.  OwSucsCommitNow() must apply
+ *      the staged mode, and requesting a mode must key off the *committed*
+ *      mode, otherwise a second switch (back to BASE) is impossible. */
+static void test_report_regressions(void) {
+  printf("\n=== Testing-report regressions ===\n");
+
+  {
+    uint32_t mbi[3];
+
+    mbi[0] = 0x1u;      /* flags: bit 0 => mem_* fields present */
+    mbi[1] = 640u;      /* mem_lower KiB (not used by the kernel) */
+    mbi[2] = 261120u;   /* mem_upper KiB => 255 MiB above the first MiB */
+
+    check_window("no firmware map until the bootloader supplies one",
+                 OwMemFirmwareBytes() == 0ull, true);
+
+    OwMemSetBootInfo(0x2BADB002u, (uint64_t)(uintptr_t)mbi);
+    check_window("firmware RAM = 1 MiB + mem_upper (256 MiB)",
+                 OwMemFirmwareBytes() == 268435456ull, true);
+    check_window("firmware RAM in 4-KiB pages (65536)",
+                 OwMemFirmwarePages() == 65536u, true);
+
+    /* A block lacking the mem_* flag is not a memory map. */
+    mbi[0] = 0u;
+    OwMemSetBootInfo(0x2BADB002u, (uint64_t)(uintptr_t)mbi);
+    check_window("a block without mem_* leaves the figure unchanged",
+                 OwMemFirmwareBytes() == 268435456ull, true);
+
+    /* A block that is not multiboot at all is ignored outright. */
+    mbi[0] = 1u;
+    OwMemSetBootInfo(0xDEADBEEFu, (uint64_t)(uintptr_t)mbi);
+    check_window("a wrong bootloader magic is ignored",
+                 OwMemFirmwareBytes() == 268435456ull, true);
+  }
+
+  {
+    /* The auto-init script already staged and committed a switch, so the active
+     * mode here is whatever it left behind.  Read it and drive the test to the
+     * other mode rather than assuming BASE -- the point is the state machine,
+     * not the particular starting value. */
+    int before = OwSucsActiveMode();
+    int other = (before == (int)SUCS_MODE_EXTENDED) ? (int)SUCS_MODE_BASE
+                                                    : (int)SUCS_MODE_EXTENDED;
+
+    check_window("requesting the other mode is staged, not applied",
+                 OwSucsRequestModeSwitch(other) == SUCS_SWITCH_REBOOT_REQUIRED,
+                 true);
+    check_window("active mode is unchanged while staged",
+                 OwSucsActiveMode() == before, true);
+    check_window("commit applies the staged mode",
+                 OwSucsCommitNow(), true);
+    check_window("active mode is the staged mode after commit",
+                 OwSucsActiveMode() == other, true);
+    check_window("nothing to commit once the modes agree",
+                 OwSucsCommitNow(), false);
+
+    /* The switch must be reversible.  This is the assertion that fails if the
+     * request decision is left keyed off the library's private, never-advanced
+     * copy of the active mode instead of the kernel's committed one. */
+    check_window("requesting the original mode after a live commit is staged",
+                 OwSucsRequestModeSwitch(before) == SUCS_SWITCH_REBOOT_REQUIRED,
+                 true);
+    check_window("commit applies the original mode again",
+                 OwSucsCommitNow(), true);
+    check_window("active mode is back to the original",
+                 OwSucsActiveMode() == before, true);
+  }
+
+  printf("--- testing-report regressions verified\n");
+}
+
+/* ------------------------------------------------------------------------- */
 /* Main                                                                       */
 /* ------------------------------------------------------------------------- */
 
@@ -4695,6 +4779,12 @@ int main(int argc, char **argv) {
   /* ------------------------------------------------------------------ */
 
   test_bdmp_core();
+
+  /* ------------------------------------------------------------------ */
+  /* Testing-report regressions                                          */
+  /* ------------------------------------------------------------------ */
+
+  test_report_regressions();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */

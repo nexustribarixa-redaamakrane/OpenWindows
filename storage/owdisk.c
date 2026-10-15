@@ -182,24 +182,94 @@ OW_STATUS OwFsOwfsRead(const char* name, uint8_t* buf, uint32_t cap,
     return OwFsOwfsReadOffset(name, buf, 0, cap, out_read);
 }
 
-OW_STATUS OwFsOwfsList(uint32_t* out_count) {
+/* Shared body for OwFsOwfsList / OwFsOwfsListIn: enumerate one catalog, print
+ * each visible entry, and report the count. */
+static OW_STATUS owfs_list_catalog(uint32_t catalog_inode, uint32_t* out_count) {
     htl_device_t* dev = OwHalGetPrimaryDisk();
     owfs_catalog_entry_t entries[OWFS_ENTRIES_PER_BLOCK];
     uint32_t count = 0;
     uint32_t i;
     owfs_status_t st;
 
+    if (out_count) *out_count = 0;
     if (!g_owfs_formatted || !g_owfs_mounted) return (OW_STATUS)OWFS_ERR_IO;
-    st = owfs_catalog_list(dev, &g_owfs_sb, OWFS_ROOT_INODE,
+    st = owfs_catalog_list(dev, &g_owfs_sb, catalog_inode,
                            entries, OWFS_ENTRIES_PER_BLOCK, &count);
     if (st != OWFS_OK) return (OW_STATUS)st;
     for (i = 0; i < count; i++) {
-        if (entries[i].entry_type == OWFS_ENTRY_DELETED) continue;
         ow_kprintf("  [%s] %s (ino %u)\r\n",
                    entries[i].entry_type == OWFS_ENTRY_CATALOG ? "DIR " : "FILE",
                    (const char*)entries[i].name, entries[i].inode_number);
     }
     if (out_count) *out_count = count;
+    return OW_SUCCESS;
+}
+
+OW_STATUS OwFsOwfsList(uint32_t* out_count) {
+    return owfs_list_catalog((uint32_t)OWFS_ROOT_INODE, out_count);
+}
+
+OW_STATUS OwFsOwfsListIn(uint32_t inode, uint32_t* out_count) {
+    return owfs_list_catalog(inode, out_count);
+}
+
+uint32_t OwFsOwfsRootInode(void) { return (uint32_t)OWFS_ROOT_INODE; }
+
+OW_STATUS OwFsOwfsLookupIn(uint32_t parent_inode, const char* name,
+                           uint32_t* out_inode, bool* out_is_dir) {
+    htl_device_t* dev = OwHalGetPrimaryDisk();
+    owfs_inode_t inode;
+    uint32_t ino = 0;
+    owfs_status_t st;
+
+    if (!name || !out_inode) return (OW_STATUS)OWFS_ERR_INVALID_PARAM;
+    if (!g_owfs_formatted || !g_owfs_mounted) return (OW_STATUS)OWFS_ERR_IO;
+    st = owfs_catalog_lookup(dev, &g_owfs_sb, parent_inode,
+                             (const uint8_t*)name, (size_t)ow_strlen(name),
+                             &ino);
+    if (st != OWFS_OK) return (OW_STATUS)st;
+    if (out_is_dir) {
+        st = owfs_inode_read(dev, &g_owfs_sb, ino, &inode);
+        *out_is_dir = (st == OWFS_OK) &&
+                      ((inode.entry_type & OWFS_ENTRY_CATALOG) != 0);
+    }
+    *out_inode = ino;
+    return OW_SUCCESS;
+}
+
+OW_STATUS OwFsOwfsGetParent(uint32_t inode, uint32_t* out_parent) {
+    htl_device_t* dev = OwHalGetPrimaryDisk();
+    owfs_inode_t ino;
+    owfs_status_t st;
+
+    if (!out_parent) return (OW_STATUS)OWFS_ERR_INVALID_PARAM;
+    if (!g_owfs_formatted || !g_owfs_mounted) return (OW_STATUS)OWFS_ERR_IO;
+    st = owfs_inode_read(dev, &g_owfs_sb, inode, &ino);
+    if (st != OWFS_OK) return (OW_STATUS)st;
+    *out_parent = ino.parent_inode;
+    return OW_SUCCESS;
+}
+
+OW_STATUS OwFsOwfsDelete(const char* name) {
+    htl_device_t* dev;
+    uint32_t ino = 0;
+    owfs_status_t st;
+
+    if (!name) return (OW_STATUS)OWFS_ERR_INVALID_PARAM;
+    if (!g_owfs_formatted || !g_owfs_mounted) return (OW_STATUS)OWFS_ERR_IO;
+    dev = OwHalGetPrimaryDisk();
+    st = owfs_catalog_lookup(dev, &g_owfs_sb, OWFS_ROOT_INODE,
+                             (const uint8_t*)name, (size_t)ow_strlen(name),
+                             &ino);
+    if (st != OWFS_OK) return (OW_STATUS)st;
+    st = owfs_catalog_remove(dev, &g_owfs_sb, OWFS_ROOT_INODE,
+                             (const uint8_t*)name, (size_t)ow_strlen(name));
+    if (st != OWFS_OK) return (OW_STATUS)st;
+    /* The catalog entry is gone; release the inode (and its data blocks) so
+     * repeated create/delete cycles do not exhaust the inode table.  A failure
+     * here is a space leak, not a failed unlink, so it is deliberately not
+     * propagated. */
+    (void)owfs_inode_free(dev, &g_owfs_sb, ino);
     return OW_SUCCESS;
 }
 

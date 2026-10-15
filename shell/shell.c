@@ -20,6 +20,14 @@ static char g_CmdLine[512];
 static bool g_ShellRunning = false;
 static uint32_t g_AutoIdx = 0;
 
+/* Current working directory for the navigation commands (pwd/cd/ls/dir).  The
+ * shell is one Ring 0 context, so a single inode and its rendered path are
+ * enough; there is no per-process CWD.  Root is OWFS inode 0, set explicitly in
+ * OwShellInitialize so the value never depends on zero-initialised BSS
+ * coincidentally matching the root inode. */
+static uint32_t g_CwdInode = 0;
+static char     g_CwdPath[256] = "/";
+
 /* The diagnostics started with the existing test scripts -- help, SUCS mode
  * switches, the UniVIP volume registry, and the OWFS store bring-up -- are now
  * part of the kernel itself: right after boot the shell (as init) runs them
@@ -51,7 +59,31 @@ static const char *const k_InitScript[] = {
     "fs status",
     "fs umount",
     "fs mount",
-    "fs read bootvid.owd"};
+    "fs read bootvid.owd",
+    /* Regression cover for the testing report's findings.  Every line below is
+     * asserted by tools/qemu_run.ps1, so a regression in any of them fails
+     * `make qemu` instead of only turning up in a manual session:
+     *   pwd/cd/ls     navigation commands, which did not exist before;
+     *   write/read    the VFS facade, now the same on-disk truth as `fs`;
+     *   fs read       cross-check that a file written through the VFS facade is
+     *                 visible to the OWFS path (the original two-stack
+     *                 divergence: `write` and `fs` could not see each other);
+     *   sucs commit   applies the mode staged by `sucs ext` with no reboot;
+     *   alloc         succeeds for a real size and refuses an oversized one;
+     *   status        reports the managed arena and firmware RAM separately. */
+    "pwd",
+    "cd System",
+    "pwd",
+    "ls",
+    "cd ..",
+    "pwd",
+    "write interop.txt via-vfs-facade",
+    "read interop.txt",
+    "fs read interop.txt",
+    "sucs commit",
+    "sucs",
+    "alloc 33554432",
+    "status"};
 
 static const uint32_t k_InitScriptCount =
     (uint32_t)(sizeof(k_InitScript) / sizeof(k_InitScript[0]));
@@ -103,6 +135,8 @@ static void shell_read_line(void) {
 OW_STATUS OwShellInitialize(void) {
   /* Auto-detect the PS/2 keyboard; UART remains the fallback input. */
   (void)OwHalKbdInitialize();
+  g_CwdInode = OwFsOwfsRootInode();
+  ow_memcpy(g_CwdPath, "/", 2);
   return OW_SUCCESS;
 }
 
@@ -123,13 +157,17 @@ void OwShellPrintHelp(void) {
   ow_kprintf("  runlevel list     - List all runlevel profiles (-6..6)\r\n");
   ow_kprintf("  runlevel features - Show armed feature set\r\n");
   ow_kprintf("  runlevel set <n>  - Switch runlevel (-6..6)\r\n");
-  ow_kprintf("  alloc <size>      - Allocate virtual memory\r\n");
+  ow_kprintf("  alloc <size>      - Allocate kernel frame pages (4 KiB each)\r\n");
   ow_kprintf("  load <path> <tier>- Load driver (1/2/3)\r\n");
-  ow_kprintf("  write <name> <txt>- Create file on VFS\r\n");
-  ow_kprintf("  read <name>       - Read file from VFS\r\n");
+  ow_kprintf("  pwd / cwd         - Print the current working directory\r\n");
+  ow_kprintf("  cd <dir|..|/>     - Change the current working directory\r\n");
+  ow_kprintf("  ls / dir          - List the current directory\r\n");
+  ow_kprintf("  write <name> <txt>- Create file in the root VFS catalog\r\n");
+  ow_kprintf("  read <name>       - Read file from the root VFS catalog\r\n");
   ow_kprintf("  route <hex>       - Query route table\r\n");
   ow_kprintf("  sucs              - Show SUCS mode\r\n");
   ow_kprintf("  sucs <base|ext>   - Stage SUCS mode switch\r\n");
+  ow_kprintf("  sucs commit       - Apply the staged SUCS mode now (no reboot)\r\n");
   ow_kprintf("  vip mount <vol> <sector> <label> - Register volume\r\n");
   ow_kprintf("  vip resolve <vol> - Resolve volume base LBA\r\n");
   ow_kprintf("  vip index <path> <sector> <flags> - Insert FVIP entry\r\n");
@@ -159,6 +197,13 @@ void OwShellPrintHelp(void) {
 }
 
 static void execute_trap(const char *name, uint32_t vector, const char *desc) {
+  /* This command exists to *drive* the fatal-fault path on demand so the crash
+   * screen, the SMP IPI halt and the halt record can be inspected.  It is a
+   * simulation, not evidence that the kernel cannot survive a fault: faults
+   * raised by CPL3 code are demand-paged and resumed (see the "[PF] RESOLVED"
+   * lines), and this command says so before it halts the shell. */
+  ow_kprintf("[TRAP] diagnostic only - injecting Vector %u on purpose to show "
+             "the fatal-fault path\r\n", vector);
   ow_kprintf("[TRAP] CPU Hardware Exception Vector %u (%s): %s\r\n", vector,
              name, desc);
   OwHalCrashScreen(name, vector);
@@ -169,6 +214,94 @@ static void execute_trap(const char *name, uint32_t vector, const char *desc) {
   ow_kprintf("STATE DUMP: Registers frozen. SMP cores halted via IPI.\r\n");
   OwHalSmpHaltIPI();
   g_ShellRunning = false;
+}
+
+/* Resolve a '/'-separated path from the current directory (or from root when it
+ * starts with '/'), walking each component through the OWFS catalog, and update
+ * g_CwdInode/g_CwdPath on success.  ".." uses the inode's recorded parent.
+ * Returns false, leaving the CWD untouched, when any component is missing or is
+ * not a catalog. */
+static bool shell_cd_apply(const char *path) {
+  uint32_t inode = g_CwdInode;
+  char newpath[sizeof(g_CwdPath)];
+  const char *p = path;
+
+  if (!path || *path == '\0')
+    return false;
+
+  ow_strncpy(newpath, g_CwdPath, sizeof(newpath));
+  newpath[sizeof(newpath) - 1] = '\0';
+
+  if (*p == '/') {
+    inode = OwFsOwfsRootInode();
+    ow_strncpy(newpath, "/", sizeof(newpath));
+    while (*p == '/')
+      p++;
+  }
+
+  while (*p) {
+    const char *slash = ow_strchr(p, '/');
+    size_t len = slash ? (size_t)(slash - p) : ow_strlen(p);
+    char comp[128];
+    uint32_t next = 0;
+    bool is_dir = false;
+
+    if (len == 0) { /* collapse runs of '/' */
+      p++;
+      continue;
+    }
+    if (len >= sizeof(comp))
+      return false;
+
+    ow_memcpy(comp, p, len);
+    comp[len] = '\0';
+
+    if (ow_strcmp(comp, ".") == 0) {
+      /* no-op */
+    } else if (ow_strcmp(comp, "..") == 0) {
+      uint32_t parent = inode;
+      if (ow_status_success(OwFsOwfsGetParent(inode, &parent)) &&
+          parent != inode) {
+        inode = parent;
+      } else {
+        inode = OwFsOwfsRootInode();
+      }
+      /* Trim the last component from the rendered path. */
+      {
+        char *last = newpath + ow_strlen(newpath);
+        while (last > newpath && *(last - 1) != '/')
+          last--;
+        if (last > newpath)
+          last--;
+        *last = '\0';
+        if (newpath[0] == '\0')
+          ow_strncpy(newpath, "/", sizeof(newpath));
+      }
+    } else {
+      if (!ow_status_success(OwFsOwfsLookupIn(inode, comp, &next, &is_dir)) ||
+          !is_dir)
+        return false;
+      if (ow_strcmp(newpath, "/") == 0) {
+        if (ow_strlen(comp) + 2 > sizeof(newpath))
+          return false;
+        ow_memcpy(newpath + 1, comp, ow_strlen(comp) + 1);
+      } else {
+        size_t cur = ow_strlen(newpath);
+        size_t n = ow_strlen(comp);
+        if (cur + 1 + n + 1 > sizeof(newpath))
+          return false;
+        newpath[cur] = '/';
+        ow_memcpy(newpath + cur + 1, comp, n + 1);
+      }
+      inode = next;
+    }
+    p += len;
+  }
+
+  g_CwdInode = inode;
+  ow_strncpy(g_CwdPath, newpath, sizeof(g_CwdPath));
+  g_CwdPath[sizeof(g_CwdPath) - 1] = '\0';
+  return true;
 }
 
 OW_STATUS OwShellRun(void) {
@@ -216,13 +349,48 @@ OW_STATUS OwShellRun(void) {
         ow_kprintf("[SHUTDOWN] Exiting...\r\n");
         g_ShellRunning = false;
       } else if (ow_strcmp(cmd, "status") == 0) {
+        uint64_t fwb = OwMemFirmwareBytes();
         ow_kprintf("--- SYSTEM STATUS ---\r\n");
-        ow_kprintf("Memory Pages: %u / %u used\r\n", OwMemPagesUsed(),
-                   OwMemPagesTotal());
-        ow_kprintf("VFS Primary:   %s\r\n",
+        ow_kprintf("Memory (kernel pool): %u / %u pages used (%u MiB 4-KiB "
+                   "arena)\r\n",
+                   OwMemPagesUsed(), OwMemPagesTotal(),
+                   (unsigned)(((uint64_t)OwMemPagesTotal() * OW_PAGE_SIZE) /
+                              (1024ULL * 1024ULL)));
+        if (fwb != 0u) {
+          ow_kprintf("Memory (firmware):    %llu MiB reported by the "
+                     "bootloader (%u 4-KiB pages, not managed)\r\n",
+                     (unsigned long long)(fwb / (1024ULL * 1024ULL)),
+                     OwMemFirmwarePages());
+        } else {
+          ow_kprintf("Memory (firmware):    unknown (no bootloader memory "
+                     "map)\r\n");
+        }
+        ow_kprintf("VFS Primary:   %s (OWFS)\r\n",
                    OwVfsIsPrimaryMounted() ? "MOUNTED" : "NOT MOUNTED");
-        ow_kprintf("VFS Secure:    %s\r\n",
+        ow_kprintf("VFS Secure:    %s (USFS)\r\n",
                    OwVfsIsSecureMounted() ? "MOUNTED" : "NOT MOUNTED");
+        ow_kprintf("CWD:           %s\r\n", g_CwdPath);
+      } else if (ow_strcmp(cmd, "pwd") == 0 || ow_strcmp(cmd, "cwd") == 0) {
+        ow_kprintf("%s\r\n", g_CwdPath);
+      } else if (ow_strcmp(cmd, "ls") == 0 || ow_strcmp(cmd, "dir") == 0) {
+        uint32_t count = 0;
+        OW_STATUS lst = OwFsOwfsListIn(g_CwdInode, &count);
+        if (ow_status_success(lst)) {
+          ow_kprintf("[FS] %s: %u entr%s\r\n", g_CwdPath, count,
+                     count == 1u ? "y" : "ies");
+        } else {
+          ow_kprintf("[FS] ls %s: FAILED (code 0x%X)\r\n", g_CwdPath,
+                     (unsigned int)lst);
+        }
+      } else if (ow_strcmp(cmd, "cd") == 0) {
+        char *target = ow_strtok((void *)0, " ");
+        if (!target) {
+          ow_kprintf("%s\r\n", g_CwdPath);
+        } else if (shell_cd_apply(target)) {
+          ow_kprintf("[FS] cd: %s\r\n", g_CwdPath);
+        } else {
+          ow_kprintf("[FS] cd: '%s': no such directory\r\n", target);
+        }
       } else if (ow_strcmp(cmd, "runlevel") == 0) {
         char *sub = ow_strtok((void *)0, " ");
         const OW_RUNLEVEL_DEF *rl = OwRunlevelCurrent();
@@ -259,17 +427,49 @@ OW_STATUS OwShellRun(void) {
       } else if (ow_strcmp(cmd, "alloc") == 0) {
         char *size_str = ow_strtok((void *)0, " ");
         uint64_t size;
-        int64_t addr;
+        uint64_t want;
+        uint32_t pages;
+        uint32_t used;
+        uint32_t total;
+        uint32_t free_pages;
+        uint64_t addr;
         if (!size_str) {
-          ow_kprintf("Error: Missing size.\r\n");
+          ow_kprintf("Usage: alloc <bytes>\r\n");
           continue;
         }
         size = ow_strtoull(size_str, (void *)0, 10);
-        addr = OwSyscallDispatch(OW_SYS_ALLOC, size, 0, 0);
-        if (addr != -1) {
-          ow_kprintf("[OK] Allocated at 0x%llX\r\n", (unsigned long long)addr);
+        if (size == 0u) {
+          ow_kprintf("[FAIL] alloc: size must be greater than zero\r\n");
+          continue;
+        }
+        /* The shell runs at Ring 0, so it takes frames straight from the
+         * kernel's own frame arena.  It deliberately does NOT go through
+         * OW_SYS_ALLOC: that syscall allocates a private page inside a CPL3
+         * process's address space and has no meaning for a caller with no
+         * process (which is why every `alloc` used to be rejected). */
+        want = (size + (OW_PAGE_SIZE - 1u)) / OW_PAGE_SIZE;
+        used = OwMemPagesUsed();
+        total = OwMemPagesTotal();
+        free_pages = (used < total) ? (total - used) : 0u;
+        if (want > (uint64_t)total || want > (uint64_t)free_pages) {
+          ow_kprintf("[FAIL] alloc %llu bytes (%llu page(s)): kernel pool "
+                     "exhausted (%u of %u 4-KiB pages free)\r\n",
+                     (unsigned long long)size, (unsigned long long)want,
+                     free_pages, total);
+          continue;
+        }
+        pages = (uint32_t)want;
+        addr = OwMemAllocatePages(pages);
+        if (addr == 0u) {
+          ow_kprintf("[FAIL] alloc %llu bytes (%u page(s)): frame allocator "
+                     "refused the request\r\n",
+                     (unsigned long long)size, pages);
         } else {
-          ow_kprintf("[FAIL] Allocation rejected.\r\n");
+          ow_kprintf("[OK] Allocated %u page(s) (%llu bytes) at 0x%llX; pool "
+                     "%u/%u pages used\r\n",
+                     pages, (unsigned long long)size,
+                     (unsigned long long)addr, OwMemPagesUsed(),
+                     OwMemPagesTotal());
         }
       } else if (ow_strcmp(cmd, "load") == 0) {
         char *path = ow_strtok((void *)0, " ");
@@ -294,11 +494,13 @@ OW_STATUS OwShellRun(void) {
       } else if (ow_strcmp(cmd, "write") == 0) {
         char *name = ow_strtok((void *)0, " ");
         char *text = shell_tail_after(name);
+        OW_STATUS cs;
         if (!name || !text) {
           ow_kprintf("Usage: write <name> <text>\r\n");
           continue;
         }
-        if (ow_status_success(OwVfsCreateFile(name, 0))) {
+        cs = OwVfsCreateFile(name, 0);
+        if (ow_status_success(cs) || cs == OW_ERR_ALREADY_EXISTS) {
           if (ow_status_success(OwVfsWriteFile(name, (const uint8_t *)text,
                                                (uint32_t)ow_strlen(text)))) {
             ow_kprintf("[OK] Written to '%s'.\r\n", name);
@@ -306,7 +508,8 @@ OW_STATUS OwShellRun(void) {
             ow_kprintf("[ERROR] Write failed.\r\n");
           }
         } else {
-          ow_kprintf("[ERROR] Create failed.\r\n");
+          ow_kprintf("[ERROR] Create failed (code 0x%X).\r\n",
+                     (unsigned int)cs);
         }
       } else if (ow_strcmp(cmd, "read") == 0) {
         char *name = ow_strtok((void *)0, " ");
@@ -322,7 +525,7 @@ OW_STATUS OwShellRun(void) {
           ow_kprintf("[OK] Read %u bytes:\r\n", n);
           ow_kprintf("---\r\n%s\r\n---\r\n", (char *)buf);
         } else {
-          ow_kprintf("[ERROR] File not found.\r\n");
+          ow_kprintf("[ERROR] Read failed (missing or empty file).\r\n");
         }
       } else if (ow_strcmp(cmd, "route") == 0) {
         char *addr_str = ow_strtok((void *)0, " ");
@@ -355,20 +558,39 @@ OW_STATUS OwShellRun(void) {
                      OwSucsIsRebootRequired() ? 1 : 0, OwSucsModeChangeCount());
         } else if (ow_strcmp(arg, "base") == 0) {
           mode = OwSucsRequestModeSwitch(0);
-          ow_kprintf("[SUCS] request: %s\r\n", mode == 3
-                                                   ? "staged, reboot required"
-                                               : mode == 2 ? "already active"
-                                               : mode == 1 ? "invalid mode"
-                                                           : "error");
+          ow_kprintf("[SUCS] request: %s\r\n",
+                     mode == 3 ? "staged, reboot required (or 'sucs commit')"
+                               : mode == 2 ? "already active"
+                                           : mode == 1 ? "invalid mode"
+                                                       : "error");
         } else if (ow_strcmp(arg, "ext") == 0) {
           mode = OwSucsRequestModeSwitch(1);
-          ow_kprintf("[SUCS] request: %s\r\n", mode == 3
-                                                   ? "staged, reboot required"
-                                               : mode == 2 ? "already active"
-                                               : mode == 1 ? "invalid mode"
-                                                           : "error");
+          ow_kprintf("[SUCS] request: %s\r\n",
+                     mode == 3 ? "staged, reboot required (or 'sucs commit')"
+                               : mode == 2 ? "already active"
+                                           : mode == 1 ? "invalid mode"
+                                                       : "error");
+        } else if (ow_strcmp(arg, "commit") == 0 ||
+                   ow_strcmp(arg, "apply") == 0) {
+          /* The mode-change library stages a switch and asks for a reboot,
+           * because a deployed system applies it from persistent storage on
+           * the next boot.  This live test volume is a RAM disk, so a reboot
+           * would discard the request (and all other state) before it could be
+           * committed.  Committing here applies the staged mode to the running
+           * kernel, which is the only way to actually exercise EXTENDED. */
+          if (OwSucsCommitNow()) {
+            ow_kprintf("[SUCS] committed: active=%s pending=%s reboot=0 "
+                       "changes=%u\r\n",
+                       OwSucsActiveMode() == 1 ? "EXTENDED" : "BASE",
+                       OwSucsPendingMode() == 1 ? "EXTENDED" : "BASE",
+                       OwSucsModeChangeCount());
+          } else {
+            ow_kprintf("[SUCS] nothing to commit (active=%s pending=%s)\r\n",
+                       OwSucsActiveMode() == 0 ? "BASE" : "EXTENDED",
+                       OwSucsPendingMode() == 0 ? "BASE" : "EXTENDED");
+          }
         } else {
-          ow_kprintf("Usage: sucs [status|base|ext]\r\n");
+          ow_kprintf("Usage: sucs [status|base|ext|commit]\r\n");
         }
       } else if (ow_strcmp(cmd, "vip") == 0) {
         char *sub = ow_strtok((void *)0, " ");

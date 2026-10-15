@@ -11,6 +11,7 @@
  * ========================================================================= */
 void OwSucsInitialize(void); /* init boot config, commit-on-boot */
 bool OwSucsCommitBoot(void); /* true if a mode transition committed */
+bool OwSucsCommitNow(void);  /* apply a staged mode now (no reboot) */
 int OwSucsActiveMode(void);  /* SUCS_MODE_BASE (0) / EXTENDED (1) */
 int OwSucsPendingMode(void);
 bool OwSucsIsRebootRequired(void);
