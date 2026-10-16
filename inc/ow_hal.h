@@ -49,12 +49,17 @@ void*        OwHalMapMmio(uint64_t Physical, uint32_t Size);
 void         OwHalSmpHaltIPI(void);
 htl_device_t* OwHalGetPrimaryDisk(void);
 htl_device_t* OwHalGetSecureDisk(void);
+/* Height, in text rows, of the pinned boot artwork drawn across the top of the
+ * VGA screen.  vga_scroll() (hal/htl.c) never moves these rows, so the art
+ * stays put for the whole session while the console log scrolls beneath it.
+ * core/main.c::boot_logo() draws exactly this many lines; the two are held in
+ * lockstep by a compile-time check there. */
+#define OW_VGA_ART_ROWS 11U
+
 void         OwHalVgaInitialize(void);
 void         OwHalVgaWriteChar(char c);
 void         OwHalVgaSetAttr(uint8_t Attr);
 void         OwHalVgaSetEnabled(bool Enabled);
-void         OwHalVgaStatusBar(const char* Text);
-void         OwHalVgaStatusSetChar(uint32_t col, char c);
 void         OwHalVgaClearAll(uint8_t Attr);
 void         OwHalVgaDrawText(uint8_t Row, uint8_t Col, const char* Text,
                               uint8_t Attr);

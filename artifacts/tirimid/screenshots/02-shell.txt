@@ -1,13 +1,14 @@
-===================================================================
-                        O P E N W I N D O W S
-                     Kernel 0.1.0 - Boot Monitor
-===================================================================
----
-via-vfs-facade
----
-ow-krnl> sucs commit
-[SUCS] committed: active=EXTENDED pending=EXTENDED reboot=0 changes=1
-ow-krnl> sucs
+____  _____  ______ _   _
+  / __ \|  __ \|  ____| \ | |
+ | |  | | |__) | |__  |  \| |
+ | |  | |  ___/|  __| | . ` |
+ | |__| | |    | |____| |\  |
+ _\____/|_|  __|______|_|_\_|___   ______          _______
+ \ \        / /_   _| \ | |  __ \ / __ \ \        / / ____|
+  \ \  /\  / /  | | |  \| | |  | | |  | \ \  /\  / / (___
+   \ \/  \/ /   | | | . ` | |  | | |  | |\ \/  \/ / \___ \
+    \  /\  /   _| |_| |\  | |__| | |__| | \  /\  /  ____) |
+     \/  \/   |_____|_| \_|_____/ \____/   \/  \/  |_____/
 [SUCS] active=EXTENDED pending=EXTENDED reboot=0 changes=1
 ow-krnl> alloc 33554432
 [FAIL] alloc 33554432 bytes (8192 page(s)): kernel pool exhausted (3815 of 4096
@@ -22,4 +23,3 @@ VFS Primary:   MOUNTED (OWFS)
 VFS Secure:    MOUNTED (USFS)
 CWD:           /
 ow-krnl>
-OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

@@ -42,23 +42,45 @@ typedef struct _OW_SYSTEM_STATE {
 
 static OW_SYSTEM_STATE g_System;
 
-#define BOOT_TOTAL_WEIGHT 100U   /* real boot completion denominator        */
 #define BOOT_PACE_MS      1200U  /* a real beat after each completed phase  */
 #define BOOT_LINE_MS       450U  /* each narrated line holds on screen      */
 
-static uint32_t g_boot_weight = 0;
+static void boot_pace(uint32_t ms);   /* busy wait that keeps the log readable */
 
-static void boot_spin(uint32_t ms);   /* busy wait w/ HUD spinner (defined below) */
+/* The pinned OpenWindows wordmark.  These rows sit at the very top of the
+ * screen and never scroll: hal/htl.c pins exactly OW_VGA_ART_ROWS rows against
+ * vga_scroll(), and the log console begins on the row just below.  Drawing
+ * through the console writer (rather than straight into VGA memory) keeps the
+ * serial mirror and the screen in step and advances the console cursor past
+ * the art, so the first log line lands underneath it. */
+static const char* const k_BootArt[] = {
+    "____  _____  ______ _   _",
+    "  / __ \\|  __ \\|  ____| \\ | |",
+    " | |  | | |__) | |__  |  \\| |",
+    " | |  | |  ___/|  __| | . ` |",
+    " | |__| | |    | |____| |\\  |",
+    " _\\____/|_|  __|______|_|_\\_|___   ______          _______",
+    " \\ \\        / /_   _| \\ | |  __ \\ / __ \\ \\        / / ____|",
+    "  \\ \\  /\\  / /  | | |  \\| | |  | | |  | \\ \\  /\\  / / (___",
+    "   \\ \\/  \\/ /   | | | . ` | |  | | |  | |\\ \\/  \\/ / \\___ \\",
+    "    \\  /\\  /   _| |_| |\\  | |__| | |__| | \\  /\\  /  ____) |",
+    "     \\/  \\/   |_____|_| \\_|_____/ \\____/   \\/  \\/  |_____/"
+};
+
+/* The art and the pinned region must agree exactly: one line short leaves a
+ * gap above the log, one line over paints into it.  A negative array size is
+ * the C99 way to make that a build error rather than a screen artefact. */
+typedef char ow_boot_art_fills_pinned_region[
+    (sizeof(k_BootArt) / sizeof(k_BootArt[0])) == OW_VGA_ART_ROWS ? 1 : -1];
 
 static void boot_logo(void) {
+    uint32_t i;
     OwHalVgaSetAttr(0x0B);                              /* bright cyan */
-    OwHalUartWriteString("===================================================================\r\n");
-    OwHalUartWriteString("                        O P E N W I N D O W S\r\n");
-    OwHalUartWriteString("                     Kernel 0.1.0 - Boot Monitor\r\n");
+    for (i = 0; i < OW_VGA_ART_ROWS; i++) {
+        OwHalUartWriteString(k_BootArt[i]);
+        OwHalUartWriteString("\r\n");
+    }
     OwHalVgaSetAttr(0x07);
-    OwHalUartWriteString("===================================================================\r\n");
-    OwHalVgaStatusBar("OpenWindows Kernel 0.1.0   BOOT [....................................]   0%");
-    boot_spin(1800);
 }
 
 /* Right-align V into a Width-wide field padded with Pad; returns chars written. */
@@ -95,10 +117,10 @@ static void km_line(uint8_t TagColor, const char* Tag, const char* fmt, ...) {
      * then a trailing "..." while it holds --- nothing snap-appears */
     OwHalVgaSetAttr(0x08);                              /* dim timestamp   */
     km_timestamp();
-    boot_spin(130);
+    boot_pace(130);
     OwHalVgaSetAttr(TagColor);                          /* colored [tag]    */
     OwHalUartWriteString(Tag);
-    boot_spin(160);
+    boot_pace(160);
     OwHalVgaSetAttr(0x0F);                              /* bright white body */
     OwHalUartWriteChar(' ');
     body[0] = '\0';
@@ -109,26 +131,21 @@ static void km_line(uint8_t TagColor, const char* Tag, const char* fmt, ...) {
     }
     OwHalUartWriteString(body);
     for (k = 0; k < 3; k++) {                           /* growing "..."   */
-        boot_spin(110);
+        boot_pace(110);
         OwHalUartWriteChar('.');
     }
-    boot_spin(200);
+    boot_pace(200);
     OwHalUartWriteString("\r\n");
-    boot_spin(BOOT_LINE_MS);
+    boot_pace(BOOT_LINE_MS);
 }
 
-/* Busy wait: sleep through `ms` while animating a spinner on the HUD,
- * so the boot visibly "works" between lines instead of looking dumped. */
-static void boot_spin(uint32_t ms) {
-    static const char frames[4] = { '|', '/', '-', '\\' };
-    uint32_t k = 0;
+/* Busy wait: sleep through `ms` so the boot visibly works between lines and
+ * the staged log stays readable instead of appearing all at once. */
+static void boot_pace(uint32_t ms) {
     while (ms) {
         OwHalDelayMs(60);
-        OwHalVgaStatusSetChar(79, frames[k & 3]);
-        k++;
         ms = (ms > 60) ? (ms - 60) : 0;
     }
-    OwHalVgaStatusSetChar(79, ' ');
 }
 
 /* Serial-only boot log spine (VGA muted): the tests read the serial log. */
@@ -138,37 +155,10 @@ static void boot_begin(const char* Name) {
     OwHalVgaSetEnabled(true);
 }
 
-/* Advance the pinned HUD bar by a completed phase's share of the boot. */
-static void boot_advance_bar(uint32_t Weight) {
-    uint32_t pct;
-    uint32_t fill;
-    char bar[40];
-    char line[110];
-    uint32_t b;
-    int n = 0;
-
-    g_boot_weight += Weight;
-    /* Clamp, because this is a percentage of a real total and the alternative is
-     * a bar that quietly reads 106%.  Nothing in the normal path can reach the
-     * clamp -- the phase weights are chosen to sum to BOOT_TOTAL_WEIGHT -- so
-     * hitting it means a phase has been charged twice, which is a bug the HUD
-     * should make visible rather than paper over. */
-    if (g_boot_weight > BOOT_TOTAL_WEIGHT) g_boot_weight = BOOT_TOTAL_WEIGHT;
-    pct  = (g_boot_weight * 100U) / BOOT_TOTAL_WEIGHT;
-    fill = (g_boot_weight * 36U) / BOOT_TOTAL_WEIGHT;
-    bar[n++] = '[';
-    for (b = 0; b < 36; b++) bar[n++] = b < fill ? '#' : '.';
-    bar[n++] = ']';
-    bar[n] = '\0';
-    ow_ksnprintf(line, sizeof(line),
-                 "OpenWindows Kernel 0.1.0   BOOT %s  %u%%", bar, pct);
-    OwHalVgaStatusBar(line);
-}
-
-/* Finish a phase: serial log verdict, then a REAL overall boot percentage on
- * the pinned HUD bar (share of the weighted boot sequence actually done). */
+/* Finish a phase: record the phase number, log the verdict, then hold the line
+ * on screen for one beat so the log reads as a sequence of steps. */
 static void boot_diag_done(uint32_t Phase, OW_STATUS Result,
-                           const char* Name, int Ok, uint32_t Weight) {
+                           const char* Name, int Ok) {
     g_System.BootPhase = Phase;
     OwHalVgaSetEnabled(false);
     if (Ok) {
@@ -179,8 +169,7 @@ static void boot_diag_done(uint32_t Phase, OW_STATUS Result,
     }
     OwHalVgaSetEnabled(true);
 
-    boot_advance_bar(Weight);
-    boot_spin(BOOT_PACE_MS);
+    boot_pace(BOOT_PACE_MS);
 }
 
 /* A phase that FAILED, recorded without halting.
@@ -193,18 +182,17 @@ static void boot_diag_done(uint32_t Phase, OW_STATUS Result,
  * the state machine decide keeps "the phase failed" and "the machine is dead"
  * as two separate, separately testable facts. */
 static void boot_diag_failed(uint32_t Phase, OW_STATUS Result,
-                             const char* Name, uint32_t Weight) {
+                             const char* Name) {
     g_System.BootPhase = Phase;
     OwHalVgaSetEnabled(false);
     OwDiagLogFailed(Name, Result);
     OwHalVgaSetEnabled(true);
 
-    boot_advance_bar(Weight);
-    boot_spin(BOOT_PACE_MS);
+    boot_pace(BOOT_PACE_MS);
 }
 
 /* A boot phase whose subsystem the active runlevel does not arm is logged
- * (W+ advisory) and skipped, keeping the weighted boot bar coherent. */
+ * (W+ advisory) and skipped. */
 static void boot_skip_line(const char* Name) {
     const OW_RUNLEVEL_DEF* rl = OwRunlevelCurrent();
     OwDiagLogWarning(OW_W_RUNLEVEL_FEATURE_SKIPPED, Name);
@@ -212,22 +200,10 @@ static void boot_skip_line(const char* Name) {
             Name, rl->Level, rl->Name);
 }
 
-static void boot_skip_phase(const char* Name, uint32_t Phase, uint32_t Weight) {
+static void boot_skip_phase(const char* Name, uint32_t Phase) {
     boot_skip_line(Name);
-    boot_diag_done(Phase, OW_SUCCESS, Name, 1, Weight);
+    boot_diag_done(Phase, OW_SUCCESS, Name, 1);
 }
-
-/* A phase that FAILED, recorded without halting.
- *
- * boot_diag_done() logs the failed verdict and then hammers the BANcode trap,
- * which never returns.  That is right for every phase except one: the owinit
- * userspace resolution is the phase whose failure the next piece of code gets
- * to interpret, because an unusable owinit may still be a bootable machine when
- * the emergency userspace is present.  Recording the failure here and letting
- * the state machine decide keeps "the phase failed" and "the machine is dead"
- * as two separate, separately testable facts. */
-static void boot_diag_failed(uint32_t Phase, OW_STATUS Result,
-                             const char* Name, uint32_t Weight);
 
 /* ====================================================================== */
 /* Userspace boot policy (the three owinit states)                       */
@@ -447,7 +423,7 @@ void _start(void) {
     km_line(0x0B, "[HAL]", "uart0: COM1 @ 0x3F8, 115200 baud 8N1");
     km_line(0x0B, "[HAL]", "timer: 8254 PIT ~1000 Hz, monotonic clock armed");
     km_line(0x0B, "[TIME]", "64-bit monotonic time (uint64 ms) - no Y2K38 overflow");
-    boot_diag_done(1, OW_C_HAL_INITIALIZED, "HAL Init", 1, 12);
+    boot_diag_done(1, OW_C_HAL_INITIALIZED, "HAL Init", 1);
 
     /* Phase 1b: ACPI firmware tables (software power control: S5 + reset) */
     OwAcpiInitialize();
@@ -462,7 +438,7 @@ void _start(void) {
     km_line(0x0D, "[MEM]", "pml4: 512 GiB virtual address space, table built");
     km_line(0x0D, "[MEM]", "vad: zero-allocation core, no dynamic heap");
     km_line(0x0D, "[MEM]", "page manager: 4 KiB granularity armed");
-    boot_diag_done(2, OW_C_PML4_BUILT, "Memory Init", 1, 10);
+    boot_diag_done(2, OW_C_PML4_BUILT, "Memory Init", 1);
 
     /* Phase 3: Object Manager */
     boot_begin("Object Manager");
@@ -474,7 +450,7 @@ void _start(void) {
     g_System.DriverDirectory = OwObjCreateDirectory("Drivers", g_System.RootNamespace);
     km_line(0x0E, "[OBJ]", "namespace: root \\ mounted");
     km_line(0x0E, "[OBJ]", "namespace: \\Device, \\Kernel, \\Drivers created");
-    boot_diag_done(3, OW_C_OBJ_MANAGER_READY, "Object Manager", 1, 8);
+    boot_diag_done(3, OW_C_OBJ_MANAGER_READY, "Object Manager", 1);
 
     /* Phase 4: Diagnostic Engine (BANcode) + Runlevel subsystem + ALPC */
     boot_begin("Diagnostics");
@@ -500,7 +476,7 @@ void _start(void) {
             boot_skip_line("ALPC");
         }
         boot_diag_done(4, okr ? (OW_STATUS)OW_C_RUNLEVEL_TABLE_READY : (OW_STATUS)0,
-                       "Diagnostics", okr, 8);
+                       "Diagnostics", okr);
     }
 
     /* Phase 4b: SuperUnicode SUCS commit-on-boot + SUTF self-test */
@@ -521,10 +497,10 @@ void _start(void) {
             }
             km_line(0x0D, "[SUCS]", "mode switch committed at boot");
             boot_diag_done(4, ok4b ? OW_SUCCESS : OW_B_SENTINEL_INTEGRITY_FAIL,
-                           "SuperUnicode", ok4b, 6);
+                           "SuperUnicode", ok4b);
         }
     } else {
-        boot_skip_phase("SuperUnicode", 4, 6);
+        boot_skip_phase("SuperUnicode", 4);
     }
 
     /* Phase 4c: Process / Thread subsystem (NT-like executive objects).
@@ -537,7 +513,7 @@ void _start(void) {
         km_line(0x0D, "[PS]", "process/thread tables compiled");
         km_line(0x0D, "[PS]", "idle system thread 0 registered");
         boot_diag_done(40, ok4c ? OW_C_PS_READY : (OW_STATUS)0,
-                       "PS Init", ok4c, 4);
+                       "PS Init", ok4c);
     }
 
     /* Phase 5: Virtual File System */
@@ -548,10 +524,10 @@ void _start(void) {
             km_line(0x0A, "[VFS]", "OWFS: primary database mounted");
             km_line(0x0A, "[VFS]", "journal: initialized");
             boot_diag_done(5, okv ? OW_C_VFS_PRIMARY_MOUNTED : (OW_STATUS)0,
-                           "VFS Primary", okv, 8);
+                           "VFS Primary", okv);
         }
     } else {
-        boot_skip_phase("VFS Primary", 5, 8);
+        boot_skip_phase("VFS Primary", 5);
     }
     if (OwRunlevelRequires(OW_RUNLVL_F_USFS)) {
         boot_begin("VFS Secure");
@@ -560,10 +536,10 @@ void _start(void) {
             km_line(0x0A, "[VFS]", "USFS: secure volume mounted");
             km_line(0x0A, "[VFS]", "secure stream verified");
             boot_diag_done(50, oks ? OW_C_VFS_SECURE_MOUNTED : (OW_STATUS)0,
-                           "VFS Secure", oks, 6);
+                           "VFS Secure", oks);
         }
     } else {
-        boot_skip_phase("VFS Secure", 50, 6);
+        boot_skip_phase("VFS Secure", 50);
     }
 
     /* Phase 5b: Physical storage (OWFS on primary disk, USFS on secure) */
@@ -573,9 +549,9 @@ void _start(void) {
         km_line(0x0E, "[DISK]", "disk0: OWFS geometry accepted");
         km_line(0x0E, "[DISK]", "disk1: USFS geometry accepted");
         km_line(0x0E, "[DISK]", "sector engine: %u-sector LBA ready", OW_RAMDISK_PRIMARY_BLOCKS);
-        boot_diag_done(51, OW_SUCCESS, "Storage", 1, 8);
+        boot_diag_done(51, OW_SUCCESS, "Storage", 1);
     } else {
-        boot_skip_phase("Storage", 51, 8);
+        boot_skip_phase("Storage", 51);
     }
 
     /* Phase 5c: userspace resolution over owinit / owinitv / owrs.
@@ -617,7 +593,7 @@ void _start(void) {
 
         if (ustate == OW_USERSPACE_PRIMARY) {
             km_line(0x0A, "[OWINIT]", "state PRIMARY: owinit.owx is PID 1");
-            boot_diag_done(52, OW_SUCCESS, "owinit", 1, 6);
+            boot_diag_done(52, OW_SUCCESS, "owinit", 1);
         } else if (ustate == OW_USERSPACE_EMERGENCY) {
             /* Degraded, not broken.  The primary orchestrator did not come up,
              * but a userspace does, so this is a warning and not a BANcode
@@ -633,7 +609,7 @@ void _start(void) {
                 km_line(0x0C, "[OWINIT]", "owinitv.owx UNUSABLE; owrs.owx "
                         "cannot be launched without it");
             }
-            boot_diag_done(52, OW_W_OWINIT_EMERGENCY, "owinit", 1, 6);
+            boot_diag_done(52, OW_W_OWINIT_EMERGENCY, "owinit", 1);
         } else {
             /* State 3.  Nothing to enter.
              *
@@ -646,7 +622,7 @@ void _start(void) {
                 km_line(0x0C, "[OWINIT]", "state ABSENT: no usable owinit, and "
                         "the volume has emergency bytes but no usable owinitv.owx "
                         "to enter (owinitv is the init; owrs cannot be PID 1)");
-                boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 6);
+                boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit");
                 OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
                                 "owinit.owx missing or unusable, and owinitv.owx "
                                 "missing or unusable, so no user-mode init can be "
@@ -655,7 +631,7 @@ void _start(void) {
             } else {
                 km_line(0x0C, "[OWINIT]", "state ABSENT: no usable owinit and no "
                         "emergency userspace on the volume");
-                boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 6);
+                boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit");
                 OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
                                 "owinit.owx missing or unusable and no emergency "
                                 "userspace (owinitv.owx / owrs.owx) available");
@@ -663,7 +639,7 @@ void _start(void) {
             ow_hlt_loop();   /* unreachable: BanHammer does not return */
         }
     } else {
-        boot_skip_phase("owinit", 52, 6);
+        boot_skip_phase("owinit", 52);
     }
 
     /* Phase 5c.1: Copyleft Integrity Safeguard.
@@ -682,11 +658,9 @@ void _start(void) {
      * switch off executable verification: that is precisely the runlevel an
      * attacker with any write access would choose.
      *
-     * Weight 0, charged to the userspace-resolution step it gates, the same
-     * treatment the 5c.5 hand-off below gets.  The boot HUD denominator was
-     * already over-subscribed (106 against a 100 total) before this phase
-     * existed, so it is not given a share of its own; boot_diag_done() clamps
-     * the percentage either way. */
+     * It records under the same phase number as the userspace-resolution step
+     * it gates, sharing that step's place in the log rather than claiming one
+     * of its own. */
     if (OwRunlevelRequires(OW_RUNLVL_F_CIS)) {
         boot_begin("CIS");
         {
@@ -694,7 +668,7 @@ void _start(void) {
             if (ow_status_error(cist)) {
                 km_line(0x0C, "[CIS]", "enforcement FAILED to arm - "
                         "no executable will be mapped");
-                boot_diag_failed(52, cist, "CIS", 0);
+                boot_diag_failed(52, cist, "CIS");
                 /* A halt, not a warning.  OwCisIsReady() stays false, so every
                  * image load is refused from here on; carrying on would hand a
                  * machine whose init cannot start to the shell, with the real
@@ -710,7 +684,7 @@ void _start(void) {
                         "every image will be refused");
             }
             km_line(0x0A, "[CIS]", "enforcement armed (signatures mandatory)");
-            boot_diag_done(52, OW_C_CIS_ONLINE, "CIS", 1, 0);
+            boot_diag_done(52, OW_C_CIS_ONLINE, "CIS", 1);
         }
     } else {
         /* Unreachable while CIS is in OW_RUNLEVEL_CORE_FEATURES.  Present so
@@ -718,7 +692,7 @@ void _start(void) {
          * refusal rather than a silently unguarded boot. */
         km_line(0x0C, "[CIS]", "runlevel does not arm CIS - refusing to "
                 "continue without image verification");
-        boot_diag_failed(52, OW_ERR_UNSUPPORTED, "CIS", 0);
+        boot_diag_failed(52, OW_ERR_UNSUPPORTED, "CIS");
         OwDiagBanHammer(OW_ERR_UNSUPPORTED, "CIS",
                         "active runlevel does not arm the Copyleft Integrity "
                         "Safeguard");
@@ -780,10 +754,10 @@ void _start(void) {
             }
 
             boot_diag_done(53, (chkok && provok) ? OW_SUCCESS : OW_B_SENTINEL_INTEGRITY_FAIL,
-                           "Kernel Integrity", (chkok && provok), 6);
+                           "Kernel Integrity", (chkok && provok));
         }
     } else {
-        boot_skip_phase("Kernel Integrity", 53, 6);
+        boot_skip_phase("Kernel Integrity", 53);
     }
 
     /* The hand-off below enters userspace, so it must not run unless the phase
@@ -796,7 +770,7 @@ void _start(void) {
         !OwRunlevelRequires(OW_RUNLVL_F_INTEGRITY)) {
         km_line(0x0C, "[OWINIT]", "runlevel arms owinit without kernel integrity "
                 "- refusing to enter unverified userspace");
-        boot_diag_failed(52, OW_ERR_UNSUPPORTED, "owinit", 0);
+        boot_diag_failed(52, OW_ERR_UNSUPPORTED, "owinit");
         OwDiagBanHammer(OW_ERR_UNSUPPORTED, "owinit",
                         "runlevel enters userspace without kernel "
                         "integrity/provenance verification armed");
@@ -838,11 +812,9 @@ void _start(void) {
              * userspace at all, which is state 3 wearing state 1's label. */
             km_line(0x0C, "[OWINIT]", "state PRIMARY but no init was entered "
                     "- unrecoverable boot failure - panic");
-            /* Weight 0: phase 5c already charged this phase its full share of
-             * the bar when it selected the init.  This is a failure of the
-             * 5c.5 hand-off, not a second phase, and charging it again would
-             * push the completion percentage past 100%. */
-            boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 0);
+            /* Records under phase 5c, the step that selected this init: the
+             * hand-off is the last act of that phase, not a phase of its own. */
+            boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit");
             OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
                             "owinit.owx was present and loadable but could not "
                             "be entered as PID 1");
@@ -858,7 +830,7 @@ void _start(void) {
              * because the two causes send a user to different places. */
             km_line(0x0C, "[OWINIT]", "state EMERGENCY but owinitv could not be "
                     "entered - the rescue path is not available - panic");
-            boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit", 0);
+            boot_diag_failed(52, OW_B_OWINIT_MISSING, "owinit");
             OwDiagBanHammer(OW_B_OWINIT_MISSING, "userspace",
                             "owinitv.owx was present and loadable but could not "
                             "be entered as PID 1, so the emergency userspace is "
@@ -876,10 +848,10 @@ void _start(void) {
             km_line(0x0B, "[NET]", "router service starting");
             km_line(0x0B, "[NET]", "router online");
             boot_diag_done(6, okn ? OW_C_NETWORK_ONLINE : (OW_STATUS)0,
-                           "Network", okn, 4);
+                           "Network", okn);
         }
     } else {
-        boot_skip_phase("Network", 6, 6);
+        boot_skip_phase("Network", 6);
     }
 
     /* Phase 6b: UniVIP volume registry + FVIP root index */
@@ -892,14 +864,14 @@ void _start(void) {
             km_line(0x0D, "[VIP]", "UniVIP registry online, root volume %u @ LBA %llu",
                     OW_VIP_ROOT_VOLUME, (unsigned long long)OW_VIP_ROOT_BASE_SECTOR);
             km_line(0x0D, "[VIP]", "FVIP root volume index compiled");
-            boot_diag_done(6, OW_SUCCESS, "UniVIP", 1, 8);
+            boot_diag_done(6, OW_SUCCESS, "UniVIP", 1);
         } else {
             ow_kprintf("[VIP] UniVIP init failed\r\n");
             km_line(0x0C, "[VIP]", "UniVIP init FAILED");
-            boot_diag_done(6, (OW_STATUS)0, "UniVIP", 0, 8);
+            boot_diag_done(6, (OW_STATUS)0, "UniVIP", 0);
         }
     } else {
-        boot_skip_phase("UniVIP", 6, 8);
+        boot_skip_phase("UniVIP", 6);
     }
 
     /* Phase 7: Sentinel Active Defense */
@@ -908,9 +880,9 @@ void _start(void) {
         OwSentinelInitialize();
         km_line(0x0E, "[SENT]", "active defense armed");
         km_line(0x0E, "[SENT]", "integrity chains bound");
-        boot_diag_done(7, OW_C_SENTINEL_ONLINE, "Sentinel", 1, 6);
+        boot_diag_done(7, OW_C_SENTINEL_ONLINE, "Sentinel", 1);
     } else {
-        boot_skip_phase("Sentinel", 7, 6);
+        boot_skip_phase("Sentinel", 7);
     }
 
     /* Phase 8: System Call Gateway */
@@ -919,9 +891,9 @@ void _start(void) {
         OwSyscallInitialize();  /* [DEBUG BISECT: only KeSyncSelfTest skipped inside] */
         km_line(0x0B, "[SYSC]", "system call table installed");
         km_line(0x0B, "[SYSC]", "gateway ready");
-        boot_diag_done(8, OW_C_SYSCALL_GATEWAY_READY, "Syscall Gateway", 1, 4);
+        boot_diag_done(8, OW_C_SYSCALL_GATEWAY_READY, "Syscall Gateway", 1);
     } else {
-        boot_skip_phase("Syscall Gateway", 8, 4);
+        boot_skip_phase("Syscall Gateway", 8);
     }
 
     /* Boot Complete */
@@ -929,7 +901,7 @@ void _start(void) {
     km_line(0x0A, "[INIT]", "handing off to shell 'sh' as init process");
     km_line(0x0A, "[BOOT]", "kernel boot complete in %llu ms",
             (unsigned long long)OwHalUptimeMs());
-    boot_diag_done(9, OW_C_BOOT_COMPLETE, "Boot Complete", 1, 2);
+    boot_diag_done(9, OW_C_BOOT_COMPLETE, "Boot Complete", 1);
 
     /* PS scheduler hand-off: snapshot the boot thread's context (thread 0,
      * the shell), then arm the 100 Hz preemption tick.  From here on the

@@ -1,23 +1,24 @@
 OpenWindows - Tirimid test package - PROVENANCE
 ================================================
 
-Produced:  2026-10-16 (independent final audit)
+Produced:  2026-10-16 (boot-console redesign)
 Host:      DESKTOP-GI1JNJN  Windows  PowerShell 7.6.7
 Repo:      C:\Users\KARIMABENDA\Documents\OpenWindows
-Commit:    0bf3108e91e4de0ec8179cc250aba878db5ebfce
-Subject:   Refactor shell commands and improve VFS handling
-Package:   2026-10-08 package, rebuilt 2026-10-15, re-audited 2026-10-16
-           (see CHANGELOG.md)
+Commit:    8a4f4b848dac87db120383b09f5256ca3bd0c5d6
+Subject:   audit: independent final audit on 2026-10-16
+Package:   2026-10-08 package, rebuilt 2026-10-15, re-audited 2026-10-16,
+           boot-console redesign 2026-10-16 (see CHANGELOG.md)
 
-  NOTE: the tree was CLEAN (working tree with no source changes) at the start of
-  this audit, i.e. the 2026-10-15 testing-report fixes documented in the previous
-  refresh had been committed by the operator as 0bf3108. This audit adds one
-  further fix on top of that commit (see the working-tree list below and
-  CHANGELOG.md).
+  NOTE: this pass starts from commit 8a4f4b8, which committed the 2026-10-16
+  independent final audit (including the ow_strtoull saturation fix). This pass
+  adds the boot-console redesign in the working tree (see the working-tree list
+  below and CHANGELOG.md).
 
-Working tree at packaging time (uncommitted, intentional — this audit):
-   M lib/kstring.c
-   M tools/hosttest/host_boot.c
+Working tree at packaging time (staged in git, uncommitted — this pass):
+   M core/main.c                                   (boot-console redesign)
+   M hal/htl.c                                     (pin OW_VGA_ART_ROWS rows)
+   M inc/ow_hal.h                                  (add OW_VGA_ART_ROWS)
+   M tools/hosttest/host_hal.c                     (drop removed HUD stubs)
    M artifacts/tirimid/README.md
    M artifacts/tirimid/TESTER_NOTES.md
    M artifacts/tirimid/CHANGELOG.md
@@ -27,22 +28,27 @@ Working tree at packaging time (uncommitted, intentional — this audit):
    M artifacts/tirimid/images/openwinkrnl_tirimid_floppy.flp
    M artifacts/tirimid/images/openwinkrnl_tirimid_disk.img
    M artifacts/tirimid/images/openwinkrnl_tirimid_disk.vdi
-   M artifacts/tirimid/screenshots/01b-bootcomplete.png
-   M artifacts/tirimid/screenshots/01b-bootcomplete.txt
-   M artifacts/tirimid/screenshots/01b-bootcomplete.vgabin
+   M artifacts/tirimid/screenshots/*.png / *.txt / *.vgabin   (all ten sets)
+   M artifacts/tirimid/transcripts/01_disk_capture_session.txt
+   M artifacts/tirimid/transcripts/02_disk_boot.txt
+   M artifacts/tirimid/transcripts/03_floppy_boot.txt
+   M artifacts/tirimid/transcripts/05_virtualbox_boot.txt
    M docs/TIRIMID_FINDINGS.md
-   M vbox/openwinkrnl.vdi            (git-ignored, production, rebuilt)
+
+  Nothing was committed or pushed.
 
   The three boot-enabling fixes this package originally shipped as local
   modifications (core/memory.c ISA-window skip; boot/stage1.S and
-  boot/stage1disk.S .bss zeroing) remain committed (landed before 0bf3108) and
-  do not appear as local changes.
+  boot/stage1disk.S .bss zeroing) remain committed (they landed before 0bf3108)
+  and do not appear as local changes.
 
-  This audit fix: lib/kstring.c ow_strtoull() now saturates at UINT64_MAX on
-  overflow (standard strtoull semantics) instead of wrapping.  Before the fix
-  `alloc 18446744073709551617` wrapped to 1 and allocated a single 4-KiB page
-  while reporting "(1 bytes)".  Regression: 6 new hosttest assertions in
-  tools/hosttest/host_boot.c.
+  This pass: the four-line OPENWINDOWS boot-monitor banner and the pinned
+  "BOOT [....] NN%" HUD (with its spinner) were removed and replaced by an
+  11-line ASCII OPENWINDOWS wordmark pinned to text rows 0-10; the kernel log
+  now scrolls in rows 11-24 with no HUD row.  The wordmark is drawn through the
+  console writer, so it also heads every serial transcript.  core/main.c +
+  hal/htl.c + inc/ow_hal.h carry the change; the host stub drops the two
+  removed HUD entry points.
 
 Toolchain:
   gcc      gcc.exe (GCC) 15.2.0
@@ -53,10 +59,11 @@ Toolchain:
   vbox     VirtualBox 7.2.16r174877
 
 Build commands (outputs land under %TEMP%, outside the repo tree):
+  make hosttest                       (982 passed, 0 failed)
+  make CIS_DEV_TRUST=1 hosttest       (980 passed, 0 failed)
   make CIS_DEV_TRUST=1 qemu           -> %TEMP%\openwinkrnl_qemu\openwinkrnl_qemu.bin   (31 checks passed)
   make CIS_DEV_TRUST=1 qemu-emergency -> %TEMP%\openwinkrnl_qemu\openwinkrnl_qemu_emergency.bin (8 checks passed)
   make CIS_DEV_TRUST=1 vbox-image     -> %TEMP%\openwinkrnl_vbox\owx_boot.flp (stage1.S + seeded kernel)
-  make CIS_DEV_TRUST=1 hosttest       (980 passed, 0 failed)
   make CIS_DEV_TRUST=1 owx-entries    (13 targets, 0 failures)
 
 Installed into this package (copied from the outputs above, except the disk
@@ -77,8 +84,16 @@ Capture recipe (QEMU 11.1.0):
   python tools\ppm2png.py --dir <out>
   python tools\vgatext.py <out>\<name>.vgabin -o <out>\<name>.txt
 
+Boot transcripts (02/03) use the same QEMU serial-socket plumbing with no
+input: boot the disk (or floppy) image, drain the serial stream until the
+auto-init's final `status` and the `ow-krnl>` prompt, then write the bytes
+verbatim (CRLF).  Transcript 05 is the equivalent VirtualBox serial log.
+
 VirtualBox capture recipe (VirtualBox 7.2.16, headless):
-  VBoxManage storageattach OpenWindows-Tirimid --storagectl SATA --port 0 --device 0 --type hdd --medium <disk.vdi>
+  # Boot a byte-identical *copy* of the packaged VDI: opening a VDI rewrites
+  # its header, so booting the packaged file in place would change its hash.
+  copy images\openwinkrnl_tirimid_disk.vdi %TEMP%\ow_tirimid_vbox_copy.vdi
+  VBoxManage storageattach OpenWindows-Tirimid --storagectl SATA --port 0 --device 0 --type hdd --medium %TEMP%\ow_tirimid_vbox_copy.vdi
   VBoxManage modifyvm OpenWindows-Tirimid --uart1 0x3F8 4 --uartmode1 file <serial.log>
   VBoxManage startvm OpenWindows-Tirimid --type headless
   VBoxManage controlvm OpenWindows-Tirimid screenshotpng screenshots\09-vbox-boot.png
@@ -88,7 +103,8 @@ Notes:
   * VBoxManage is not on PATH on this host; use
     "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe".
   - The program-free production image `make CIS_DEV_TRUST=1 vdi`
-    (vbox/openwinkrnl.vdi, git-ignored) was rebuilt and validated at the same
-    time (8-check U+11A005 owinit gate) but is NOT distributed in this package.
+    (vbox/openwinkrnl.vdi, git-ignored) is NOT distributed in this package. It
+    was not rebuilt in this pass: the boot-console change is presentation only
+    and does not affect the owinit gate that image exercises.
   - make hosttest-asan does not build on this host (w64devkit ships no ASAN
     runtime) — pre-existing, not a regression.

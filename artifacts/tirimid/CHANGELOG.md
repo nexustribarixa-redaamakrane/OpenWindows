@@ -5,6 +5,61 @@ All dates are 2026. Every file in this package is covered by
 
 ---
 
+## 2026-10-16 — boot-console redesign (working tree on top of `8a4f4b8`)
+
+A follow-up pass replaced the boot screen's chrome. Nothing in the shell,
+filesystem, allocator, CIS path or shutdown path changed; this pass is
+presentation plus the evidence regeneration that follows from it.
+
+### What changed on screen
+
+- The four-line `O P E N W I N D O W S` / `Kernel 0.1.0 - Boot Monitor` banner
+  and the pinned `BOOT [ … ] NN%` HUD bar (with its spinner) are **gone**.
+- An 11-line ASCII `OPENWINDOWS` wordmark is now pinned across text rows 0–10
+  and never scrolls; the kernel log uses rows 11–24. (Previously rows 0–3 were
+  the logo, row 24 was the HUD, and the log had only rows 4–23.)
+- `core/main.c` draws the wordmark through the console writer — so the serial
+  mirror and the screen stay in step and the cursor advances past the art — and
+  holds each phase line for a beat. The percentage-weight machinery
+  (`BOOT_TOTAL_WEIGHT`, `g_boot_weight`, `boot_advance_bar`; `Weight`
+  parameters on `boot_diag_done` / `boot_diag_failed` / `boot_skip_phase`) and
+  the HUD HAL calls (`OwHalVgaStatusBar`, `OwHalVgaStatusSetChar`) were removed
+  as dead code.
+- `hal/htl.c` pins `VGA_ART_ROWS` (= `OW_VGA_ART_ROWS`, new in `inc/ow_hal.h`)
+  instead of a 4-row logo plus a status row, so the log scrolls all the way to
+  row 24. `core/main.c` carries a C99 compile-time assert that the art table
+  has exactly `OW_VGA_ART_ROWS` rows, so the art and the pinned region cannot
+  drift apart.
+
+Because the wordmark is written through the same console writer the old banner
+used, it also appears in the **serial** stream: the boot transcripts now open
+with the 11-line art.
+
+### Regenerated evidence
+
+All four images (qemu / floppy / disk / vdi), all ten `screenshots/*`
+(`.png` + decoded `.txt` + raw `.vgabin`), all `transcripts/*`, `README.md`,
+`TESTER_NOTES.md`, `PROVENANCE.txt`, `docs/TIRIMID_FINDINGS.md` and
+`MANIFEST.sha256`. `transcripts/04_qemu_kernel_validation.txt` is unchanged:
+the `make qemu` report does not contain the boot banner and regenerating it
+produced a byte-identical file.
+
+### Validation for this pass
+
+| Check | Result |
+|---|---|
+| `make hosttest` (untrusted) | PASS — 982 passed, 0 failed |
+| `make CIS_DEV_TRUST=1 hosttest` | PASS — 980 passed, 0 failed |
+| `make CIS_DEV_TRUST=1 qemu` | PASS — 31 checks |
+| `make CIS_DEV_TRUST=1 qemu-emergency` | PASS — 8 checks |
+| Boot console layout | PASS — wordmark rows 0–10, log rows 11–24, no HUD (read back from every `.vgabin`) |
+| VirtualBox 7.2.16 VDI boot | PASS — art header, `OEM 'VBOX  '`, `ow-krnl>` prompt |
+
+The program-free production VDI (`vbox/openwinkrnl.vdi`, git-ignored) is not
+part of this package and was not rebuilt in this pass.
+
+---
+
 ## 2026-10-16 — independent final audit (commit `0bf3108`)
 
 The 2026-10-15 fixes below were committed by the operator as `0bf3108`

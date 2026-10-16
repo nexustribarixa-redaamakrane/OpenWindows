@@ -1,13 +1,14 @@
-===================================================================
-                        O P E N W I N D O W S
-                     Kernel 0.1.0 - Boot Monitor
-===================================================================
-:: user sessions terminated (owkill --all)
-[RC] rc.shutdown:27>> echo ":: Flushing kconf registry changes..."
-:: Flushing kconf registry changes...
-[RC] rc.shutdown:28>> kconfctl save
-:: kconf registry committed to disk
-[RC] rc.shutdown:31>> echo ":: Flushing storage disk caches..."
+____  _____  ______ _   _
+  / __ \|  __ \|  ____| \ | |
+ | |  | | |__) | |__  |  \| |
+ | |  | |  ___/|  __| | . ` |
+ | |__| | |    | |____| |\  |
+ _\____/|_|  __|______|_|_\_|___   ______          _______
+ \ \        / /_   _| \ | |  __ \ / __ \ \        / / ____|
+  \ \  /\  / /  | | |  \| | |  | | |  | \ \  /\  / / (___
+   \ \/  \/ /   | | | . ` | |  | | |  | |\ \/  \/ / \___ \
+    \  /\  /   _| |_| |\  | |__| | |__| | \  /\  /  ____) |
+     \/  \/   |_____|_| \_|_____/ \____/   \/  \/  |_____/
 :: Flushing storage disk caches...
 [RC] rc.shutdown:32>> owdiskchk --flush
 :: disk check flushed dirty sectors
@@ -22,4 +23,3 @@
   You can safely power off your device now.
 ========================================================
 
-OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

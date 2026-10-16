@@ -119,12 +119,13 @@ Measured: the guest prints `[BOOT] kernel boot complete in 79674 ms`, while
 host wall clock from QEMU serial connect to the `ow-krnl>` prompt is
 **2.3 seconds**. The 79.674 s is the sum of requested delays; those delays cost
 roughly 79.674 / 1193 ≈ 67 ms of real time. Treat every `[  64.842]`-style
-timestamp and the boot HUD percentage as **relative, not seconds**.
+timestamp as **relative, not seconds**.
 
-The same image on VirtualBox 7.2.16 reports `kernel boot complete in
-628151 ms` — 8× the QEMU number, for identical source and identical delay
-arguments. That is the clearest single piece of evidence that the value tracks
-host PIT-emulation behaviour rather than elapsed time.
+The same image on VirtualBox 7.2.16 reports a much larger value
+(`kernel boot complete in 539332 ms` in the current capture) for identical
+source and identical delay arguments. That is the clearest single piece of
+evidence that the value tracks host PIT-emulation behaviour rather than elapsed
+time.
 
 Scope of the bug — callers of `OwHalDelayMs` only:
 
@@ -132,7 +133,7 @@ Scope of the bug — callers of `OwHalDelayMs` only:
 |---|---|
 | `rc/rc.c:209` — `sleep N` in an rc/init script | `sleep 1` returns in ~0.8 ms; the init script runs faster than authored |
 | `hal/acpi.c` — 1100 ms total across the ACPI S5 sequence | Firmware settle delays are ~0.9 ms real; shutdown still worked but is tight |
-| `core/main.c:126` — 60 ms boot settle | ~0.05 ms real |
+| `core/main.c` `boot_pace()` — per-step `OwHalDelayMs(60)` boot-log pacing | ~0.05 ms real per step |
 
 **Not** affected (verified): the scheduler tick (PIT channel 0, 100 Hz),
 `PS_SLEEP` and all sync/timer waits (`ow_sync.c:340` uses
@@ -245,7 +246,11 @@ involved there.)
 - **Visual review of the PNGs.** Nobody looked at them in an image viewer.
   Mitigation: every screenshot ships with a `.txt` decoded from the raw
   `0xB8000` dump, and each `.txt` was programmatically checked against the
-  state it is captioned as.
+  state it is captioned as. For the boot-console redesign the PNGs were also
+  confirmed to be 720×400 text-mode renders with a small palette, and the
+  VirtualBox PNG was additionally checked row-band by row-band for text in
+  rows 0–10 (wordmark) and 11–24 (log); pixel content is otherwise not
+  independently verified (the `.txt` is the content of record).
 
 Everything else this section previously listed as un-run has now been run for
 the 2026-10-15 refresh:
@@ -275,25 +280,26 @@ fails and scripts must be given the full path.
 
 - `01-boot` and `01b-bootcomplete` are captured with a monitor `stop` issued
   inside the same write as `screendump`, because the guest reaches a shell
-  prompt in ~2–3 s and the 19-line log area scrolls the boot log away. An
+  prompt in ~2–3 s and the 14-line log area scrolls the boot log away. An
   earlier attempt without the freeze produced three identical frames; the
   current frames are all distinct and content-checked.
-- `01b-bootcomplete` was **recaptured in the 2026-10-16 audit**: the previously
-  committed copy had captured the shell banner/help instead of the
-  boot-complete log, contradicting its caption. A fresh capture reproduces the
-  boot-complete frame; the committed copy now matches its caption. The other
-  eight captures were regenerated and found bit-identical to the committed
-  copies, so they were left as they were.
+- All ten captures were **regenerated for the 2026-10-16 boot-console
+  redesign**: the previous frames showed the four-line `O P E N W I N D O W S`
+  banner and the `BOOT [ … ] NN%` HUD, both of which the redesign removed. Each
+  new `.txt` was decoded from its own `.vgabin` and shows the 11-line wordmark
+  in rows 0–10 with the kernel log in rows 11–24.
 - `09-vbox-boot.png` is a VirtualBox `screenshotpng` capture of the same disk
   image, provided as independent evidence that the QEMU screen is not a
-  QEMU-specific artefact. A fresh VirtualBox boot of the rebuilt image in the
-  2026-10-16 audit produced the identical serial transcript (`ow-krnl>`,
-  `violations=0`, `[CIS] owinit: TRUSTED`, no halt); the PNG is retained because
-  a VirtualBox screenshot is not a raw `0xB8000` dump and so is not
-  programmatically content-checked (only the serial transcript is).
-- The VGA console is an 80×25 mirror of the serial log (rows 0–3 logo, 4–22
-  log, 24 HUD). It is a text buffer, not a compositor — there is no graphical
-  window system on screen.
+  QEMU-specific artefact. It was taken from a byte-identical temporary copy of
+  the packaged `.vdi` (so the packaged `.vdi` is not modified by booting it),
+  and reproduces the same serial transcript (`ow-krnl>`, `violations=0`,
+  `[CIS] owinit: TRUSTED`, no halt). A VirtualBox screenshot is not a raw
+  `0xB8000` dump, so its pixel content is checked structurally only (a 720×400
+  render whose text sits in rows 0–10 and 11–24); the serial transcript is the
+  content of record.
+- The VGA console is an 80×25 mirror of the serial log (rows 0–10 pinned
+  wordmark, 11–24 log, no HUD row). It is a text buffer, not a compositor —
+  there is no graphical window system on screen.
 - `07-alloc` now shows a **success** (`alloc 4096` → `[OK] Allocated 1 page(s) (4096 bytes) …`).
   It showed a failure in the previous package; that defect is fixed.
 

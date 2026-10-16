@@ -221,8 +221,9 @@ static void uart_wait_tx(void) {
 #define VGA_MEMORY      ((volatile uint16_t*)0xB8000U)
 #define VGA_COLS  80
 #define VGA_ROWS  25
-#define VGA_LOGO_ROWS   4          /* pinned boot logo region (rows 0-3) */
-#define VGA_STATUS_ROW  (VGA_ROWS - 1)  /* pinned HUD status region (row 24) */
+/* Rows reserved for the pinned boot artwork at the top of the screen.  The
+ * log console scrolls underneath; nothing else may write here after bring-up. */
+#define VGA_ART_ROWS   OW_VGA_ART_ROWS
 
 #define VGA_CRTC_INDEX  0x3D4U
 #define VGA_CRTC_DATA   0x3D5U
@@ -254,15 +255,16 @@ void OwHalVgaInitialize(void) {
     vga_update_cursor();
 }
 
-/* Console scrolling keeps the pinned logo region (rows 0-3) and the HUD
- * status row (row 24) fixed; only the log area between them shifts. */
+/* Console scrolling keeps the pinned boot artwork (rows 0 .. VGA_ART_ROWS-1)
+ * fixed and shifts only the log area below it, all the way down to the last
+ * text row. */
 static void vga_scroll(void) {
     volatile uint16_t* mem = VGA_MEMORY;
     uint32_t i;
-    uint32_t first = VGA_LOGO_ROWS * VGA_COLS;
-    for (i = first; i < (VGA_STATUS_ROW - 1) * VGA_COLS; i++) mem[i] = mem[i + VGA_COLS];
-    for (i = (VGA_STATUS_ROW - 1) * VGA_COLS; i < VGA_STATUS_ROW * VGA_COLS; i++) mem[i] = 0x0700;
-    g_vga_row = VGA_STATUS_ROW - 1;
+    uint32_t first = (uint32_t)VGA_ART_ROWS * VGA_COLS;
+    for (i = first; i < (uint32_t)(VGA_ROWS - 1) * VGA_COLS; i++) mem[i] = mem[i + VGA_COLS];
+    for (i = (uint32_t)(VGA_ROWS - 1) * VGA_COLS; i < (uint32_t)VGA_ROWS * VGA_COLS; i++) mem[i] = 0x0700;
+    g_vga_row = (uint16_t)(VGA_ROWS - 1);
     g_vga_col = 0;
     vga_update_cursor();
 }
@@ -281,7 +283,7 @@ void OwHalVgaWriteChar(char c) {
     case '\n':
         g_vga_row++;
         g_vga_col = 0;
-        if (g_vga_row >= VGA_STATUS_ROW) vga_scroll();
+        if (g_vga_row >= VGA_ROWS) vga_scroll();
         vga_update_cursor();
         return;
     case '\b':
@@ -293,7 +295,7 @@ void OwHalVgaWriteChar(char c) {
     case '\t':
         do { g_vga_col++; } while (g_vga_col & 7U);
         if (g_vga_col >= VGA_COLS) { g_vga_col = 0; g_vga_row++; }
-        if (g_vga_row >= VGA_STATUS_ROW) vga_scroll();
+        if (g_vga_row >= VGA_ROWS) vga_scroll();
         vga_update_cursor();
         return;
     default:
@@ -303,7 +305,7 @@ void OwHalVgaWriteChar(char c) {
     if (g_vga_col >= VGA_COLS) {
         g_vga_col = 0;
         g_vga_row++;
-        if (g_vga_row >= VGA_STATUS_ROW) vga_scroll();
+        if (g_vga_row >= VGA_ROWS) vga_scroll();
     }
     off = (uint32_t)g_vga_row * VGA_COLS + (uint32_t)g_vga_col;
     mem[off] = (uint16_t)((uint16_t)(g_vga_attr << 8) | ((uint8_t)c));
@@ -314,28 +316,6 @@ void OwHalVgaWriteChar(char c) {
 void OwHalVgaSetAttr(uint8_t Attr) { g_vga_attr = Attr; }
 
 void OwHalVgaSetEnabled(bool Enabled) { g_vga_enabled = Enabled ? 1 : 0; }
-
-/* HUD status row renderer: blue field, bright white text (row 24, pinned). */
-void OwHalVgaStatusBar(const char* Text) {
-    volatile uint16_t* mem = VGA_MEMORY;
-    uint32_t i, base = (uint32_t)VGA_STATUS_ROW * VGA_COLS;
-    for (i = 0; i < VGA_COLS; i++) mem[base + i] = 0x1F00;
-    if (Text) {
-        for (i = 0; Text[i] && i < VGA_COLS; i++) {
-            mem[base + i] = (uint16_t)((0x1FU << 8) | (uint8_t)Text[i]);
-        }
-    }
-    vga_update_cursor();
-}
-
-/* Update a single HUD cell (e.g. a spinner character in the status row). */
-void OwHalVgaStatusSetChar(uint32_t Col, char c) {
-    volatile uint16_t* mem = VGA_MEMORY;
-    if (Col >= VGA_COLS) return;
-    mem[(uint32_t)VGA_STATUS_ROW * VGA_COLS + Col] =
-        (uint16_t)((0x1FU << 8) | (uint8_t)c);
-    vga_update_cursor();
-}
 
 /* Fill the entire text buffer with one attribute (used to clear the screen to
  * a flat background, e.g. black during the BANcode crash banner). */

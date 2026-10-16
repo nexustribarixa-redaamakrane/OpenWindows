@@ -92,8 +92,6 @@ void OwHalVgaInitialize(void) { }
 void OwHalVgaWriteChar(char c) { (void)c; }
 void OwHalVgaSetAttr(uint8_t Attr) { (void)Attr; }
 void OwHalVgaSetEnabled(bool Enabled) { (void)Enabled; }
-void OwHalVgaStatusBar(const char* Text) { (void)Text; }
-void OwHalVgaStatusSetChar(uint32_t col, char c) { (void)col; (void)c; }
 void OwHalVgaClearAll(uint8_t Attr) { (void)Attr; }
 void OwHalVgaDrawText(uint8_t Row, uint8_t Col, const char* Text, uint8_t Attr) {
     (void)Row; (void)Col; (void)Text; (void)Attr;

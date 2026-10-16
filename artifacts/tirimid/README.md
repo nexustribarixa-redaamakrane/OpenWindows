@@ -8,11 +8,12 @@ is signed with the public development key (`CIS_DEV_TRUST=1`). Read
 [`TESTER_NOTES.md`](TESTER_NOTES.md) before drawing conclusions from anything in
 this directory.
 
-> **Re-audited 2026-10-16** against commit `0bf3108` (clean tree) plus this
-> audit's `ow_strtoull` saturation fix. The shell `alloc`, `pwd` / `cd` /
-> `ls [dir]`, `sucs commit` and `status` behaviour documented below is unchanged
-> and still passes, the `make qemu` gate asserts **31** checks, and
-> `make hosttest` reports **980 passed, 0 failed**. See
+> **Re-audited 2026-10-16** against commit `8a4f4b8` plus this pass's
+> boot-console redesign (working tree, uncommitted). The shell `alloc`, `pwd` /
+> `cd` / `ls [dir]`, `sucs commit` and `status` behaviour documented below is
+> unchanged and still passes, the `make qemu` gate asserts **31** checks, and
+> `make CIS_DEV_TRUST=1 hosttest` reports **980 passed, 0 failed** (the
+> untrusted `make hosttest` reports 982). See
 > [`CHANGELOG.md`](CHANGELOG.md) for the full delta.
 
 ---
@@ -21,7 +22,7 @@ this directory.
 
 | Path | What it is |
 |---|---|
-| `images/openwinkrnl_tirimid_qemu.bin` | Flat kernel image, 272 KB, loaded with QEMU `-kernel` (no boot sector) |
+| `images/openwinkrnl_tirimid_qemu.bin` | Flat kernel image, 272,088 bytes, loaded with QEMU `-kernel` (no boot sector) |
 | `images/openwinkrnl_tirimid_floppy.flp` | 1.44 MB boot floppy (`stage1.S` + kernel), QEMU `-fda -boot a` |
 | `images/openwinkrnl_tirimid_disk.img` | 4 MB raw IDE disk (`stage1disk.S` LBA loader + kernel), QEMU `-drive -boot c` |
 | `images/openwinkrnl_tirimid_disk.vdi` | Same 4 MB disk converted to VirtualBox VDI format (booted and validated under VirtualBox 7.2.16) |
@@ -77,8 +78,9 @@ Host command used throughout (QEMU 11.1.0):
 this terminal while a window still shows the VGA screen. Press **Ctrl-A C** to
 switch to the QEMU monitor and **Ctrl-a x** to quit QEMU.
 
-Expected: the `O P E N W I N D O W S` boot-monitor banner, an auto-init script
-that prints the phase list, then the `ow-krnl>` shell prompt. Boot to prompt is
+Expected: the 11-line `OPENWINDOWS` wordmark pinned across text rows 0–10, the
+kernel log scrolling in rows 11–24 beneath it, an auto-init script that prints
+the phase list, then the `ow-krnl>` shell prompt. Boot to prompt is
 roughly **2–3 seconds** wall clock (the on-screen/log timestamps are not
 wall-clock — see `TESTER_NOTES.md` §4.2).
 
@@ -143,7 +145,7 @@ python tools\vgatext.py <outdir>\<name>.vgabin -o <outdir>\<name>.txt
 `tirimid_capture.ps1` boots one QEMU instance, drives the shell over serial and
 issues `stop` → `screendump` → `pmemsave 0xb8000 4000` → `cont` as a single
 monitor write, so each capture freezes the framebuffer at the instant it starts
-(the boot log scrolls off the 19-line log area in about two seconds).
+(the boot log scrolls off the 14-line log area in about two seconds).
 
 Windows paths are sent to the monitor with **forward slashes**: the QEMU monitor
 treats a backslash as a string escape.
@@ -152,10 +154,10 @@ treats a backslash as a string escape.
 
 | File | Guest state captured |
 |---|---|
-| `01-boot` | Boot-monitor banner, HUD `BOOT [......] 0%` — before the kernel log starts |
-| `01b-bootcomplete` | End of the boot log (`kernel boot complete`, scheduler start, `user-hello: process created (PID 2)`), HUD `100%` |
+| `01-boot` | The pinned 11-line wordmark, log area still empty — before the kernel log starts |
+| `01b-bootcomplete` | End of the boot log (`kernel boot complete`, scheduler start, `user-hello: process created (PID 2)`) |
 | `02-shell` | Auto-init script finished, `ow-krnl>` prompt |
-| `03-help` | Output of `help` (the long menu scrolls; only its lower half fits the 19-line log area) |
+| `03-help` | Output of `help` (the long menu scrolls; only its lower half fits the 14-line log area) |
 | `04-runlevel` | Output of `runlevel features` |
 | `05-fs` | Output of `fs list` (note `interop.txt`, written through the VFS facade, is now visible to the OWFS path) |
 | `06-sucs` | Output of `sucs` |
@@ -170,15 +172,16 @@ can be checked independently of the PNG render.
 
 ## 4. Provenance
 
-Source commit: `0bf3108` — "Refactor shell commands and improve VFS handling";
+Source commit: `8a4f4b8` — "audit: independent final audit on 2026-10-16";
 see `PROVENANCE.txt`.
 
 The three boot-enabling fixes this package originally shipped as *local*
 modifications — the ISA-reserved-window skip in `core/memory.c`, and the `.bss`
-zeroing in `boot/stage1.S` / `boot/stage1disk.S` — are **committed** (they landed
-before `0bf3108`). The working tree that produced this re-audit differs from
-`HEAD` only by the `ow_strtoull` saturation fix and the package regeneration
-listed in [`CHANGELOG.md`](CHANGELOG.md).
+zeroing in `boot/stage1.S` / `boot/stage1disk.S` — are **committed**. The
+working tree that produced this pass differs from `HEAD` by the boot-console
+redesign (`core/main.c`, `hal/htl.c`, `inc/ow_hal.h`,
+`tools/hosttest/host_hal.c`) and the package regeneration listed in
+[`CHANGELOG.md`](CHANGELOG.md).
 
 Build commands:
 
@@ -209,7 +212,7 @@ seeded test package.
 
 ## 5. Validation performed
 
-Re-audited 2026-10-16 (`0bf3108` plus the audit's `ow_strtoull` fix):
+Re-audited 2026-10-16 (`8a4f4b8` plus the working-tree boot-console redesign):
 
 | Check | Result |
 |---|---|
@@ -221,7 +224,8 @@ Re-audited 2026-10-16 (`0bf3108` plus the audit's `ow_strtoull` fix):
 | Floppy boot (`-fda -boot a`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | Disk boot (`-drive -boot c`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | **VirtualBox 7.2.16 VDI boot** | **PASS** — `ow-krnl>` prompt, `violations=0`, `[CIS] owinit: TRUSTED`, ACPI `OEM 'VBOX  '` |
-| Screenshot content (all 10) | PASS — every `.png`/`.txt` matches the state its caption describes. Corrected this audit: the previously committed `01b-bootcomplete` showed the shell banner/help rather than the boot-complete log; it was recaptured from a fresh boot and now matches |
+| Boot console layout | PASS — wordmark pinned in rows 0–10, kernel log scrolling in rows 11–24, no HUD/status row; read back from every `.vgabin` and the VirtualBox screenshot |
+| Screenshot content (all 10) | PASS — every `.png`/`.txt` matches the state its caption describes; all ten were recaptured for the boot-console redesign, and each `.txt` was decoded from its own raw `.vgabin` |
 | `lib/kstring.c` `ow_strtoull` overflow | PASS — saturates at `UINT64_MAX` (standard `strtoull`); covered by 6 new `hosttest` assertions |
 
 `make hosttest-asan` does **not** build on this host (the w64devkit toolchain

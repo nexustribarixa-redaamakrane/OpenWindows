@@ -32,7 +32,15 @@ artifacts under `artifacts/tirimid/`.
   (see §8) — and one pre-existing evidence defect: the committed
   `screenshots/01b-bootcomplete` had captured the shell banner rather than the
   boot-complete log, so it was recaptured. The production VDI and the package
-  were rebuilt from the fixed source (see "Final artefacts" below).
+  were rebuilt from the fixed source (see "Final artefacts" below). That work was
+  committed as `8a4f4b8`.
+* **Boot-console redesign (2026-10-16).** A follow-up pass replaced the boot
+  banner and the `BOOT [ … ] NN%` HUD with an 11-line `OPENWINDOWS` wordmark
+  pinned to text rows 0–10 (log rows 11–24, no HUD row). It touched presentation
+  only (`core/main.c`, `hal/htl.c`, `inc/ow_hal.h`, and the host stub in
+  `tools/hosttest/host_hal.c`); the gates were re-run (hosttest 982/0 untrusted
+  and 980/0 trusted, qemu 31, qemu-emergency 8) and the whole package was
+  regenerated (see "Final artefacts" below).
 * **Base commit.** The pass started at `db3fee3`. One unrelated commit landed
   during the pass, `b0ff4a4` ("Set explicit entry point for PE image"), which
   edits only the PE link line in `Makefile`/`CMakeLists.txt`; it touches none of
@@ -401,6 +409,27 @@ runlevel halt, ACPI S5, and the safe power-off screen) works. Unchanged.
   `openwinkrnl_tirimid_floppy.flp` `2749bde7…` (1,474,560 B);
   `openwinkrnl_tirimid_disk.img` `98bd1c04…` (4,194,304 B);
   `openwinkrnl_tirimid_disk.vdi` `ec045fbc…` (1,049,600 B).
+
+## Final artefacts (2026-10-16 boot-console redesign)
+
+* **Tirimid test package** `artifacts/tirimid/` — rebuilt on top of `8a4f4b8`
+  with the boot-console redesign: the four-line banner and the `BOOT [ … ] NN%`
+  HUD were replaced by an 11-line `OPENWINDOWS` wordmark pinned to rows 0–10,
+  with the kernel log scrolling in rows 11–24 (`core/main.c`, `hal/htl.c`,
+  `inc/ow_hal.h`). All four *seeded* images, all ten `screenshots/*` and the boot
+  transcripts were regenerated, the docs updated, and `MANIFEST.sha256`
+  regenerated. The wordmark is written through the console writer, so it also
+  heads every serial transcript. Current image SHA-256:
+  `openwinkrnl_tirimid_qemu.bin` `b16a6809…` (272,088 B);
+  `openwinkrnl_tirimid_floppy.flp` `c258b77d…` (1,474,560 B);
+  `openwinkrnl_tirimid_disk.img` `6a68b08a…` (4,194,304 B);
+  `openwinkrnl_tirimid_disk.vdi` `033a652e…` (1,049,600 B).
+  Gates re-run: `make hosttest` 982/0, `make CIS_DEV_TRUST=1 hosttest` 980/0,
+  `make CIS_DEV_TRUST=1 qemu` 31 checks, `make CIS_DEV_TRUST=1 qemu-emergency`
+  8 checks.
+* **Production VDI** `vbox/openwinkrnl.vdi` — not rebuilt in this pass: the
+  boot-console change is presentation only and does not touch the owinit gate
+  that image exercises.
 
 ## Honest limitations carried forward
 
