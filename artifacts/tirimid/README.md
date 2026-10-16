@@ -8,12 +8,12 @@ is signed with the public development key (`CIS_DEV_TRUST=1`). Read
 [`TESTER_NOTES.md`](TESTER_NOTES.md) before drawing conclusions from anything in
 this directory.
 
-> **Refreshed 2026-10-15** against commit `a1961d5` plus the uncommitted
-> testing-report fixes. The shell `alloc` command that previously failed on every
-> image now works, the previously missing navigation verbs (`pwd` / `cd` /
-> `ls [dir]`) and `sucs commit` are present, `status` reports the managed arena
-> and the firmware RAM separately, and the `make qemu` gate now asserts **31**
-> checks. See [`CHANGELOG.md`](CHANGELOG.md) for the full delta.
+> **Re-audited 2026-10-16** against commit `0bf3108` (clean tree) plus this
+> audit's `ow_strtoull` saturation fix. The shell `alloc`, `pwd` / `cd` /
+> `ls [dir]`, `sucs commit` and `status` behaviour documented below is unchanged
+> and still passes, the `make qemu` gate asserts **31** checks, and
+> `make hosttest` reports **980 passed, 0 failed**. See
+> [`CHANGELOG.md`](CHANGELOG.md) for the full delta.
 
 ---
 
@@ -170,13 +170,15 @@ can be checked independently of the PNG render.
 
 ## 4. Provenance
 
-Source commit: see `PROVENANCE.txt` (generated with this package).
+Source commit: `0bf3108` — "Refactor shell commands and improve VFS handling";
+see `PROVENANCE.txt`.
 
 The three boot-enabling fixes this package originally shipped as *local*
 modifications — the ISA-reserved-window skip in `core/memory.c`, and the `.bss`
-zeroing in `boot/stage1.S` / `boot/stage1disk.S` — are now **committed** in
-`a1961d5`. The working tree that produced this refresh differs from `HEAD` only
-by the testing-report fixes listed in [`CHANGELOG.md`](CHANGELOG.md).
+zeroing in `boot/stage1.S` / `boot/stage1disk.S` — are **committed** (they landed
+before `0bf3108`). The working tree that produced this re-audit differs from
+`HEAD` only by the `ow_strtoull` saturation fix and the package regeneration
+listed in [`CHANGELOG.md`](CHANGELOG.md).
 
 Build commands:
 
@@ -207,19 +209,20 @@ seeded test package.
 
 ## 5. Validation performed
 
-Refreshed 2026-10-15 (`a1961d5` plus the uncommitted testing-report fixes):
+Re-audited 2026-10-16 (`0bf3108` plus the audit's `ow_strtoull` fix):
 
 | Check | Result |
 |---|---|
 | `make CIS_DEV_TRUST=1 qemu` | PASS — **31 checks**, including ACPI S5 shutdown, the safe-power-off screen, and the fixed `alloc` / `ls <dir>` / `status` behaviour |
 | `make CIS_DEV_TRUST=1 qemu-emergency` | PASS — 8 checks |
-| `make CIS_DEV_TRUST=1 hosttest` | PASS — 974 passed, 0 failed |
+| `make CIS_DEV_TRUST=1 hosttest` | PASS — 980 passed, 0 failed |
 | `make CIS_DEV_TRUST=1 owx-entries` | PASS — 13 targets, 0 failures |
 | Kernel boot (`-kernel`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | Floppy boot (`-fda -boot a`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | Disk boot (`-drive -boot c`) | PASS — `ow-krnl>` prompt, `violations=0`, `user-hello` PID 2 |
 | **VirtualBox 7.2.16 VDI boot** | **PASS** — `ow-krnl>` prompt, `violations=0`, `[CIS] owinit: TRUSTED`, ACPI `OEM 'VBOX  '` |
-| Screenshot content (all 10) | PASS — each `.txt` matches the state it is captioned as |
+| Screenshot content (all 10) | PASS — every `.png`/`.txt` matches the state its caption describes. Corrected this audit: the previously committed `01b-bootcomplete` showed the shell banner/help rather than the boot-complete log; it was recaptured from a fresh boot and now matches |
+| `lib/kstring.c` `ow_strtoull` overflow | PASS — saturates at `UINT64_MAX` (standard `strtoull`); covered by 6 new `hosttest` assertions |
 
 `make hosttest-asan` does **not** build on this host (the w64devkit toolchain
 ships no ASAN runtime); that is pre-existing, not a regression, and its absence

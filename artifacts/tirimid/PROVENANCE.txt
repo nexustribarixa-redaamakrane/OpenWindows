@@ -1,30 +1,48 @@
 OpenWindows - Tirimid test package - PROVENANCE
 ================================================
 
-Produced:  2026-10-15 (refresh)
+Produced:  2026-10-16 (independent final audit)
 Host:      DESKTOP-GI1JNJN  Windows  PowerShell 7.6.7
 Repo:      C:\Users\KARIMABENDA\Documents\OpenWindows
-Commit:    a1961d5303a71abb2766be89a39022badee7d4dd
-Subject:   Refactor OWFS and VFS integration; enhance shell navigation and memory reporting
-Package:   2026-10-08 package, rebuilt 2026-10-15 (see CHANGELOG.md)
+Commit:    0bf3108e91e4de0ec8179cc250aba878db5ebfce
+Subject:   Refactor shell commands and improve VFS handling
+Package:   2026-10-08 package, rebuilt 2026-10-15, re-audited 2026-10-16
+           (see CHANGELOG.md)
 
-Working tree at packaging time (uncommitted, intentional — this refresh):
-   M shell/shell.c
-   M tools/qemu_run.ps1
+  NOTE: the tree was CLEAN (working tree with no source changes) at the start of
+  this audit, i.e. the 2026-10-15 testing-report fixes documented in the previous
+  refresh had been committed by the operator as 0bf3108. This audit adds one
+  further fix on top of that commit (see the working-tree list below and
+  CHANGELOG.md).
+
+Working tree at packaging time (uncommitted, intentional — this audit):
+   M lib/kstring.c
+   M tools/hosttest/host_boot.c
    M artifacts/tirimid/README.md
    M artifacts/tirimid/TESTER_NOTES.md
+   M artifacts/tirimid/CHANGELOG.md
+   M artifacts/tirimid/PROVENANCE.txt
+   M artifacts/tirimid/MANIFEST.sha256
    M artifacts/tirimid/images/openwinkrnl_tirimid_qemu.bin
    M artifacts/tirimid/images/openwinkrnl_tirimid_floppy.flp
    M artifacts/tirimid/images/openwinkrnl_tirimid_disk.img
    M artifacts/tirimid/images/openwinkrnl_tirimid_disk.vdi
-   M artifacts/tirimid/screenshots/*
-   M artifacts/tirimid/transcripts/*
-  ?? artifacts/tirimid/CHANGELOG.md
+   M artifacts/tirimid/screenshots/01b-bootcomplete.png
+   M artifacts/tirimid/screenshots/01b-bootcomplete.txt
+   M artifacts/tirimid/screenshots/01b-bootcomplete.vgabin
+   M docs/TIRIMID_FINDINGS.md
+   M vbox/openwinkrnl.vdi            (git-ignored, production, rebuilt)
 
   The three boot-enabling fixes this package originally shipped as local
   modifications (core/memory.c ISA-window skip; boot/stage1.S and
-  boot/stage1disk.S .bss zeroing) are now committed in a1961d5 and no longer
-  appear as local changes.
+  boot/stage1disk.S .bss zeroing) remain committed (landed before 0bf3108) and
+  do not appear as local changes.
+
+  This audit fix: lib/kstring.c ow_strtoull() now saturates at UINT64_MAX on
+  overflow (standard strtoull semantics) instead of wrapping.  Before the fix
+  `alloc 18446744073709551617` wrapped to 1 and allocated a single 4-KiB page
+  while reporting "(1 bytes)".  Regression: 6 new hosttest assertions in
+  tools/hosttest/host_boot.c.
 
 Toolchain:
   gcc      gcc.exe (GCC) 15.2.0
@@ -34,12 +52,19 @@ Toolchain:
   qemu-img qemu-img version 11.1.0 (v11.1.0-12130-ge470268ff4)
   vbox     VirtualBox 7.2.16r174877
 
-Build commands:
-  make CIS_DEV_TRUST=1 qemu          (flat -> images/openwinkrnl_tirimid_qemu.bin)
-  make CIS_DEV_TRUST=1 vbox-image    (floppy -> images/openwinkrnl_tirimid_floppy.flp)
-  make CIS_DEV_TRUST=1 owx-entries   (13 targets, 0 failures)
-  make CIS_DEV_TRUST=1 hosttest      (974 passed, 0 failed)
-  make CIS_DEV_TRUST=1 qemu-emergency(8 checks passed)
+Build commands (outputs land under %TEMP%, outside the repo tree):
+  make CIS_DEV_TRUST=1 qemu           -> %TEMP%\openwinkrnl_qemu\openwinkrnl_qemu.bin   (31 checks passed)
+  make CIS_DEV_TRUST=1 qemu-emergency -> %TEMP%\openwinkrnl_qemu\openwinkrnl_qemu_emergency.bin (8 checks passed)
+  make CIS_DEV_TRUST=1 vbox-image     -> %TEMP%\openwinkrnl_vbox\owx_boot.flp (stage1.S + seeded kernel)
+  make CIS_DEV_TRUST=1 hosttest       (980 passed, 0 failed)
+  make CIS_DEV_TRUST=1 owx-entries    (13 targets, 0 failures)
+
+Installed into this package (copied from the outputs above, except the disk
+images which are assembled then converted by qemu-img):
+  openwinkrnl_qemu.bin         -> images/openwinkrnl_tirimid_qemu.bin
+  owx_boot.flp                 -> images/openwinkrnl_tirimid_floppy.flp
+  openwinkrnl_tirimid_disk.img -> images/openwinkrnl_tirimid_disk.img
+  openwinkrnl_tirimid_disk.vdi -> images/openwinkrnl_tirimid_disk.vdi
 
 Disk image recipe (seeded kernel, not the program-free `make vdi` output):
   nasm -f bin -w-no-error=label-redef-late -w-label-redef-late boot\stage1disk.S -o stage1disk.bin

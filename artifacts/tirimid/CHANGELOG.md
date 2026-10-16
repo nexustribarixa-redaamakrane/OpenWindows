@@ -5,6 +5,70 @@ All dates are 2026. Every file in this package is covered by
 
 ---
 
+## 2026-10-16 — independent final audit (commit `0bf3108`)
+
+The 2026-10-15 fixes below were committed by the operator as `0bf3108`
+("Refactor shell commands and improve VFS handling"); the tree was clean at the
+start of this audit. One further genuine defect was found and fixed, and the
+package was rebuilt from the fixed source.
+
+### Fix in this audit
+
+- `lib/kstring.c` `ow_strtoull()` silently wrapped on overflow. A decimal or hex
+  literal greater than `UINT64_MAX` (for example `alloc 18446744073709551617`)
+  wrapped to a small value, so the size guard in the `alloc` handler never saw
+  it: the shell allocated one spurious 4-KiB page and printed
+  `[OK] Allocated 1 page(s) (1 bytes)`. It now saturates at `UINT64_MAX`
+  (standard `strtoull` semantics), and the existing "too large to size" guard
+  rejects the request. Regression: 6 assertions added to
+  `tools/hosttest/host_boot.c` (hosttest 974 → 980 passed).
+
+### Images (rebuilt from the fixed source)
+
+| Image | Note |
+|---|---|
+| `images/openwinkrnl_tirimid_qemu.bin` | 272,064 bytes (unchanged size) |
+| `images/openwinkrnl_tirimid_floppy.flp` | rebuilt from `stage1.S` + seeded kernel |
+| `images/openwinkrnl_tirimid_disk.img` | rebuilt from `stage1disk.S` + seeded kernel, 4 MB |
+| `images/openwinkrnl_tirimid_disk.vdi` | same disk converted with `qemu-img` |
+
+The unseeded production image `vbox/openwinkrnl.vdi` (git-ignored, not part of
+this package) was rebuilt too and re-passed the 8-check `U+11A005` owinit gate.
+
+### Captures
+
+- `screenshots/01b-bootcomplete` (`.png`/`.txt`/`.vgabin`) was **recaptured**:
+  the previously committed copy showed the shell banner/help, not the
+  boot-complete log its caption claims. The other eight captures were
+  re-generated from a fresh boot and compared bit-for-bit against the committed
+  copies; all were identical, so the committed ones were kept.
+- The boot-only transcripts (`02`/`03`/`05`) reproduce byte-for-byte apart from
+  the SeaBIOS/iPXE pre-boot lines and `[ N.NNN]` timestamps, so the committed
+  copies were retained.
+- A fresh VirtualBox 7.2.16 boot of the rebuilt **seeded** VDI (a temp copy, so
+  the packaged `.vdi` is untouched) reproduced the same serial transcript
+  (`ow-krnl>`, `violations=0`, `[CIS] owinit: TRUSTED`, `user-hello`, no halt).
+  `screenshots/09-vbox-boot.png` is retained unchanged: the guest screen is
+  identical in the re-generated QEMU captures, and a VirtualBox PNG is not a raw
+  `0xB8000` dump, so (as before) only its serial transcript is content-checked,
+  not the PNG pixels.
+
+### Validation for this audit
+
+| Check | Result |
+|---|---|
+| `make CIS_DEV_TRUST=1 qemu` | PASS — 31 checks |
+| `make CIS_DEV_TRUST=1 qemu-emergency` | PASS — 8 checks |
+| `make CIS_DEV_TRUST=1 hosttest` | PASS — 980 passed, 0 failed |
+| `make CIS_DEV_TRUST=1 owx-entries` | PASS — 13 targets, 0 failures |
+| `make CIS_DEV_TRUST=1 vdi` (production, unseeded) | PASS — 8-check `U+11A005` owinit gate |
+| VirtualBox 7.2.16 VDI boot | PASS |
+
+`make hosttest-asan` still cannot build on this host (no ASAN runtime in
+w64devkit); unchanged.
+
+---
+
 ## 2026-10-15 — refresh for the testing-report fixes
 
 Rebuilt every image and every capture against commit `a1961d5` plus the

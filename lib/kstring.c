@@ -124,7 +124,15 @@ uint64_t ow_strtoull(const char* s, char** end, uint32_t base) {
         else if (*s >= 'A' && *s <= 'F') digit = 10 + (uint64_t)(*s - 'A');
         else break;
         if (digit >= base) break;
-        result = result * base + digit;
+        /* Saturate on overflow, as strtoull does: a literal larger than
+         * UINT64_MAX must read back as UINT64_MAX, not as an arbitrary low
+         * value.  Without this, `alloc 18446744073709551617` wrapped to 1,
+         * allocated a single page, and reported "(1 bytes)". */
+        if (result > (((uint64_t)-1 - digit) / base)) {
+            result = (uint64_t)-1;
+        } else {
+            result = result * base + digit;
+        }
         s++;
     }
     if (end) *end = (char*)s;

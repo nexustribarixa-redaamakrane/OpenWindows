@@ -79,6 +79,22 @@ See `screenshots/07-alloc.txt`. A near-`UINT64_MAX` size is now refused up front
 reported a misleading "frame allocator refused"). Both behaviours are asserted
 by the `make qemu` gate.
 
+**Follow-up defect — fixed 2026-10-16.** An independent final audit found a
+second, deeper bug behind the same command: the decimal/hex parser
+`ow_strtoull()` (`lib/kstring.c`) silently **wrapped** on values greater than
+`UINT64_MAX`, so the size never reached the guard above:
+
+```
+ow-krnl> alloc 18446744073709551617
+[OK] Allocated 1 page(s) (1 bytes) at 0x186000; pool 283/4096 pages used
+```
+
+The wrapped value (`1`) passed every check and allocated a spurious 4-KiB page
+while reporting a nonsense size. `ow_strtoull()` now **saturates at `UINT64_MAX`**
+(standard `strtoull` semantics), so the existing "too large to size" guard sees
+the true value and rejects it. Regression: 6 assertions added to
+`tools/hosttest/host_boot.c`.
+
 ### 4.2 Kernel timestamps are not wall-clock
 
 `hal/htl.c:484` `OwHalDelayMs()` programs PIT channel 2 with divisor 1193
@@ -161,7 +177,7 @@ well as through the userspace OWX loader.
 - Userspace `.owx` policy + license enforcement, wired through the OWX loader:
   `OwCisVerifyImage()` is called from `ps/owx_loader.c:399`.
 - The host-side CIS policy engine: `make CIS_DEV_TRUST=1 hosttest` reports
-  **974 passed, 0 failed**, including `kernel_mit_refused produces
+  **980 passed, 0 failed**, including `kernel_mit_refused produces
   REJECT_POLICY`.
 - Kernel **checksum** verification at boot: `core/main.c:751` calls
   `OwSentinelVerifyKernelChecksum()` (SHA-256 against `openwinkrnl.chk`). This
@@ -242,7 +258,7 @@ the 2026-10-15 refresh:
   artefact and is deliberately not distributed inside this seeded package — the
   packaged disk image is still built from the seeded floppy kernel.
 
-`make CIS_DEV_TRUST=1 hosttest` **was** also run: **974 passed, 0 failed**. It
+`make CIS_DEV_TRUST=1 hosttest` **was** also run: **980 passed, 0 failed**. It
 drives the CIS policy engine on the host and is the evidence that the engine
 refuses a non-GPL kernel *when the verifier is invoked* — even though, as §4.4
 records, the live boot path does not currently invoke it.
@@ -262,9 +278,19 @@ fails and scripts must be given the full path.
   prompt in ~2–3 s and the 19-line log area scrolls the boot log away. An
   earlier attempt without the freeze produced three identical frames; the
   current frames are all distinct and content-checked.
+- `01b-bootcomplete` was **recaptured in the 2026-10-16 audit**: the previously
+  committed copy had captured the shell banner/help instead of the
+  boot-complete log, contradicting its caption. A fresh capture reproduces the
+  boot-complete frame; the committed copy now matches its caption. The other
+  eight captures were regenerated and found bit-identical to the committed
+  copies, so they were left as they were.
 - `09-vbox-boot.png` is a VirtualBox `screenshotpng` capture of the same disk
   image, provided as independent evidence that the QEMU screen is not a
-  QEMU-specific artefact.
+  QEMU-specific artefact. A fresh VirtualBox boot of the rebuilt image in the
+  2026-10-16 audit produced the identical serial transcript (`ow-krnl>`,
+  `violations=0`, `[CIS] owinit: TRUSTED`, no halt); the PNG is retained because
+  a VirtualBox screenshot is not a raw `0xB8000` dump and so is not
+  programmatically content-checked (only the serial transcript is).
 - The VGA console is an 80×25 mirror of the serial log (rows 0–3 logo, 4–22
   log, 24 HUD). It is a text buffer, not a compositor — there is no graphical
   window system on screen.

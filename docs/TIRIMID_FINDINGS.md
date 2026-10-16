@@ -12,8 +12,8 @@ artifacts under `artifacts/tirimid/`.
 * **Then fix, then re-test on the same command.** Final interactive transcript:
   `%TEMP%\ow_probe_final.txt`; runlevel-6 transcript: `%TEMP%\ow_probe_rl6.txt`.
 * **Regression gates** (both must stay green):
-  * `make hosttest CIS_DEV_TRUST=1` — **974 passed, 0 failed**
-    (961 before the prior pass; +13 new assertions).
+  * `make hosttest CIS_DEV_TRUST=1` — **980 passed, 0 failed**
+    (961 before the prior pass; +13 there, +6 in the 2026-10-16 audit).
   * `make qemu CIS_DEV_TRUST=1` — **QEMU BOOT VALIDATION PASSED (31 checks)**
     (18 before the prior pass; +10 there, +3 in this follow-up pass).
   * `make qemu-emergency CIS_DEV_TRUST=1` — 8 checks passed.
@@ -24,6 +24,15 @@ artifacts under `artifacts/tirimid/`.
   count to zero and produced a misleading "frame allocator refused". The
   production VDI and the Tirimid test package were rebuilt and re-validated (see
   "Final artefacts" below).
+* **Independent final audit (2026-10-16).** The 2026-10-15 fixes were committed
+  as `0bf3108` ("Refactor shell commands and improve VFS handling"), so the audit
+  started from a **clean** tree at that commit. Re-running the gates reproduced
+  them (qemu 31, qemu-emergency 8, hosttest 980, vdi-test 8, owx-entries 13). One
+  further genuine defect was found and fixed — `ow_strtoull()` integer overflow
+  (see §8) — and one pre-existing evidence defect: the committed
+  `screenshots/01b-bootcomplete` had captured the shell banner rather than the
+  boot-complete log, so it was recaptured. The production VDI and the package
+  were rebuilt from the fixed source (see "Final artefacts" below).
 * **Base commit.** The pass started at `db3fee3`. One unrelated commit landed
   during the pass, `b0ff4a4` ("Set explicit entry point for PE image"), which
   edits only the PE link line in `Makefile`/`CMakeLists.txt`; it touches none of
@@ -185,6 +194,31 @@ ow-krnl> alloc 18446744073709551615
 Regression: `make qemu` additionally asserts
 `[FAIL] alloc 18446744073709551615 bytes: request is too large to size`.
 
+**Audit follow-up (2026-10-16) — the guard was still bypassable.** The
+"too large to size" guard only fires for a value that reaches it. A literal
+**greater** than `UINT64_MAX` never did: `ow_strtoull()` (`lib/kstring.c`)
+silently **wrapped** on overflow, so `alloc 18446744073709551617` parsed as `1`,
+passed every check, and allocated a single spurious 4-KiB page while reporting a
+nonsense size:
+
+```
+ow-krnl> alloc 18446744073709551617
+[OK] Allocated 1 page(s) (1 bytes) at 0x186000; pool 282/4096 pages used
+```
+
+**Fix.** `ow_strtoull()` now **saturates** at `UINT64_MAX` on overflow
+(standard `strtoull` semantics), so the existing guard sees an oversized value
+and rejects it:
+
+```
+ow-krnl> alloc 18446744073709551617
+[FAIL] alloc 18446744073709551617 bytes: request is too large to size
+```
+
+Regression: 6 assertions added to `tools/hosttest/host_boot.c` covering decimal
+overflow, hex overflow, and the boundaries (`UINT64_MAX` and `UINT64_MAX - 1`
+must still parse exactly).
+
 ### 11. SUCS mode — 🟥 → 🟩 (with a documented limit)
 
 **Observed at HEAD.** `sucs ext` → `[SUCS] request: staged, reboot required`, and
@@ -332,7 +366,8 @@ runlevel halt, ACPI S5, and the safe power-off screen) works. Unchanged.
 | `core/memory.c` / `inc/ow_memory.h` | firmware-RAM reporting API; multiboot `mem_upper` parse |
 | `boot/qemu_entry.c` | forward `(magic, mbi)` to the memory manager |
 | `lib/sucs.c` / `inc/ow_ecosys.h` | `OwSucsCommitNow`; request keys off committed mode |
-| `tools/hosttest/host_boot.c` | +13 assertions (firmware parse, SUCS live commit/reversibility) |
+| `lib/kstring.c` | `ow_strtoull()` saturates at `UINT64_MAX` on overflow (2026-10-16 audit) |
+| `tools/hosttest/host_boot.c` | +13 assertions (firmware parse, SUCS live commit/reversibility); +6 more in the audit (`ow_strtoull` overflow/boundaries) |
 | `tools/qemu_run.ps1` | +13 asserted auto-init markers (10 before this pass, +3) |
 
 ## Final artefacts (2026-10-15)
@@ -350,6 +385,22 @@ runlevel halt, ACPI S5, and the safe power-off screen) works. Unchanged.
   entries). See the package `CHANGELOG.md`. Verified: the kernel, floppy, disk
   and VirtualBox VDI boots all reach `ow-krnl>`; the refreshed
   `make CIS_DEV_TRUST=1 qemu` report passes 31 checks.
+
+## Final artefacts (2026-10-16 independent audit)
+
+* **Production VDI** `vbox/openwinkrnl.vdi` — rebuilt program-free (no
+  `$(TEST_SEED_OBJS)`) from `0bf3108` plus the `ow_strtoull` fix. SHA-256
+  `95992c81304d9c378a37c85386b04ba55862b74572cd07c368575de6bdf2a7ac`,
+  1,049,600 bytes. Validated with `tools/vdi_run.ps1` → **8 checks**: it reaches
+  the expected owinit gate (`U+11A005`, `[FATAL] SYSTEM HALTED`, `state ABSENT`).
+  Local git-ignored artefact, deliberately not committed.
+* **Tirimid test package** `artifacts/tirimid/` — all four *seeded* images
+  rebuilt from the fixed source, `01b-bootcomplete` recaptured, docs updated and
+  `MANIFEST.sha256` regenerated. Image SHA-256:
+  `openwinkrnl_tirimid_qemu.bin` `7defe2c6…` (272,064 B);
+  `openwinkrnl_tirimid_floppy.flp` `2749bde7…` (1,474,560 B);
+  `openwinkrnl_tirimid_disk.img` `98bd1c04…` (4,194,304 B);
+  `openwinkrnl_tirimid_disk.vdi` `ec045fbc…` (1,049,600 B).
 
 ## Honest limitations carried forward
 

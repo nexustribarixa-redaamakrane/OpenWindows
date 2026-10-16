@@ -2,24 +2,24 @@
                         O P E N W I N D O W S
                      Kernel 0.1.0 - Boot Monitor
 ===================================================================
-[AUDIT] user window 4000000-4200000: 5 VAD(s), 1 guard VAD(s), 1 code page(s), 0
- NX data page(s), NXE=1, violations=0
-[USER] standalone Ring 3 hello application queued
-[KBD] PS/2 keyboard detected (port 0x60, scancode set 1)
-
-========================================================================
-            OpenWindows DEBUG SYSTEM CONTROL SHELL
-========================================================================
-Commands:
-  help              - Display this menu
-  status            - Dump system state
-  runlevel          - Show current runlevel & config
-  runlevel list     - List all runlevel profiles (-6..6)
-  runlevel features - Show armed feature set
-  runlevel features - Show armed feature set
-  runlevel set <n>  - Switch runlevel (-6..6)
-  alloc <size>      - Allocate kernel frame pages (4 KiB each)
-  load <path> <tier>- Load driver (1/2/3)
-  pwd / cwd         - Print the current working directory
-  cd <dir|..|/>     - Change the current working directory
+[     69.856] [VIP] UniVIP registry online, root volume 0 @ LBA 131200...
+[     71.554] [VIP] FVIP root volume index compiled...
+[SENTINEL] Active Defense vectors registered.
+[     75.036] [SENT] active defense armed...
+[     76.478] [SENT] integrity chains bound...
+[SYSCALL] Ring 3-to-0 gateway active.
+[SYNC] event '_st-event' created
+[SYNC] semaphore '_st-sem' created (state 1, limit 1)
+[SYNC] mutex '_st-mtx' created
+[SELFTEST SYNC] OK (event/semaphore/mutex)
+[SELFTEST DPC] OK (insert/cancel/drain)
+[     80.368] [SYSC] system call table installed...
+[     81.952] [SYSC] gateway ready...
+[     85.556] [INIT] handing off to shell 'sh' as init process...
+[     87.014] [BOOT] kernel boot complete in 87014 ms...
+[PS] boot context captured (thread 0)
+[FINISHED] PS Scheduler (code 0x11AC10)
+[PS] scheduler started (100 Hz)
+[PS] user-hello: process created (PID 2)
+[
 OpenWindows Kernel 0.1.0   BOOT [####################################]  100%

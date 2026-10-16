@@ -4042,6 +4042,8 @@ static void test_banhammer_cli_core(void) {
  *      environment, so EXTENDED was unreachable.  OwSucsCommitNow() must apply
  *      the staged mode, and requesting a mode must key off the *committed*
  *      mode, otherwise a second switch (back to BASE) is impossible. */
+uint64_t ow_strtoull(const char *s, char **end, uint32_t base);
+
 static void test_report_regressions(void) {
   printf("\n=== Testing-report regressions ===\n");
 
@@ -4072,6 +4074,37 @@ static void test_report_regressions(void) {
     OwMemSetBootInfo(0xDEADBEEFu, (uint64_t)(uintptr_t)mbi);
     check_window("a wrong bootloader magic is ignored",
                  OwMemFirmwareBytes() == 268435456ull, true);
+  }
+
+  {
+    /* ow_strtoull() must saturate at UINT64_MAX instead of wrapping, so a
+     * decimal size above the 64-bit range is refused by the shell's alloc guard
+     * rather than silently wrapping to a tiny allocation.  Before this it
+     * wrapped: `alloc 18446744073709551617` produced a 1-page "success". */
+    check_window("strtoull(UINT64_MAX) is exact",
+                 ow_strtoull("18446744073709551615", (char **)0, 10) ==
+                     UINT64_MAX,
+                 true);
+    check_window("strtoull(UINT64_MAX + 1) saturates",
+                 ow_strtoull("18446744073709551616", (char **)0, 10) ==
+                     UINT64_MAX,
+                 true);
+    check_window("strtoull(UINT64_MAX + 2) saturates",
+                 ow_strtoull("18446744073709551617", (char **)0, 10) ==
+                     UINT64_MAX,
+                 true);
+    check_window("strtoull(21 nines) saturates",
+                 ow_strtoull("999999999999999999999", (char **)0, 10) ==
+                     UINT64_MAX,
+                 true);
+    check_window("strtoull(0xFFFFFFFFFFFFFFFF) is exact",
+                 ow_strtoull("0xFFFFFFFFFFFFFFFF", (char **)0, 16) ==
+                     UINT64_MAX,
+                 true);
+    check_window("strtoull(0x10000000000000000) saturates",
+                 ow_strtoull("0x10000000000000000", (char **)0, 16) ==
+                     UINT64_MAX,
+                 true);
   }
 
   {
