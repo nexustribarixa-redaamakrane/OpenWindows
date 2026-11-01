@@ -55,12 +55,13 @@
  * On refusal the return is one of the negative OW_SYS_VFS_E* codes below (or the
  * generic -1 the dispatcher uses for an unknown/not-ready request).  They are
  * distinct so a Ring 3 caller can tell a permission refusal from a bad pointer
- * from a missing file. */
+ * from a missing file from a name that exceeded the gateway's bounded scan. */
 #define OW_SYS_VFS_EINVAL       (-2)   /* NULL name/buffer, or cap == 0        */
 #define OW_SYS_VFS_EFAULT       (-3)   /* name/buffer not mapped for this proc */
 #define OW_SYS_VFS_EACCES       (-4)   /* OWFS permission denied (mode)        */
 #define OW_SYS_VFS_ENOENT       (-5)   /* no such file, or hidden from caller  */
 #define OW_SYS_VFS_EIO          (-6)   /* backend I/O error / corrupt volume   */
+#define OW_SYS_VFS_ENAMETOOLONG (-7)   /* name did not fit the user ceiling    */
 
 /* Load and enter a named OWX1 image from the primary OWFS volume as a new
  * process.  This is what makes the emergency userspace work: owinitv.owx is

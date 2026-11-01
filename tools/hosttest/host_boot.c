@@ -46,6 +46,9 @@ int test_cis_verify_run(int* out_passed);
 /* Implemented in host_cis_loader.c.  Same counter discipline: its failure count
  * is added to main()'s, never folded into it. */
 int test_cis_loader_run(int* out_passed);
+/* Implemented in host_skto_name.c.  SKTO name admission at the syscall
+ * gateway's kernel boundary (SUAS-018). */
+int test_skto_name_run(int* out_passed);
 
 #include "../../inc/ow_ecosys.h"
 #include "../../inc/ow_hal.h"
@@ -4838,6 +4841,16 @@ int main(int argc, char **argv) {
    * means the corpus has just been walked once, so a fixture the verifier
    * already rejected is not being re-litigated here for a different reason. */
   g_failures += test_cis_loader_run(&sub_passed);
+  g_passed  += sub_passed;
+
+  /* ------------------------------------------------------------------ */
+  /* SKTO name admission at the kernel boundary                          */
+  /* ------------------------------------------------------------------ */
+
+  /* The adapter the syscall gateway now calls.  Host-only: the containment
+   * callback runs against a real VAD tree, but no CPL3 transition happens in
+   * this harness, so this is not a Ring 3 syscall test. */
+  g_failures += test_skto_name_run(&sub_passed);
   g_passed  += sub_passed;
 
   /* ------------------------------------------------------------------ */

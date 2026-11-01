@@ -92,6 +92,14 @@ OW_STATUS OwFsOwfsCreateRestricted(const char* name, uint16_t permissions,
                                    uint8_t security_flags,
                                    const uint8_t* data, uint32_t len);
 
+/* Change the owning principal of an existing file.  This is a metadata
+ * operation, not a permission bypass: it lets a provisioner that runs as the
+ * superuser hand a file to an unprivileged principal so that principal can
+ * exercise its own owner rights.  The caller is responsible for being entitled
+ * to change ownership; the kernel's provisioning paths call it while running as
+ * root.  The inode checksum is recomputed so the change is durable. */
+OW_STATUS OwFsOwfsSetOwner(const char* name, uint16_t uid, uint16_t gid);
+
 OW_STATUS OwFsOwfsWrite(const char* name, const uint8_t* data, uint32_t len);
 OW_STATUS OwFsOwfsRead(const char* name, uint8_t* buf, uint32_t cap,
                        uint32_t* out_read);

@@ -277,6 +277,28 @@ uint32_t OwFsOwfsFreeBlocks(void) {
     return g_owfs_formatted ? g_owfs_sb.free_blocks : 0u;
 }
 
+OW_STATUS OwFsOwfsSetOwner(const char* name, uint16_t uid, uint16_t gid) {
+    htl_device_t* dev;
+    owfs_inode_t inode;
+    uint32_t ino = 0;
+    owfs_status_t st;
+
+    if (!name) return (OW_STATUS)OWFS_ERR_INVALID_PARAM;
+    if (!g_owfs_formatted || !g_owfs_mounted) return (OW_STATUS)OWFS_ERR_IO;
+    dev = OwHalGetPrimaryDisk();
+    st = owfs_catalog_lookup(dev, &g_owfs_sb, OWFS_ROOT_INODE,
+                             (const uint8_t*)name, (size_t)ow_strlen(name),
+                             &ino);
+    if (st != OWFS_OK) return map_owfs(st);
+    st = owfs_inode_read(dev, &g_owfs_sb, ino, &inode);
+    if (st != OWFS_OK) return map_owfs(st);
+    inode.owner_uid = uid;
+    inode.owner_gid = gid;
+    inode.checksum = owfs_inode_compute_checksum(&inode);
+    st = owfs_inode_write(dev, &g_owfs_sb, ino, &inode);
+    return map_owfs(st);
+}
+
 OW_STATUS OwFsUsfsFormat(const uint8_t* label, uint32_t label_len) {
     htl_device_t* dev;
     usfs_status_t st;

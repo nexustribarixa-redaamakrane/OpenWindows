@@ -94,8 +94,13 @@ OW_STATUS OwFsCatalogLookup(htl_device_t* Dev, uint32_t ParentInode, const char*
     uint8_t block[4096];
     uint32_t entries_per_block;
     uint32_t i, j;
+    ow_skto_name_t admitted;
+    skto_status_t sst;
 
     if (!Dev || !Name || !OutEntry) return OW_ERR_NULL_POINTER;
+
+    sst = OwSktoNameAdmitTrusted(&admitted, Name, sizeof(((OW_FS_CATALOG_ENTRY*)0)->Name));
+    if (sst != SKTO_OK) return OW_ERR_INVALID_PARAM;
 
     if (!ow_status_success(OwFsInodeRead(Dev, ParentInode, &parent_inode))) return OW_ERR_IO;
 
@@ -105,7 +110,7 @@ OW_STATUS OwFsCatalogLookup(htl_device_t* Dev, uint32_t ParentInode, const char*
         if (!ow_status_success(OwFsBlockRead(Dev, parent_inode.DirectBlocks[i], block))) continue;
         for (j = 0; j < entries_per_block; j++) {
             OW_FS_CATALOG_ENTRY* e = (OW_FS_CATALOG_ENTRY*)(block + j * sizeof(OW_FS_CATALOG_ENTRY));
-            if (e->EntryType != OW_FS_ENTRY_DELETED && ow_strcmp(e->Name, Name) == 0) {
+            if (e->EntryType != OW_FS_ENTRY_DELETED && ow_strcmp(e->Name, OwSktoNameCstr(&admitted)) == 0) {
                 ow_memcpy(OutEntry, e, sizeof(OW_FS_CATALOG_ENTRY));
                 return OW_SUCCESS;
             }
@@ -119,8 +124,17 @@ OW_STATUS OwFsCatalogInsert(htl_device_t* Dev, uint32_t ParentInode, const char*
     uint8_t block[4096];
     uint32_t entries_per_block;
     uint32_t i, j;
+    ow_skto_name_t admitted;
+    skto_status_t sst;
 
     if (!Dev || !Name) return OW_ERR_NULL_POINTER;
+
+    /* Validate candidate name: must be valid SUTF-8, bounded by catalog field,
+     * no silent truncation. */
+    sst = OwSktoNameAdmitTrusted(&admitted, Name, sizeof(((OW_FS_CATALOG_ENTRY*)0)->Name));
+    if (sst != SKTO_OK) {
+        return OW_ERR_INVALID_PARAM;
+    }
 
     if (!ow_status_success(OwFsInodeRead(Dev, ParentInode, &parent_inode))) return OW_ERR_IO;
 
@@ -132,7 +146,7 @@ OW_STATUS OwFsCatalogInsert(htl_device_t* Dev, uint32_t ParentInode, const char*
             OW_FS_CATALOG_ENTRY* e = (OW_FS_CATALOG_ENTRY*)(block + j * sizeof(OW_FS_CATALOG_ENTRY));
             if (e->EntryType == 0 || e->EntryType == OW_FS_ENTRY_DELETED) {
                 ow_memset(e, 0, sizeof(OW_FS_CATALOG_ENTRY));
-                ow_strncpy(e->Name, Name, 223);
+                ow_memcpy(e->Name, OwSktoNameCstr(&admitted), OwSktoNameLength(&admitted) + 1);
                 e->InodeNumber = InodeNum;
                 e->EntryType = Type;
                 e->SecurityFlags = 0;
@@ -207,10 +221,199 @@ OW_STATUS OwFsBitmapFreeBlock(htl_device_t* Dev, uint32_t BlockNum) {
  * CRC32c contract that the crash-dump writer and the packer both pin against,
  * and the block/inode/catalog helpers document the historical layout.  They are
  * no longer reachable from the facade. */
+static skto_name_table_t g_vfs_skto_table;
+static ow_skto_irq_lock_t g_vfs_skto_lock;
+static bool g_vfs_skto_ready = false;
+
 OW_STATUS OwVfsInitialize(void) {
     g_primary_mounted = false;
     g_secure_mounted = false;
+    g_vfs_skto_lock.flags = 0;
+    if (suas_skto_names_init_locked(&g_vfs_skto_table, OwSktoLockAcquire,
+                                    OwSktoLockRelease, &g_vfs_skto_lock) == SKTO_OK) {
+        g_vfs_skto_ready = true;
+    }
     return OW_SUCCESS;
+}
+
+static bool vfs_skto_ensure(void) {
+    skto_status_t st;
+
+    if (g_vfs_skto_ready) return true;
+    g_vfs_skto_lock.flags = 0;
+    st = suas_skto_names_init_locked(&g_vfs_skto_table, OwSktoLockAcquire,
+                                     OwSktoLockRelease, &g_vfs_skto_lock);
+    if (st != SKTO_OK) return false;
+    g_vfs_skto_ready = true;
+    return true;
+}
+
+OW_STATUS OwVfsPublishName(const ow_skto_name_t* Name, uint32_t* OutGeneration) {
+    skto_status_t st;
+    if (!Name || !Name->text.bytes) return OW_ERR_INVALID_PARAM;
+    if (!vfs_skto_ensure()) return OW_ERR_NOT_INITIALIZED;
+    st = suas_skto_publish(&g_vfs_skto_table, &Name->text, NULL, OutGeneration);
+    if (st == SKTO_E_BUSY || st == SKTO_E_FULL) return OW_ERR_INSUFFICIENT;
+    if (st != SKTO_OK) return OW_ERR_INVALID_PARAM;
+    return OW_SUCCESS;
+}
+
+/* Withdraw an already-admitted name from the advisory lookup index. This is
+ * the teardown half of publication: a successful delete must stop the name
+ * from resolving even though a reader may still hold an older snapshot. */
+OW_STATUS OwVfsRetireNameSkto(const ow_skto_name_t* Name) {
+    skto_status_t st;
+    if (!Name || !Name->text.bytes) return OW_ERR_NULL_POINTER;
+    if (!g_vfs_skto_ready) return OW_ERR_NOT_INITIALIZED;
+    st = suas_skto_retire(&g_vfs_skto_table, &Name->text);
+    if (st == SKTO_OK) return OW_SUCCESS;
+    if (st == SKTO_E_NOTFOUND) return OW_ERR_NOT_FOUND;
+    return OW_ERR_INVALID_PARAM;
+}
+
+OW_STATUS OwVfsRetireName(const char* Path) {
+    ow_skto_name_t admitted;
+    skto_status_t st;
+    if (!Path) return OW_ERR_NULL_POINTER;
+    st = OwSktoNameAdmitTrusted(&admitted, Path, OW_SKTO_NAME_STORAGE_BYTES);
+    if (st != SKTO_OK) return OW_ERR_INVALID_PARAM;
+    return OwVfsRetireNameSkto(&admitted);
+}
+
+OW_STATUS OwVfsReleaseSnapshot(const skto_text_t* Snapshot) {
+    skto_status_t st;
+    if (!Snapshot || !g_vfs_skto_ready) return OW_ERR_INVALID_PARAM;
+    st = suas_skto_name_release(&g_vfs_skto_table, Snapshot);
+    return (st == SKTO_OK) ? OW_SUCCESS : OW_ERR_INVALID_PARAM;
+}
+
+/* Resolve an already-admitted name against the index. A hit is verified on
+ * disk before its snapshot is returned. A miss is verified on disk and then
+ * published, so the index follows files that predate this boot. Publication
+ * failure (the bounded index is full, or a replacement record is still held)
+ * is reported as OW_ERR_INSUFFICIENT; callers treat the index as advisory and
+ * continue on the direct path rather than failing the operation. */
+OW_STATUS OwVfsLookupSnapshotSkto(const ow_skto_name_t* Name,
+                                  skto_text_t* OutSnapshot, uint32_t* OutInode) {
+    skto_status_t sst;
+    uint32_t gen = 0;
+    OW_STATUS ost;
+    uint32_t ino = 0;
+
+    if (!Name || !Name->text.bytes || !OutSnapshot) return OW_ERR_NULL_POINTER;
+    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
+    if (!vfs_skto_ensure()) return OW_ERR_NOT_INITIALIZED;
+
+    /* Try to resolve an existing published snapshot */
+    sst = suas_skto_resolve(&g_vfs_skto_table, &Name->text, &gen, OutSnapshot);
+    if (sst == SKTO_OK) {
+        /* In table: verify on disk using snapshot */
+        ost = OwFsOwfsLookupIn(OwFsOwfsRootInode(), (const char*)OutSnapshot->bytes, &ino, NULL);
+        if (!ow_status_success(ost)) {
+            suas_skto_name_release(&g_vfs_skto_table, OutSnapshot);
+            return ost;
+        }
+    } else if (sst == SKTO_E_NOTFOUND) {
+        /* Not yet in table: verify on primary disk first */
+        ost = OwFsOwfsLookupIn(OwFsOwfsRootInode(), OwSktoNameCstr(Name), &ino, NULL);
+        if (!ow_status_success(ost)) {
+            return ost;
+        }
+        /* Found on disk: publish to VFS table and acquire snapshot */
+        sst = suas_skto_publish(&g_vfs_skto_table, &Name->text, NULL, &gen);
+        if (sst != SKTO_OK) {
+            return OW_ERR_INSUFFICIENT;
+        }
+        sst = suas_skto_resolve(&g_vfs_skto_table, &Name->text, &gen, OutSnapshot);
+        if (sst != SKTO_OK) {
+            return OW_ERR_INSUFFICIENT;
+        }
+    } else {
+        return OW_ERR_INVALID_PARAM;
+    }
+
+    if (OutInode) *OutInode = ino;
+    return OW_SUCCESS;
+}
+
+OW_STATUS OwVfsLookupSnapshot(const char* Path, skto_range_fn Range, void* RangeCtx,
+                             skto_text_t* OutSnapshot, uint32_t* OutInode) {
+    ow_skto_name_t admitted;
+    skto_status_t sst;
+
+    if (!Path || !OutSnapshot) return OW_ERR_NULL_POINTER;
+    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
+
+    if (Range != NULL) {
+        sst = OwSktoNameAdmitUser(&admitted, Path, OW_SKTO_NAME_STORAGE_BYTES, Range, RangeCtx);
+    } else {
+        sst = OwSktoNameAdmitTrusted(&admitted, Path, OW_SKTO_NAME_STORAGE_BYTES);
+    }
+    if (sst != SKTO_OK) {
+        return OW_ERR_INVALID_PARAM;
+    }
+
+    return OwVfsLookupSnapshotSkto(&admitted, OutSnapshot, OutInode);
+}
+
+OW_STATUS OwVfsCreateFileSkto(const ow_skto_name_t* Name, uint32_t Attrs) {
+    uint32_t inode_num = 0;
+    OW_STATUS st;
+    (void)Attrs;
+    if (!Name || !Name->text.bytes) return OW_ERR_NULL_POINTER;
+    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
+    st = OwFsOwfsCreate(OwSktoNameCstr(Name), &inode_num);
+    /* Publication follows the namespace, not the syscall: any successful
+     * create through this facade makes the name resolvable through the
+     * advisory index. The index is bounded, so a full table does not fail the
+     * create; readers fall back to the direct path. An already-existing name
+     * is published on its first read instead. */
+    if (ow_status_success(st)) {
+        (void)OwVfsPublishName(Name, NULL);
+    }
+    return st;
+}
+
+OW_STATUS OwVfsWriteFileSkto(const ow_skto_name_t* Name, const uint8_t* Buffer, uint32_t Size) {
+    if (!Name || !Name->text.bytes || !Buffer) return OW_ERR_NULL_POINTER;
+    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
+    return OwFsOwfsWrite(OwSktoNameCstr(Name), Buffer, Size);
+}
+
+uint32_t OwVfsReadFileSkto(const ow_skto_name_t* Name, uint8_t* Buffer, uint32_t MaxSize) {
+    skto_text_t snapshot;
+    uint32_t ino = 0;
+    const char* read_name;
+    bool have_snapshot = false;
+    uint32_t got = 0;
+    if (!Name || !Name->text.bytes || !Buffer || MaxSize == 0) return 0;
+    if (!g_primary_mounted) return 0;
+
+    /* Consume the publication index when it can resolve the name. A miss or a
+     * full table is advisory only: the direct name read below still runs. */
+    read_name = OwSktoNameCstr(Name);
+    if (ow_status_success(OwVfsLookupSnapshotSkto(Name, &snapshot, &ino))) {
+        read_name = (const char*)snapshot.bytes;
+        have_snapshot = true;
+    }
+
+    if (!ow_status_success(OwFsOwfsRead(read_name, Buffer, MaxSize, &got))) got = 0;
+    if (have_snapshot) (void)OwVfsReleaseSnapshot(&snapshot);
+    return got;
+}
+
+OW_STATUS OwVfsDeleteFileSkto(const ow_skto_name_t* Name) {
+    OW_STATUS st;
+    if (!Name || !Name->text.bytes) return OW_ERR_NULL_POINTER;
+    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
+    st = OwFsOwfsDelete(OwSktoNameCstr(Name));
+    /* The namespace is the source of truth; the index must not keep resolving
+     * a name the disk has already removed. A missing index entry is expected
+     * (the file may predate this boot) and is not a delete failure. */
+    if (ow_status_success(st)) {
+        (void)OwVfsRetireNameSkto(Name);
+    }
+    return st;
 }
 
 OW_STATUS OwVfsMountPrimary(void) {
@@ -242,33 +445,39 @@ OW_STATUS OwVfsMountSecure(void) {
 }
 
 OW_STATUS OwVfsCreateFile(const char* Path, uint32_t Attrs) {
-    uint32_t inode_num = 0;
-    (void)Attrs;
-
+    ow_skto_name_t admitted;
+    skto_status_t st;
     if (!Path) return OW_ERR_NULL_POINTER;
-    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
-    return OwFsOwfsCreate(Path, &inode_num);
+    st = OwSktoNameAdmitTrusted(&admitted, Path, OW_SKTO_NAME_STORAGE_BYTES);
+    if (st != SKTO_OK) return OW_ERR_INVALID_PARAM;
+    return OwVfsCreateFileSkto(&admitted, Attrs);
 }
 
 OW_STATUS OwVfsWriteFile(const char* Path, const uint8_t* Buffer, uint32_t Size) {
+    ow_skto_name_t admitted;
+    skto_status_t st;
     if (!Path || !Buffer) return OW_ERR_NULL_POINTER;
-    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
-    return OwFsOwfsWrite(Path, Buffer, Size);
+    st = OwSktoNameAdmitTrusted(&admitted, Path, OW_SKTO_NAME_STORAGE_BYTES);
+    if (st != SKTO_OK) return OW_ERR_INVALID_PARAM;
+    return OwVfsWriteFileSkto(&admitted, Buffer, Size);
 }
 
 uint32_t OwVfsReadFile(const char* Path, uint8_t* Buffer, uint32_t MaxSize) {
-    uint32_t got = 0;
-
+    ow_skto_name_t admitted;
+    skto_status_t st;
     if (!Path || !Buffer || MaxSize == 0) return 0;
-    if (!g_primary_mounted) return 0;
-    if (!ow_status_success(OwFsOwfsRead(Path, Buffer, MaxSize, &got))) return 0;
-    return got;
+    st = OwSktoNameAdmitTrusted(&admitted, Path, OW_SKTO_NAME_STORAGE_BYTES);
+    if (st != SKTO_OK) return 0;
+    return OwVfsReadFileSkto(&admitted, Buffer, MaxSize);
 }
 
 OW_STATUS OwVfsDeleteFile(const char* Path) {
+    ow_skto_name_t admitted;
+    skto_status_t st;
     if (!Path) return OW_ERR_NULL_POINTER;
-    if (!g_primary_mounted) return OW_ERR_NOT_INITIALIZED;
-    return OwFsOwfsDelete(Path);
+    st = OwSktoNameAdmitTrusted(&admitted, Path, OW_SKTO_NAME_STORAGE_BYTES);
+    if (st != SKTO_OK) return OW_ERR_INVALID_PARAM;
+    return OwVfsDeleteFileSkto(&admitted);
 }
 
 bool OwVfsIsPrimaryMounted(void) {

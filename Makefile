@@ -8,7 +8,7 @@ CC = gcc
 CFLAGS = -std=c99 -ffreestanding -nostdlib -fno-stack-protector -fno-pie \
          -Wall -Wextra -Werror \
          -I./inc -I./inc/bancode \
-         -I../superunicode/sutf/include -I../vip \
+         -I../superunicode/sutf/include -I../superunicode/include -I../vip \
          -I../OpenWindows-Storage/common/include \
          -I../OpenWindows-Storage/owfs/include \
          -I../OpenWindows-Storage/usfs/include -g
@@ -16,6 +16,7 @@ CFLAGS = -std=c99 -ffreestanding -nostdlib -fno-stack-protector -fno-pie \
 # Ecosystem source directories
 BANCODE_DIR = ./bancode
 SUTF_DIR    = ../superunicode/sutf
+SUAS_DIR    = ../superunicode
 VIP_DIR     = ../vip
 STORAGE_COMMON_DIR = ../OpenWindows-Storage/common
 OWFS_DIR    = ../OpenWindows-Storage/owfs
@@ -62,7 +63,8 @@ SENT_OBJS    = sentinel/damagecntrl.o \
                sentinel/fltrmgr.o
 CIS_OBJS     = cis/cis_core.o cis/cis_format.o cis/cis_verify.o
 SYSCALL_OBJS = syscall/dispatcher.o
-KAPI_OBJS    = kapi/kernel64.o
+KAPI_OBJS    = kapi/kernel64.o \
+               kapi/ow_skto_name.o
 SHELL_OBJS   = shell/shell.o
 
 # Object files - Libraries
@@ -89,6 +91,9 @@ BANCODE_OBJS = bancode/bancode.o \
 # Object files - Ecosystem (superunicode SUTF)
 SUC_OBJS = sucs/sutf8.o \
            sucs/sucs_mode.o
+
+# Object files - Ecosystem (superunicode SUAS: SKTO name admission)
+SUAS_OBJS = suas/suas_skto.o
 
 # Object files - Ecosystem (vip UniVIP/FVIP)
 VIP_OBJS = vip/univip_fvip.o
@@ -128,7 +133,7 @@ ALL_OBJS = $(CORE_OBJS) $(HAL_OBJS) $(RC_OBJS) $(PS_OBJS) $(SYNC_OBJS) $(DPC_OBJ
            $(DIAG_OBJS) $(VFS_OBJS) \
            $(NET_OBJS) $(SENT_OBJS) $(CIS_OBJS) $(SYSCALL_OBJS) $(KAPI_OBJS) \
            $(SHELL_OBJS) $(LIB_OBJS) $(BANCODE_OBJS) \
-           $(SUC_OBJS) $(VIP_OBJS) \
+           $(SUC_OBJS) $(SUAS_OBJS) $(VIP_OBJS) \
            $(STOR_COMMON_OBJS) $(OWFS_OBJS) $(USFS_OBJS) $(STOR_CORE_OBJS)
 
 # Intermediate image
@@ -294,6 +299,11 @@ bancode/%.o: $(BANCODE_DIR)/%.c
 # superunicode SUTF ecosystem (compiled from sibling repo)
 sucs/%.o: $(SUTF_DIR)/src/%.c
 	@mkdir -p sucs
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# superunicode SUAS ecosystem (compiled from sibling repo)
+suas/%.o: $(SUAS_DIR)/src/suas/%.c
+	@mkdir -p suas
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # vip UniVIP/FVIP ecosystem (compiled from sibling repo)
@@ -1032,13 +1042,15 @@ HOSTTEST_SRC = tools/hosttest/host_hal.c \
                tools/hosttest/host_boot.c \
                tools/hosttest/host_cis_verify.c \
                tools/hosttest/host_cis_loader.c \
+               tools/hosttest/host_skto_name.c \
                core/main.c core/object.c core/memory.c core/pgfault.c \
                core/alpc.c core/runlevel.c \
                rc/rc.c hal/acpi.c \
                diag/bancode_krnl.c vfs/vfs.c net/router.c net/vip.c \
 sentinel/damagecntrl.c sentinel/fltrmgr.c \
                 cis/cis_core.c cis/cis_format.c cis/cis_verify.c \
-                syscall/dispatcher.c kapi/kernel64.c shell/shell.c \
+                syscall/dispatcher.c kapi/kernel64.c \
+                kapi/ow_skto_name.c shell/shell.c \
                 lib/ow_htl.c lib/kmem.c lib/kstring.c lib/kprintf.c \
                 lib/kalloc.c lib/sucs.c lib/ow_sha256.c \
                 lib/ow_sha512.c lib/ow_ed25519.c storage/owdisk.c \
@@ -1046,6 +1058,7 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
                $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sucs_mode.c \
+               $(SUAS_DIR)/src/suas/suas_skto.c \
                $(VIP_DIR)/univip_fvip.c \
                $(STORAGE_COMMON_DIR)/src/ow_checksum.c \
                $(STORAGE_COMMON_DIR)/src/ow_sec.c \
@@ -1073,7 +1086,7 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
 # CMake can resolve the same include against its own generated copy; the two build
 # systems must therefore agree on the name, not on a relative path.
 HOSTTEST_INCLUDES = -I./boot -I./inc -I./inc/bancode -I$(BANCODE_DIR) \
-                    -I../superunicode/sutf/include -I../vip \
+                    -I../superunicode/sutf/include -I../superunicode/include -I../vip \
                     -I../OpenWindows-Storage/common/include \
                     -I../OpenWindows-Storage/owfs/include \
                     -I../OpenWindows-Storage/usfs/include \

@@ -322,7 +322,14 @@ if (-not $Emergency) {
         "[OK] Written to 'interop.txt'.",
         "via-vfs-facade",
         "[FS] read 'interop.txt' (14 bytes):",
-        "[SUCS] committed: active=EXTENDED"
+        "[SUCS] committed: active=EXTENDED",
+        # The standalone CPL3 application proves the syscall gateway from the
+        # other side: it runs as UID 1000, writes and reads back a file it owns
+        # over int 0x80, and the refused create/delete are decided against that
+        # identity rather than the kernel's ambient root.
+        "[USER] standalone Ring 3 hello application queued",
+        "Hello from Ring 3!",
+        "Ring 3 VFS: OK"
     )
 }
 

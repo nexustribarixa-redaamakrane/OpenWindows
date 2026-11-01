@@ -87,6 +87,7 @@ add_custom_target(owinit_image DEPENDS ${OWINIT_HEADER})
 
 # Ecosystem root directories
 set(SUTF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/sutf")
+set(SUAS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode")
 set(VIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vip")
 set(STORAGE_COMMON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/common")
 set(OWFS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/owfs")
@@ -100,6 +101,7 @@ set(OW_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/inc/bancode
     ${CMAKE_CURRENT_SOURCE_DIR}/bancode
     ${SUTF_DIR}/include
+    ${SUAS_DIR}/include
     ${VIP_DIR}
     ${STORAGE_COMMON_DIR}/include
     ${OWFS_DIR}/include
@@ -132,6 +134,11 @@ set(KERNEL_COMMON_SOURCES
     sync/ow_sync.c
     syscall/dispatcher.c
     kapi/kernel64.c
+    # SKTO name admission for the syscall gateway (SUAS-018).  The adapter is
+    # kernel-side and freestanding; the SUAS implementation is shared with the
+    # host harness so both exercise exactly the same admission code.
+    kapi/ow_skto_name.c
+    ${SUAS_DIR}/src/suas/suas_skto.c
     shell/shell.c
     ps/ps.c
     ps/switch.S
@@ -413,6 +420,7 @@ set(HOSTTEST_SOURCES
     # requirement, not an optional extra -- without it the harness does not build.
     tools/hosttest/host_cis_verify.c
     tools/hosttest/host_cis_loader.c
+    tools/hosttest/host_skto_name.c
     ${KERNEL_COMMON_SOURCES}
     ${OWINIT_HEADER}
     # The harness audits and mounts all three userspace images, so the emergency

@@ -49,6 +49,8 @@ typedef struct _OW_FS_CATALOG_ENTRY {
     uint32_t    Checksum;
 } OW_FS_CATALOG_ENTRY;
 
+#include "../kapi/ow_skto_name.h"
+
 OW_STATUS    OwVfsInitialize(void);
 OW_STATUS    OwVfsMountPrimary(void);
 OW_STATUS    OwVfsMountSecure(void);
@@ -60,6 +62,20 @@ bool         OwVfsIsPrimaryMounted(void);
 bool         OwVfsIsSecureMounted(void);
 uint32_t     OwVfsSecureFreeBlocks(void);
 OW_STATUS    OwVfsSecurePurge(void);
+
+/* SKTO VFS integration (SUAS-018) */
+OW_STATUS    OwVfsCreateFileSkto(const ow_skto_name_t* Name, uint32_t Attrs);
+OW_STATUS    OwVfsWriteFileSkto(const ow_skto_name_t* Name, const uint8_t* Buffer, uint32_t Size);
+uint32_t     OwVfsReadFileSkto(const ow_skto_name_t* Name, uint8_t* Buffer, uint32_t MaxSize);
+OW_STATUS    OwVfsDeleteFileSkto(const ow_skto_name_t* Name);
+OW_STATUS    OwVfsPublishName(const ow_skto_name_t* Name, uint32_t* OutGeneration);
+OW_STATUS    OwVfsRetireName(const char* Path);
+OW_STATUS    OwVfsRetireNameSkto(const ow_skto_name_t* Name);
+OW_STATUS    OwVfsLookupSnapshot(const char* Path, skto_range_fn Range, void* RangeCtx,
+                                 skto_text_t* OutSnapshot, uint32_t* OutInode);
+OW_STATUS    OwVfsLookupSnapshotSkto(const ow_skto_name_t* Name,
+                                     skto_text_t* OutSnapshot, uint32_t* OutInode);
+OW_STATUS    OwVfsReleaseSnapshot(const skto_text_t* Snapshot);
 
 /* OWFS internal */
 OW_STATUS    OwFsSuperblockRead(htl_device_t* Dev, OW_FS_SUPERBLOCK* Sb);

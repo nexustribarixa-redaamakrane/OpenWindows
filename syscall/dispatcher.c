@@ -11,11 +11,21 @@
 #include "../inc/ow_sync.h"
 #include "../inc/ow_syscall.h"
 #include "../inc/ow_vfs.h"
+#include "../kapi/ow_skto_name.h"
 #include "../storage/owdisk.h"
 #include "ow_sec.h"
 #include "owfs_types.h"
 
 static bool g_syscall_ready = false;
+
+/* Non-zero while an in-kernel wrapper (OwApi*) is inside the dispatcher.
+ *
+ * The same dispatcher serves two callers that need different treatment of a
+ * name pointer: the Ring 3 gateway, whose pointers are untrusted and must be
+ * validated against the caller's VAD tree, and the kernel's own OwApi*
+ * wrappers, which pass kernel-owned pointers that are not in the user window.
+ * The interrupt gate cannot set this flag; only syscall_call_kernel() does. */
+static uint32_t g_kernel_call_depth = 0u;
 
 /* Resolve the process that owns the syscall.  Every user-supplied pointer in
  * this file is validated against THIS process's VAD tree and page tables, so
@@ -33,42 +43,10 @@ static OW_PROCESS_OBJECT *syscall_current_process(void) {
 /* ====================================================================== */
 /* Staging pools for the spawn path.  Static, as everywhere else in this kernel:
  * there is no heap to carve out of, and a syscall cannot ask the caller for
- * scratch space it might not have. */
-static char s_spawn_name[OW_USERSPACE_NAME_MAX];
+ * scratch space it might not have.  The image name itself is admitted into an
+ * ow_skto_name_t by the caller; this pool holds only the image bytes. */
 static char s_spawn_proc[OW_USERSPACE_NAME_MAX];
 static uint8_t s_spawn_image[OW_USERSPACE_IMAGE_MAX];
-
-/* Bounded copy of a caller-supplied NUL-terminated name.
- *
- * The bound is the point.  Every other name-taking call in this gateway walks
- * the pointer until it finds a NUL with no limit, which is tolerable for a
- * trusted caller and a fault for an untrusted one; this copy stops at the
- * buffer, so a caller that supplies an unterminated string gets a truncated
- * name that fails to resolve rather than a walk off the end of its own window.
- *
- * Returns false when the name did not fit, i.e. when it was longer than the
- * longest legal root-catalog entry, so truncation is never mistaken for a
- * valid name that merely happens to resolve. */
-static bool spawn_copy_name(char *dst, size_t cap, const char *src) {
-  size_t i;
-
-  if (dst == NULL || cap == 0u)
-    return false;
-  if (src == NULL) {
-    dst[0] = '\0';
-    return false;
-  }
-
-  for (i = 0u; i + 1u < cap; ++i) {
-    if (src[i] == '\0') {
-      dst[i] = '\0';
-      return true;
-    }
-    dst[i] = src[i];
-  }
-  dst[cap - 1u] = '\0';
-  return false;
-}
 
 /* Derive the process object's name from the image file name: "owrs.owx" ->
  * "owrs".  The kernel's PS logs read "[PS] <name>: process created", so a name
@@ -84,22 +62,20 @@ static void spawn_proc_name(char *dst, size_t cap, const char *image) {
 }
 
 /* Load an OWX1 image from the primary volume and enter it as a new process
- * parented to the caller.  Shared by the boot-time hand-off in core/main.c and
- * by OW_SYS_PS_SPAWN_OWX, so the emergency userspace's owrs is loaded by exactly
- * the same path that loads owinit. */
+ * parented to the caller.  `image_name` has already been admitted by SKTO: it
+ * is complete, bounded, NUL-terminated, and belongs to the kernel's own copy.
+ * The boot-time hand-off in core/main.c has its own loader and does not call
+ * this function. */
 static OW_PROCESS_OBJECT *spawn_owx_image(const char *image_name,
                                           uint32_t parent_pid) {
   uint32_t len = 0u;
   OW_PROCESS_OBJECT *proc;
   OW_STATUS st;
 
-  if (!spawn_copy_name(s_spawn_name, sizeof(s_spawn_name), image_name))
-    return (OW_PROCESS_OBJECT *)0;
-
-  st = OwFsOwfsRead(s_spawn_name, s_spawn_image,
+  st = OwFsOwfsRead(image_name, s_spawn_image,
                     (uint32_t)sizeof(s_spawn_image), &len);
   if (!ow_status_success(st) || len == 0u) {
-    ow_kprintf("[SPAWN] %s: read failed (st=0x%X, len=%u)\r\n", s_spawn_name,
+    ow_kprintf("[SPAWN] %s: read failed (st=0x%X, len=%u)\r\n", image_name,
                (unsigned)st, (unsigned)len);
     return (OW_PROCESS_OBJECT *)0;
   }
@@ -110,11 +86,11 @@ static OW_PROCESS_OBJECT *spawn_owx_image(const char *image_name,
   if (!OwOwxImageIsLoadable(
           (const owx_header_t *)(const void *)s_spawn_image, len)) {
     ow_kprintf("[SPAWN] %s: not a loadable OWX1 image (%u bytes)\r\n",
-               s_spawn_name, (unsigned)len);
+               image_name, (unsigned)len);
     return (OW_PROCESS_OBJECT *)0;
   }
 
-  spawn_proc_name(s_spawn_proc, sizeof(s_spawn_proc), s_spawn_name);
+  spawn_proc_name(s_spawn_proc, sizeof(s_spawn_proc), image_name);
 
   proc = OwPsCreateProcess(s_spawn_proc, parent_pid);
   if (proc == NULL)
@@ -148,13 +124,8 @@ static OW_PROCESS_OBJECT *spawn_owx_image(const char *image_name,
 }
 
 /* ====================================================================== */
-/* OW_SYS_VFS_READ support                                                */
+/* Name admission at the gateway                                          */
 /* ====================================================================== */
-/* Staging name for the read path.  A read cannot ask the caller for scratch, so
- * like the spawn path it copies the caller's name into a fixed kernel buffer
- * before resolving it. */
-static char s_read_name[OW_USERSPACE_NAME_MAX];
-
 /* True when [Va, Va+Len) lies wholly inside ranges the process has claimed in
  * its own VAD tree, and inside the guarded user window.
  *
@@ -184,37 +155,78 @@ static bool syscall_user_range(OW_PROCESS_OBJECT *Proc, uint64_t Va,
   return true;
 }
 
-/* Copy a caller-supplied NUL-terminated name into `Dst`, validating each page
- * against the caller's address space as the copy crosses into it.  A name that
- * is not terminated within `Cap`, or that walks into memory the caller does not
- * own, is rejected rather than truncated into a string that happens to resolve.
- * This is the untrusted-caller counterpart of spawn_copy_name. */
-static bool syscall_copy_name(char *Dst, size_t Cap, OW_PROCESS_OBJECT *Proc,
-                              uint64_t Src) {
-  size_t i;
+typedef struct _SYSCALL_NAME_RANGE {
+  OW_PROCESS_OBJECT *process;
+} SYSCALL_NAME_RANGE;
 
-  if (Dst == NULL || Cap == 0u || Proc == NULL)
+/* SKTO containment callback. It is the same real VAD/window predicate the
+ * gateway has always used, reached through the callback the adapter requires
+ * instead of being duplicated inside the adapter. */
+static bool syscall_name_range(void *ctx, const void *base, size_t len) {
+  SYSCALL_NAME_RANGE *range = (SYSCALL_NAME_RANGE *)ctx;
+
+  if (range == NULL)
     return false;
-
-  for (i = 0u; i + 1u < Cap; ++i) {
-    char c;
-    if ((i & (OW_PAGE_SIZE - 1u)) == 0u) {
-      if (!syscall_user_range(Proc, Src + (uint64_t)i, 1u)) {
-        Dst[i] = '\0';
-        return false;
-      }
-    }
-    c = *(const char *)(uintptr_t)(Src + (uint64_t)i);
-    if (c == '\0') {
-      Dst[i] = '\0';
-      return true;
-    }
-    Dst[i] = c;
-  }
-
-  Dst[Cap - 1u] = '\0';
-  return false;
+  return syscall_user_range(range->process, (uint64_t)(uintptr_t)base,
+                            (uint64_t)len);
 }
+
+/* Admit one name for a syscall. Ring 3 pointers are contained by the caller's
+ * VAD tree; kernel wrappers are allowed to pass kernel-owned storage because
+ * g_kernel_call_depth can only be set below the interrupt gate. Both paths use
+ * the same OWFS/USFS ceiling and SUTF-8 validation. */
+static skto_status_t syscall_admit_name(ow_skto_name_t *name,
+                                        const char *src,
+                                        OW_PROCESS_OBJECT *proc) {
+  SYSCALL_NAME_RANGE range;
+
+  if (g_kernel_call_depth != 0u)
+    return OwSktoNameAdmitTrusted(name, src, OW_SKTO_NAME_STORAGE_BYTES);
+  if (proc == NULL)
+    return SKTO_E_NULL;
+
+  range.process = proc;
+  return OwSktoNameAdmitUser(name, src, OW_USERSPACE_NAME_MAX,
+                             syscall_name_range, &range);
+}
+
+/* Map an admission failure onto the OW_SYS_VFS_E* space. A name that did not
+ * terminate inside the gateway's user ceiling is distinguishable from a
+ * pointer the caller does not own, so Ring 3 can tell "too long" from "bad
+ * pointer" without guessing from a generic I/O error. */
+static int64_t syscall_name_error(skto_status_t st) {
+  switch (st) {
+  case SKTO_E_NULL:
+  case SKTO_E_ENCODING:
+  case SKTO_E_INADMISSIBLE:
+  case SKTO_E_POLICY:
+    return (int64_t)OW_SYS_VFS_EINVAL;
+  case SKTO_E_RANGE:
+    return (int64_t)OW_SYS_VFS_EFAULT;
+  case SKTO_E_TERMINATOR:
+  case SKTO_E_OVERFLOW:
+  case SKTO_E_CAPACITY:
+    return (int64_t)OW_SYS_VFS_ENAMETOOLONG;
+  default:
+    return (int64_t)OW_SYS_VFS_EIO;
+  }
+}
+
+/* Enter the dispatcher on behalf of an in-kernel OwApi* wrapper. The depth
+ * counter is what tells syscall_admit_name that the pointer is kernel-owned;
+ * it is not reachable from the interrupt gate. Single CPU, and a wrapper is
+ * never re-entered from inside a syscall handler, so a plain counter is
+ * sufficient; it is not a concurrency primitive. */
+static int64_t syscall_call_kernel(uint32_t id, uint64_t p1, uint64_t p2,
+                                   uint64_t p3) {
+  int64_t result;
+
+  ++g_kernel_call_depth;
+  result = OwSyscallDispatch(id, p1, p2, p3);
+  --g_kernel_call_depth;
+  return result;
+}
+
 
 OW_STATUS OwSyscallInitialize(void) {
   g_syscall_ready = true;
@@ -294,15 +306,72 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
   }
   case OW_SYS_MAP_IO:
     return (int64_t)(uintptr_t)OwHalMapMmio(P1, (uint32_t)P2);
-  case OW_SYS_VFS_CREATE:
-    return ow_status_success(OwVfsCreateFile((const char *)P1, (uint32_t)P2))
-               ? 1
-               : 0;
-  case OW_SYS_VFS_WRITE:
-    return ow_status_success(OwVfsWriteFile((const char *)P1,
-                                            (const uint8_t *)P2, (uint32_t)P3))
-               ? 1
-               : 0;
+  case OW_SYS_VFS_CREATE: {
+    ow_skto_name_t name;
+    OW_PROCESS_OBJECT *proc = syscall_current_process();
+    skto_status_t nst =
+        syscall_admit_name(&name, (const char *)(uintptr_t)P1, proc);
+    ow_identity_t caller_id;
+    ow_identity_t saved_id;
+    OW_STATUS st;
+
+    if (nst != SKTO_OK)
+      return syscall_name_error(nst);
+
+    /* Create under the caller's identity, exactly as read does. OWFS stamps
+     * owner_uid/owner_gid on a new inode from the ambient identity, so creating
+     * as root would leave an unprivileged caller unable to write or delete the
+     * file it just created. The identity is restored before returning. */
+    if (proc != NULL) {
+      caller_id.uid = proc->Uid;
+      caller_id.gid = proc->Gid;
+      saved_id = ow_sec_current();
+      ow_sec_set_identity(&caller_id);
+      st = OwVfsCreateFile(OwSktoNameCstr(&name), (uint32_t)P2);
+      ow_sec_set_identity(&saved_id);
+    } else {
+      st = OwVfsCreateFile(OwSktoNameCstr(&name), (uint32_t)P2);
+    }
+    return ow_status_success(st) ? 1 : 0;
+  }
+  case OW_SYS_VFS_WRITE: {
+    ow_skto_name_t name;
+    OW_PROCESS_OBJECT *proc = syscall_current_process();
+    const uint8_t *buffer = (const uint8_t *)(uintptr_t)P2;
+    uint32_t size = (uint32_t)P3;
+    skto_status_t nst =
+        syscall_admit_name(&name, (const char *)(uintptr_t)P1, proc);
+
+    if (nst != SKTO_OK)
+      return syscall_name_error(nst);
+    /* The payload is a second untrusted range on this same boundary. A write
+     * that validated the name but walked a forged data pointer would still let
+     * the kernel read memory the caller does not own. */
+    if (g_kernel_call_depth == 0u && size != 0u &&
+        !syscall_user_range(proc, (uint64_t)(uintptr_t)buffer, (uint64_t)size))
+      return (int64_t)OW_SYS_VFS_EFAULT;
+
+    /* Write under the caller's identity. OWFS checks OW_ACCESS_WRITE against
+     * the inode owner/mode, so an unprivileged caller must not inherit the
+     * kernel's ambient superuser identity for the duration of the write. */
+    {
+      ow_identity_t caller_id;
+      ow_identity_t saved_id;
+      OW_STATUS st;
+
+      if (proc != NULL) {
+        caller_id.uid = proc->Uid;
+        caller_id.gid = proc->Gid;
+        saved_id = ow_sec_current();
+        ow_sec_set_identity(&caller_id);
+        st = OwVfsWriteFile(OwSktoNameCstr(&name), buffer, size);
+        ow_sec_set_identity(&saved_id);
+      } else {
+        st = OwVfsWriteFile(OwSktoNameCstr(&name), buffer, size);
+      }
+      return ow_status_success(st) ? 1 : 0;
+    }
+  }
   case OW_SYS_VFS_READ: {
     /* Serve a read from the primary OWFS volume, not the in-kernel legacy VFS.
      *
@@ -313,10 +382,15 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
      * a check about the caller.  The identity and its permissions are restored
      * before returning so the swap cannot leak into the rest of the kernel. */
     OW_PROCESS_OBJECT *proc = syscall_current_process();
+    ow_skto_name_t name;
+    skto_text_t snapshot;
+    bool have_snapshot = false;
     const char *user_name;
+    const char *read_name;
     uint8_t *user_buf;
     uint32_t cap;
     uint32_t got = 0;
+    skto_status_t nst;
     ow_identity_t caller_id;
     ow_identity_t saved_id;
     OW_STATUS st;
@@ -331,19 +405,32 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
     if (user_name == NULL || user_buf == NULL || cap == 0u)
       return (int64_t)OW_SYS_VFS_EINVAL;
 
-    if (!syscall_user_range(proc, (uint64_t)(uintptr_t)user_buf, (uint64_t)cap))
+    if (g_kernel_call_depth == 0u &&
+        !syscall_user_range(proc, (uint64_t)(uintptr_t)user_buf, (uint64_t)cap))
       return (int64_t)OW_SYS_VFS_EFAULT;
 
-    if (!syscall_copy_name(s_read_name, sizeof(s_read_name), proc,
-                           (uint64_t)(uintptr_t)user_name))
-      return (int64_t)OW_SYS_VFS_EFAULT;
+    nst = syscall_admit_name(&name, user_name, proc);
+    if (nst != SKTO_OK)
+      return syscall_name_error(nst);
+
+    /* Consume the VFS publication index when it can resolve the admitted name.
+     * The index is advisory: a miss, a full table, or an unmounted volume all
+     * fall through to the direct read, which still makes the access decision
+     * against the caller's own identity below. */
+    read_name = OwSktoNameCstr(&name);
+    if (ow_status_success(OwVfsLookupSnapshotSkto(&name, &snapshot, NULL))) {
+      read_name = (const char *)snapshot.bytes;
+      have_snapshot = true;
+    }
 
     caller_id.uid = proc->Uid;
     caller_id.gid = proc->Gid;
     saved_id = ow_sec_current();
     ow_sec_set_identity(&caller_id);
-    st = OwFsOwfsReadOffset(s_read_name, user_buf, 0u, cap, &got);
+    st = OwFsOwfsReadOffset(read_name, user_buf, 0u, cap, &got);
     ow_sec_set_identity(&saved_id);
+    if (have_snapshot)
+      (void)OwVfsReleaseSnapshot(&snapshot);
 
     if (ow_status_success(st))
       return (int64_t)got;
@@ -353,10 +440,42 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
       return (int64_t)OW_SYS_VFS_ENOENT;
     return (int64_t)OW_SYS_VFS_EIO;
   }
-  case OW_SYS_VFS_DELETE:
-    return ow_status_success(OwVfsDeleteFile((const char *)P1)) ? 1 : 0;
-  case OW_SYS_ALPC_CREATE:
-    return (int64_t)(uintptr_t)OwAlpcCreatePort((const char *)P1, (bool)P2);
+  case OW_SYS_VFS_DELETE: {
+    ow_skto_name_t name;
+    OW_PROCESS_OBJECT *proc = syscall_current_process();
+    skto_status_t nst =
+        syscall_admit_name(&name, (const char *)(uintptr_t)P1, proc);
+    ow_identity_t caller_id;
+    ow_identity_t saved_id;
+    OW_STATUS st;
+
+    if (nst != SKTO_OK)
+      return syscall_name_error(nst);
+
+    /* Delete under the caller's identity for the same reason as write: the
+     * filesystem decides whether this caller may remove this entry. */
+    if (proc != NULL) {
+      caller_id.uid = proc->Uid;
+      caller_id.gid = proc->Gid;
+      saved_id = ow_sec_current();
+      ow_sec_set_identity(&caller_id);
+      st = OwVfsDeleteFile(OwSktoNameCstr(&name));
+      ow_sec_set_identity(&saved_id);
+    } else {
+      st = OwVfsDeleteFile(OwSktoNameCstr(&name));
+    }
+    return ow_status_success(st) ? 1 : 0;
+  }
+  case OW_SYS_ALPC_CREATE: {
+    ow_skto_name_t name;
+    skto_status_t nst = syscall_admit_name(
+        &name, (const char *)(uintptr_t)P1, syscall_current_process());
+
+    if (nst != SKTO_OK)
+      return 0;
+    return (int64_t)(uintptr_t)OwAlpcCreatePort(OwSktoNameCstr(&name),
+                                                (bool)P2);
+  }
   case OW_SYS_ALPC_SEND: {
     OW_ALPC_MSG_TYPE msg_type = OW_ALPC_MSG_REQUEST;
     OW_ALPC_MESSAGE msg;
@@ -407,7 +526,20 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
     return thr ? (int64_t)thr->ProcessId : (int64_t)0;
   }
   case OW_SYS_PS_CREATE_PROCESS: {
-    OW_PROCESS_OBJECT *proc = OwPsCreateProcess((const char *)P1, (uint32_t)P2);
+    const char *raw = (const char *)(uintptr_t)P1;
+    ow_skto_name_t name;
+    OW_PROCESS_OBJECT *proc;
+
+    /* An absent name is meaningful here: the process is simply unnamed. A
+     * present name is admitted before the process slot is committed. */
+    if (raw != NULL) {
+      skto_status_t nst =
+          syscall_admit_name(&name, raw, syscall_current_process());
+      if (nst != SKTO_OK)
+        return 0;
+      raw = OwSktoNameCstr(&name);
+    }
+    proc = OwPsCreateProcess(raw, (uint32_t)P2);
     return proc ? (int64_t)(uintptr_t)proc : (int64_t)0;
   }
   case OW_SYS_PS_CREATE_THREAD: {
@@ -416,8 +548,18 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
     return thr ? (int64_t)(uintptr_t)thr : (int64_t)0;
   }
   case OW_SYS_SYNC_CREATE_EVENT: {
-    OW_DISPATCHER_OBJECT *ev =
-        KeCreateEvent((const char *)P1, (uint8_t)P2, (uint8_t)P3);
+    const char *raw = (const char *)(uintptr_t)P1;
+    ow_skto_name_t name;
+    OW_DISPATCHER_OBJECT *ev;
+
+    if (raw != NULL) {
+      skto_status_t nst =
+          syscall_admit_name(&name, raw, syscall_current_process());
+      if (nst != SKTO_OK)
+        return 0;
+      raw = OwSktoNameCstr(&name);
+    }
+    ev = KeCreateEvent(raw, (uint8_t)P2, (uint8_t)P3);
     return ev ? (int64_t)(uintptr_t)ev : (int64_t)0;
   }
   case OW_SYS_SYNC_SET_EVENT:
@@ -427,8 +569,18 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
     KeResetEvent((OW_DISPATCHER_OBJECT *)(uintptr_t)P1);
     return 1;
   case OW_SYS_SYNC_CREATE_SEMAPHORE: {
-    OW_DISPATCHER_OBJECT *sem =
-        KeCreateSemaphore((const char *)P1, (uint32_t)P2, (uint32_t)P3);
+    const char *raw = (const char *)(uintptr_t)P1;
+    ow_skto_name_t name;
+    OW_DISPATCHER_OBJECT *sem;
+
+    if (raw != NULL) {
+      skto_status_t nst =
+          syscall_admit_name(&name, raw, syscall_current_process());
+      if (nst != SKTO_OK)
+        return 0;
+      raw = OwSktoNameCstr(&name);
+    }
+    sem = KeCreateSemaphore(raw, (uint32_t)P2, (uint32_t)P3);
     return sem ? (int64_t)(uintptr_t)sem : (int64_t)0;
   }
   case OW_SYS_SYNC_RELEASE_SEMAPHORE:
@@ -438,7 +590,18 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
     return (int64_t)KeWaitForSingleObject((OW_DISPATCHER_OBJECT *)(uintptr_t)P1,
                                           P2);
   case OW_SYS_SYNC_CREATE_MUTEX: {
-    OW_DISPATCHER_OBJECT *mtx = KeCreateMutex((const char *)P1, (uint32_t)P2);
+    const char *raw = (const char *)(uintptr_t)P1;
+    ow_skto_name_t name;
+    OW_DISPATCHER_OBJECT *mtx;
+
+    if (raw != NULL) {
+      skto_status_t nst =
+          syscall_admit_name(&name, raw, syscall_current_process());
+      if (nst != SKTO_OK)
+        return 0;
+      raw = OwSktoNameCstr(&name);
+    }
+    mtx = KeCreateMutex(raw, (uint32_t)P2);
     return mtx ? (int64_t)(uintptr_t)mtx : (int64_t)0;
   }
   case OW_SYS_SYNC_RELEASE_MUTEX:
@@ -470,15 +633,21 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
   case OW_SYS_PS_SPAWN_OWX: {
     OW_PROCESS_OBJECT *caller = syscall_current_process();
     OW_PROCESS_OBJECT *spawned;
+    ow_skto_name_t name;
+    skto_status_t nst;
 
     if (caller == NULL)
+      return -1;
+
+    nst = syscall_admit_name(&name, (const char *)(uintptr_t)P1, caller);
+    if (nst != SKTO_OK)
       return -1;
 
     /* Parentage is the caller's own PID, taken from the process the gateway
      * resolved the request against -- never from a caller-supplied value.  A
      * caller that could name its own parent could also claim PID 0, and PID 0
      * is the kernel's own identity. */
-    spawned = spawn_owx_image((const char *)(uintptr_t)P1, caller->ProcessId);
+    spawned = spawn_owx_image(OwSktoNameCstr(&name), caller->ProcessId);
     if (spawned == NULL)
       return -1;
     return (int64_t)(uint32_t)spawned->ProcessId;
@@ -494,23 +663,23 @@ void *OwApiAllocateMemory(uint64_t Size) {
 }
 
 OW_STATUS OwApiCreateFile(const char *Path, uint32_t Attrs) {
-  return OwSyscallDispatch(OW_SYS_VFS_CREATE, (uint64_t)(uintptr_t)Path, Attrs,
-                           0) == 1
+  return syscall_call_kernel(OW_SYS_VFS_CREATE, (uint64_t)(uintptr_t)Path,
+                             Attrs, 0) == 1
              ? OW_SUCCESS
              : OW_ERR_IO;
 }
 
 OW_STATUS OwApiWriteFile(const char *Path, const uint8_t *Buffer,
                          uint32_t Size) {
-  return OwSyscallDispatch(OW_SYS_VFS_WRITE, (uint64_t)(uintptr_t)Path,
-                           (uint64_t)(uintptr_t)Buffer, Size) == 1
+  return syscall_call_kernel(OW_SYS_VFS_WRITE, (uint64_t)(uintptr_t)Path,
+                             (uint64_t)(uintptr_t)Buffer, Size) == 1
              ? OW_SUCCESS
              : OW_ERR_IO;
 }
 
 uint32_t OwApiReadFile(const char *Path, uint8_t *Buffer, uint32_t MaxSize) {
-  int64_t r = OwSyscallDispatch(OW_SYS_VFS_READ, (uint64_t)(uintptr_t)Path,
-                                (uint64_t)(uintptr_t)Buffer, MaxSize);
+  int64_t r = syscall_call_kernel(OW_SYS_VFS_READ, (uint64_t)(uintptr_t)Path,
+                                  (uint64_t)(uintptr_t)Buffer, MaxSize);
   /* The in-kernel wrapper keeps its historical "0 means failure" contract for
    * its existing callers; a Ring 3 caller reads the syscall return directly and
    * gets the distinguished negative code. */
@@ -518,7 +687,7 @@ uint32_t OwApiReadFile(const char *Path, uint8_t *Buffer, uint32_t MaxSize) {
 }
 
 uint64_t OwApiAlpcCreatePort(const char *Name, bool IsServer) {
-  return (uint64_t)OwSyscallDispatch(
+  return (uint64_t)syscall_call_kernel(
       OW_SYS_ALPC_CREATE, (uint64_t)(uintptr_t)Name, (uint64_t)IsServer, 0);
 }
 
@@ -580,8 +749,8 @@ uint32_t OwApiPsGetPid(void) {
 }
 
 uint64_t OwApiPsCreateProcess(const char *Name, uint32_t ParentPid) {
-  return (uint64_t)OwSyscallDispatch(OW_SYS_PS_CREATE_PROCESS,
-                                     (uint64_t)(uintptr_t)Name, ParentPid, 0);
+  return (uint64_t)syscall_call_kernel(OW_SYS_PS_CREATE_PROCESS,
+                                       (uint64_t)(uintptr_t)Name, ParentPid, 0);
 }
 
 uint64_t OwApiPsCreateThread(uint64_t ProcessHandle, uint64_t EntryFunction,
@@ -591,8 +760,8 @@ uint64_t OwApiPsCreateThread(uint64_t ProcessHandle, uint64_t EntryFunction,
 }
 
 uint64_t OwApiPsSpawnOwx(const char *ImageName) {
-  uint64_t r = (uint64_t)OwSyscallDispatch(OW_SYS_PS_SPAWN_OWX,
-                                          (uint64_t)(uintptr_t)ImageName, 0, 0);
+  uint64_t r = (uint64_t)syscall_call_kernel(
+      OW_SYS_PS_SPAWN_OWX, (uint64_t)(uintptr_t)ImageName, 0, 0);
   /* The gateway reports failure as -1.  Callers here work in the "0 means
    * nothing happened" idiom that every other wrapper in this file uses, and a
    * raw (uint64_t)-1 handed back as a handle would be a live-looking value. */
@@ -605,7 +774,7 @@ int OwApiUartRead(void) {
 
 uint64_t OwApiSyncCreateEvent(const char *Name, uint8_t ManualReset,
                               uint8_t InitialState) {
-  return (uint64_t)OwSyscallDispatch(
+  return (uint64_t)syscall_call_kernel(
       OW_SYS_SYNC_CREATE_EVENT, (uint64_t)(uintptr_t)Name,
       (uint64_t)ManualReset, (uint64_t)InitialState);
 }
@@ -624,9 +793,9 @@ OW_STATUS OwApiSyncResetEvent(uint64_t Handle) {
 
 uint64_t OwApiSyncCreateSemaphore(const char *Name, uint32_t InitialCount,
                                   uint32_t Limit) {
-  return (uint64_t)OwSyscallDispatch(OW_SYS_SYNC_CREATE_SEMAPHORE,
-                                     (uint64_t)(uintptr_t)Name,
-                                     (uint64_t)InitialCount, (uint64_t)Limit);
+  return (uint64_t)syscall_call_kernel(OW_SYS_SYNC_CREATE_SEMAPHORE,
+                                       (uint64_t)(uintptr_t)Name,
+                                       (uint64_t)InitialCount, (uint64_t)Limit);
 }
 
 OW_STATUS OwApiSyncReleaseSemaphore(uint64_t Handle, uint32_t Count) {
@@ -641,9 +810,9 @@ uint32_t OwApiSyncWait(uint64_t Handle, uint64_t TimeoutTicks) {
 }
 
 uint64_t OwApiSyncCreateMutex(const char *Name, uint8_t InitialOwner) {
-  return (uint64_t)OwSyscallDispatch(OW_SYS_SYNC_CREATE_MUTEX,
-                                     (uint64_t)(uintptr_t)Name,
-                                     (uint64_t)InitialOwner, 0);
+  return (uint64_t)syscall_call_kernel(OW_SYS_SYNC_CREATE_MUTEX,
+                                       (uint64_t)(uintptr_t)Name,
+                                       (uint64_t)InitialOwner, 0);
 }
 
 OW_STATUS OwApiSyncReleaseMutex(uint64_t Handle) {
