@@ -4,10 +4,12 @@
 
 #include "../../superunicode/include/suas/suas_sktc.h"
 #include "../../superunicode/include/suas/suas_sucha.h"
+#include "../../superunicode/include/suas/suas_stx.h"
 #include "../../superunicode/include/sutr/sutr_sfs.h"
 #include "../../superunicode/include/sutr/sutr_sie.h"
 #include "../../superunicode/include/sutr/sutr_sim.h"
 #include "../../superunicode/include/sutr/sutr_skc.h"
+#include "../../inc/ow_superunicode.h"
 
 static int check(bool condition, int *passed)
 {
@@ -29,6 +31,8 @@ int test_superunicode_run(int *out_passed)
     uint32_t event = 0;
     char payload[8] = {0};
     size_t payload_length = 0;
+    suas_stx_state_t text_state;
+    static const uint8_t terminal_text[] = "OpenWindows SUTF console\r\n";
 
     if (out_passed == NULL) {
         return 1;
@@ -39,6 +43,10 @@ int test_superunicode_run(int *out_passed)
     failures += check(suas_sucha_version_string() != NULL, &passed);
     failures += check(sutr_sfs_valid_name("kernel", 6), &passed);
     failures += check(!sutr_sfs_valid_name("bad/name", 8), &passed);
+    failures += check(suas_stx_version_string() != NULL, &passed);
+    suas_stx_init(&text_state);
+    failures += check(suas_stx_feed(&text_state, (sucs_ex_char_t)'A'),
+                      &passed);
 
     sutr_sie_init(&events);
     failures += check(sutr_sie_push(&events, 0x41u), &passed);
@@ -53,6 +61,10 @@ int test_superunicode_run(int *out_passed)
     sutr_skc_init(&console);
     failures += check(sutr_skc_write(&console, "SuperUnicode", 12) &&
                      console.length == 12, &passed);
+    failures += check(OwSuperUnicodeRenderSutf(
+                          terminal_text, sizeof(terminal_text) - 1u),
+                      &passed);
+    failures += check(OwSuperUnicodeTextPlane()->writes > 0u, &passed);
 
     suas_sktc_reset(&report);
     failures += check(suas_sktc_record(&report, failures == 0), &passed);

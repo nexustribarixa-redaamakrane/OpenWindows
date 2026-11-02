@@ -3,6 +3,9 @@
 static sutr_sie_queue_t g_input;
 static sutr_sim_channel_t g_messages;
 static sutr_skc_buffer_t g_console;
+static scts_cell_t g_cells[25u * 80u];
+static scts_plane_t g_plane;
+static scte_term_t g_terminal;
 static bool g_initialized;
 
 void OwSuperUnicodeInitialize(void) {
@@ -12,6 +15,13 @@ void OwSuperUnicodeInitialize(void) {
     sutr_sie_init(&g_input);
     sutr_sim_init(&g_messages);
     sutr_skc_init(&g_console);
+    {
+        scts_plane_options_t options;
+        scts_plane_options_default(&options);
+        (void)scts_plane_init(&g_plane, g_cells, 25u, 80u, &options);
+        (void)suts_scte_init(&g_terminal, &g_plane, (scte_scp_fn)0,
+                             (scte_bell_fn)0, (uintptr_t)0);
+    }
     g_initialized = true;
 }
 
@@ -43,4 +53,14 @@ bool OwSuperUnicodeConsoleWrite(const char *text, size_t length) {
 const sutr_skc_buffer_t *OwSuperUnicodeConsoleBuffer(void) {
     OwSuperUnicodeInitialize();
     return &g_console;
+}
+
+bool OwSuperUnicodeRenderSutf(const uint8_t *bytes, size_t length) {
+    OwSuperUnicodeInitialize();
+    return suts_scte_feed(&g_terminal, bytes, length) == SCTE_OK;
+}
+
+const scts_plane_t *OwSuperUnicodeTextPlane(void) {
+    OwSuperUnicodeInitialize();
+    return &g_plane;
 }

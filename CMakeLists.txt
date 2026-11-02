@@ -89,6 +89,71 @@ add_custom_target(owinit_image DEPENDS ${OWINIT_HEADER})
 set(SUTF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/sutf")
 set(SUAS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode")
 set(ESSENTIALS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials")
+
+# The OpenWindows kernel and hosted harness consume the complete SuperUnicode
+# reference surface, not only the ten OS integration adapters. These source
+# lists mirror the authoritative SuperUnicode targets so every SUAS, SUTS, and
+# implemented SUTR algorithm is compiled into the OS build.
+set(SUAS_REFERENCE_SOURCES
+    ${SUAS_DIR}/src/suas/suas_sdf.c
+    ${SUAS_DIR}/src/suas/suas_sgw.c
+    ${SUAS_DIR}/src/suas/suas_sbr.c
+    ${SUAS_DIR}/src/suas/suas_sucf.c
+    ${SUAS_DIR}/src/suas/suas_ssp.c
+    ${SUAS_DIR}/src/suas/suas_sts.c
+    ${SUAS_DIR}/src/suas/suas_sis.c
+    ${SUAS_DIR}/src/suas/suas_sncs.c
+    ${SUAS_DIR}/src/suas/suas_sip.c
+    ${SUAS_DIR}/src/suas/suas_ssre.c
+    ${SUAS_DIR}/src/suas/suas_scms.c
+    ${SUAS_DIR}/src/suas/suas_sucd.c
+    ${SUAS_DIR}/src/suas/suas_sisr.c
+    ${SUAS_DIR}/src/suas/suas_suvtl.c
+    ${SUAS_DIR}/src/suas/suas_suamr.c
+    ${SUAS_DIR}/src/suas/suas_sukemet.c
+    ${SUAS_DIR}/src/suas/suas_sueasd.c
+    ${SUAS_DIR}/src/suas/suas_skto.c
+    ${SUAS_DIR}/src/suas/suas_stim.c
+    ${SUAS_DIR}/src/suas/suas_sucha.c
+    ${SUAS_DIR}/src/suas/suas_stx.c
+    ${SUAS_DIR}/src/suas/suas_sktc.c
+    ${SUAS_DIR}/src/suas/suas_subsystems.c
+    ${SUAS_DIR}/src/suas/suas_core.c
+)
+
+set(SUTS_REFERENCE_SOURCES
+    ${SUAS_DIR}/src/suts/suts_suca.c
+    ${SUAS_DIR}/src/suts/suts_sre.c
+    ${SUAS_DIR}/src/suts/suts_sldf.c
+    ${SUAS_DIR}/src/suts/suts_sivd.c
+    ${SUAS_DIR}/src/suts/suts_scss.c
+    ${SUAS_DIR}/src/suts/suts_sidn.c
+    ${SUAS_DIR}/src/suts/suts_sueps.c
+    ${SUAS_DIR}/src/suts/suts_susch.c
+    ${SUAS_DIR}/src/suts/suts_suldf.c
+    ${SUAS_DIR}/src/suts/suts_susn.c
+    ${SUAS_DIR}/src/suts/suts_scts.c
+    ${SUAS_DIR}/src/suts/suts_scte.c
+    ${SUAS_DIR}/src/suts/suts_suicl.c
+    ${SUAS_DIR}/src/suts/suts_sulp.c
+    ${SUAS_DIR}/src/suts/suts_strs.c
+    ${SUAS_DIR}/src/suts/suts_module.c
+)
+
+set(SUTR_REFERENCE_SOURCES
+    ${SUAS_DIR}/src/sutr/sutr_sucsl.c
+    ${SUAS_DIR}/src/sutr/sutr_sueas.c
+    ${SUAS_DIR}/src/sutr/sutr_sums.c
+    ${SUAS_DIR}/src/sutr/sutr_sucem.c
+    ${SUAS_DIR}/src/sutr/sutr_sucpm.c
+    ${SUAS_DIR}/src/sutr/sutr_sumnls.c
+    ${SUAS_DIR}/src/sutr/sutr_sucm.c
+    ${SUAS_DIR}/src/sutr/sutr_oktp.c
+    ${SUAS_DIR}/src/sutr/sutr_sie.c
+    ${SUAS_DIR}/src/sutr/sutr_sfs.c
+    ${SUAS_DIR}/src/sutr/sutr_sim.c
+    ${SUAS_DIR}/src/sutr/sutr_skc.c
+)
 set(VIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vip")
 set(STORAGE_COMMON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/common")
 set(OWFS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/owfs")
@@ -148,7 +213,9 @@ set(KERNEL_COMMON_SOURCES
     # kernel-side and freestanding; the SUAS implementation is shared with the
     # host harness so both exercise exactly the same admission code.
     kapi/ow_skto_name.c
-    ${SUAS_DIR}/src/suas/suas_skto.c
+    ${SUAS_REFERENCE_SOURCES}
+    ${SUTS_REFERENCE_SOURCES}
+    ${SUTR_REFERENCE_SOURCES}
     shell/shell.c
     ps/ps.c
     ps/switch.S
@@ -170,9 +237,6 @@ set(KERNEL_COMMON_SOURCES
     bancode/bancode_trap.c
     ${SUTF_DIR}/src/sutf8.c
     ${SUTF_DIR}/src/sucs_mode.c
-    ${SUAS_DIR}/src/sutr/sutr_sie.c
-    ${SUAS_DIR}/src/sutr/sutr_sim.c
-    ${SUAS_DIR}/src/sutr/sutr_skc.c
     ${VIP_DIR}/univip_fvip.c
     ${STORAGE_COMMON_DIR}/src/ow_checksum.c
     ${STORAGE_COMMON_DIR}/src/ow_string.c

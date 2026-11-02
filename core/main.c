@@ -473,6 +473,9 @@ void _start(void) {
         if (OwRunlevelRequires(OW_RUNLVL_F_ALPC)) {
             OwAlpcInitialize();
             OwSuperUnicodeInitialize();
+            (void)OwSuperUnicodeRenderSutf(
+                (const uint8_t *)"OpenWindows SUTF console\r\n",
+                sizeof("OpenWindows SUTF console\r\n") - 1u);
             km_line(0x0E, "[DIAG]", "ALPC dispatcher started");
         } else {
             boot_skip_line("ALPC");
