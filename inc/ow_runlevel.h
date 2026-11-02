@@ -23,7 +23,7 @@
 #define OW_RUNLVL_F_OBJECT      0x00000004U   /* object manager namespaces       */
 #define OW_RUNLVL_F_DIAG        0x00000008U   /* BANcode diagnostic engine       */
 #define OW_RUNLVL_F_ALPC        0x00000010U   /* Ring 3-to-0 dispatcher channel  */
-#define OW_RUNLVL_F_SUCS        0x00000020U   /* SuperUnicode SUCS/SUTF-8 mode   */
+#define OW_RUNLVL_F_SUCS        0x00000020U   /* SuperUnicode SUCS/SUTF mode     */
 #define OW_RUNLVL_F_VFS         0x00000040U   /* OWFS primary volume             */
 #define OW_RUNLVL_F_USFS        0x00000080U   /* USFS secure volume              */
 #define OW_RUNLVL_F_STORAGE     0x00000100U   /* physical storage / disk engine  */

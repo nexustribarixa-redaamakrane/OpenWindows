@@ -17,7 +17,7 @@ int OwSucsPendingMode(void);
 bool OwSucsIsRebootRequired(void);
 int OwSucsRequestModeSwitch(int new_mode);
 uint32_t OwSucsModeChangeCount(void);
-bool OwSucsSelfTest(void); /* SUTF-8 encode/decode round-trip */
+bool OwSucsSelfTest(void); /* SUTF encode/decode round-trip */
 
 /* =========================================================================
  * UniVIP volume registry + FVIP file index (root volume)

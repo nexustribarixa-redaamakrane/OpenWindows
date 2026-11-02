@@ -129,7 +129,7 @@ OW_STATUS OwFsCatalogInsert(htl_device_t* Dev, uint32_t ParentInode, const char*
 
     if (!Dev || !Name) return OW_ERR_NULL_POINTER;
 
-    /* Validate candidate name: must be valid SUTF-8, bounded by catalog field,
+    /* Validate candidate name: must be valid SUTF, bounded by catalog field,
      * no silent truncation. */
     sst = OwSktoNameAdmitTrusted(&admitted, Name, sizeof(((OW_FS_CATALOG_ENTRY*)0)->Name));
     if (sst != SKTO_OK) {

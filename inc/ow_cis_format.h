@@ -94,8 +94,8 @@
  *   - tags strictly ascend, so there are no duplicates and the order is not a
  *     choice.  A duplicate would otherwise let a parser take the first and an
  *     attacker take the second.
- *   - text values carry no NUL and are valid UTF-8 with no overlong forms, no
- *     surrogates and nothing above U+10FFFF, so a text value is a counted byte
+ *   - text values carry no NUL and are valid SUTF sequences with no overlong
+ *     forms or invalid scalar values, so a text value is a counted byte
  *     range rather than a string whose meaning depends on where the reader
  *     stopped, and it has one interpretation in every language rather than a
  *     lenient one and a strict one.
@@ -180,7 +180,7 @@ typedef enum _OW_CIS_FORMAT_STATUS {
     OW_CIS_FORMAT_DUPLICATE_TAG,
     OW_CIS_FORMAT_BAD_TAG_LENGTH,
     OW_CIS_FORMAT_VALUE_HAS_NUL,
-    OW_CIS_FORMAT_VALUE_NOT_UTF8,
+    OW_CIS_FORMAT_VALUE_NOT_SUTF,
     OW_CIS_FORMAT_MISSING_REQUIRED_TAG,
     OW_CIS_FORMAT_UNSUPPORTED_DIGEST_ALGO,
     OW_CIS_FORMAT_TOO_MANY_TAGS
@@ -233,7 +233,7 @@ typedef struct _OW_CIS_BLOCK {
  * manifest_size + 64, a manifest longer than OW_CIS_MAX_MANIFEST_SIZE, a
  * block that runs past Available, a manifest without its 32-byte prefix,
  * tags that do not strictly ascend, a required tag that is missing or the
- * wrong length, a NUL inside a *text* value, text that is not valid UTF-8,
+ * wrong length, a NUL inside a *text* value, text that is not valid SUTF,
  * and a digest algorithm other than SHA-256.
  *
  * Returns OW_CIS_FORMAT_OK and fills *Out, or leaves *Out untouched and
@@ -246,11 +246,11 @@ OW_CIS_FORMAT_STATUS OwCisFormatParse(const void* Block, uint32_t Available,
 /* Human-readable name for a parse failure, for the load-path log. */
 const char* OwCisFormatStatusName(OW_CIS_FORMAT_STATUS Status);
 
-/* True when `Value[0..Size)` is well-formed UTF-8 under the rules above.
+/* True when `Value[0..Size)` is well-formed SUTF under the rules above.
  * Exposed because the host test drives it directly over a crafted corpus, and a
  * validator reachable only through a full parse cannot be given a case that the
  * surrounding lengths would reject first. */
-bool OwCisFormatIsValidUtf8(const uint8_t* Value, uint32_t Size);
+bool OwCisFormatIsValidSutf(const uint8_t* Value, uint32_t Size);
 
 /* True when the value contains no NUL byte. */
 bool OwCisFormatHasNoNul(const uint8_t* Value, uint32_t Size);

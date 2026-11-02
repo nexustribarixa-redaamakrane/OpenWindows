@@ -8,6 +8,7 @@
 #include "../inc/ow_hal.h"
 #include "../inc/ow_diag.h"
 #include "../inc/ow_vfs.h"
+#include "../inc/ow_superunicode.h"
 #include "../inc/ow_net.h"
 #include "../inc/ow_sentinel.h"
 #include "../inc/ow_syscall.h"
@@ -471,6 +472,7 @@ void _start(void) {
         km_line(0x0E, "[DIAG]", "BANcode engine online");
         if (OwRunlevelRequires(OW_RUNLVL_F_ALPC)) {
             OwAlpcInitialize();
+            OwSuperUnicodeInitialize();
             km_line(0x0E, "[DIAG]", "ALPC dispatcher started");
         } else {
             boot_skip_line("ALPC");
@@ -490,8 +492,8 @@ void _start(void) {
         {
             int ok4b = OwSucsSelfTest();
             if (ok4b) {
-                ow_kprintf("[SUTF] Codec self-test: OK (Base SUCS / SUTF-8 active)\r\n");
-                km_line(0x0D, "[SUCS]", "SUTF-8 codec self-test passed");
+                ow_kprintf("[SUTF] Codec self-test: OK (Base SUCS / SUTF active)\r\n");
+                km_line(0x0D, "[SUCS]", "SUTF codec self-test passed");
             } else {
                 km_line(0x0C, "[SUCS]", "codec self-test FAILED - integrity compromised");
             }

@@ -3,7 +3,7 @@
  * This is the kernel-side boundary between an untrusted name and the kernel's
  * own text handling. It admits a candidate into caller storage through
  * SUAS-018 (SKTO), so every name the kernel acts on is bounded, explicitly
- * measured, SUTF-8 validated, and complete. It never truncates: a name that
+ * measured, SUTF validated, and complete. It never truncates: a name that
  * does not fit fails with a status the caller must propagate.
  *
  * Two entry points:
@@ -83,7 +83,7 @@ typedef struct _OW_SKTO_IRQ_LOCK {
  *   SKTO_E_NULL        absent output, source, or containment callback
  *   SKTO_E_RANGE       the containment callback refused a touched page
  *   SKTO_E_TERMINATOR  no NUL inside ScanCap
- *   SKTO_E_ENCODING    malformed SUTF-8
+ *   SKTO_E_ENCODING    malformed SUTF
  *   SKTO_E_INADMISSIBLE SCP, surrogate, trap, or Sentinel
  *   SKTO_E_OVERFLOW    candidate exceeds the admission ceiling
  *   SKTO_E_CAPACITY    destination cannot hold the complete candidate
@@ -94,7 +94,7 @@ skto_status_t OwSktoNameAdmitUser(ow_skto_name_t *Out, const char *Src,
                                   void *RangeCtx);
 
 /* Admit a name from kernel-owned memory. Range containment is skipped; the
- * bound, SUTF-8 validation, and namespace ceiling are identical. */
+ * bound, SUTF validation, and namespace ceiling are identical. */
 skto_status_t OwSktoNameAdmitTrusted(ow_skto_name_t *Out, const char *Src,
                                      size_t ScanCap);
 

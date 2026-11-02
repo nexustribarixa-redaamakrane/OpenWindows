@@ -60,7 +60,37 @@ bool OwCisFormatHasNoNul(const uint8_t* Value, uint32_t Size) {
     return true;
 }
 
-/* UTF-8 validation, written to reject the encodings a decoder is entitled to
+/* SUTF validation is delegated to the shared SuperUnicode decoder so every
+ * kernel boundary accepts the same scalar range and framing rules. */
+#include "sutf8.h"
+
+bool OwCisFormatIsValidSutf(const uint8_t* Value, uint32_t Size) {
+    uint32_t offset = 0U;
+    sucs_char_t scalar;
+
+    if (!Value) {
+        return false;
+    }
+    while (offset < Size) {
+        size_t consumed = sutf8_decode_char(Value + offset, Size - offset,
+                                             &scalar);
+        if (consumed == 0U) {
+            return false;
+        }
+        if (scalar == 0U ||
+            (scalar >= 0xD800U && scalar <= 0xDFFFU)) {
+            return false;
+        }
+        offset += (uint32_t)consumed;
+    }
+    return true;
+}
+
+/* Legacy four-byte validation was intentionally removed: the kernel uses
+ * SUTF, including its extended five- and six-byte scalar forms. */
+#if 0
+/*
+ * UTF-8 validation, written to reject the encodings a decoder is entitled to
  * treat as errors in different ways.  A permissive validator and a strict one
  * both "accept" the same overlong form; they differ on what they mean by
  * accept, and the signer here is a different program from the verifier.  So the
@@ -78,7 +108,7 @@ bool OwCisFormatHasNoNul(const uint8_t* Value, uint32_t Size) {
  *
  * Truncated sequences at the end of the value fail, so a value is never
  * interpreted as text plus a silently dropped tail. */
-bool OwCisFormatIsValidUtf8(const uint8_t* Value, uint32_t Size) {
+bool OwCisFormatIsValidSutfLegacy(const uint8_t* Value, uint32_t Size) {
     uint32_t i = 0U;
 
     if (!Value) {
@@ -189,6 +219,7 @@ bool OwCisFormatIsValidUtf8(const uint8_t* Value, uint32_t Size) {
     }
     return true;
 }
+#endif
 
 /* True when every byte of [0, Reserved1 + Reserved2) following the flags field is
  * zero.  Read as a range rather than field by field so a future reserved field
@@ -205,7 +236,7 @@ static bool cis_reserved_clear(const uint8_t* P) {
     return true;
 }
 
-/* Whether a tag's value must be valid UTF-8.  Binary tags have a fixed width,
+/* Whether a tag's value must be valid SUTF.  Binary tags have a fixed width,
  * and running a text rule over them would reject bytes that are perfectly good
  * key identifiers. */
 static bool cis_tag_is_text(uint16_t Tag) {
@@ -300,8 +331,8 @@ static OW_CIS_FORMAT_STATUS cis_scan_tlvs(const uint8_t* Manifest,
             return OW_CIS_FORMAT_VALUE_HAS_NUL;
         }
         if (cis_tag_is_text(tag) &&
-            OwCisFormatIsValidUtf8(value, (uint32_t)value_size) == false) {
-            return OW_CIS_FORMAT_VALUE_NOT_UTF8;
+            OwCisFormatIsValidSutf(value, (uint32_t)value_size) == false) {
+            return OW_CIS_FORMAT_VALUE_NOT_SUTF;
         }
 
         /* Each TLV consumed at least CIS_TLV_HEADER_SIZE bytes, so the manifest
@@ -525,7 +556,7 @@ const char* OwCisFormatStatusName(OW_CIS_FORMAT_STATUS Status) {
     case OW_CIS_FORMAT_DUPLICATE_TAG:            return "duplicate tag";
     case OW_CIS_FORMAT_BAD_TAG_LENGTH:           return "bad tag length";
     case OW_CIS_FORMAT_VALUE_HAS_NUL:            return "NUL in value";
-    case OW_CIS_FORMAT_VALUE_NOT_UTF8:           return "value is not UTF-8";
+    case OW_CIS_FORMAT_VALUE_NOT_SUTF:           return "value is not SUTF";
     case OW_CIS_FORMAT_MISSING_REQUIRED_TAG:     return "missing required tag";
     case OW_CIS_FORMAT_UNSUPPORTED_DIGEST_ALGO:  return "unsupported digest algorithm";
     case OW_CIS_FORMAT_TOO_MANY_TAGS:            return "too many tags";

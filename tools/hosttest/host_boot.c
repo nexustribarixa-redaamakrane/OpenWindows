@@ -49,6 +49,7 @@ int test_cis_loader_run(int* out_passed);
 /* Implemented in host_skto_name.c.  SKTO name admission at the syscall
  * gateway's kernel boundary (SUAS-018). */
 int test_skto_name_run(int* out_passed);
+int test_superunicode_run(int* out_passed);
 
 #include "../../inc/ow_ecosys.h"
 #include "../../inc/ow_hal.h"
@@ -2029,28 +2030,28 @@ static void test_cis_format(void) {
 
     cis_check_extra_tlv("an overlong two-byte sequence", &manifest,
                         OW_CIS_TAG_BUILD_ID, overlong2, 3u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("an overlong three-byte sequence", &manifest,
                         OW_CIS_TAG_BUILD_ID, overlong3, 3u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("an overlong four-byte sequence", &manifest,
                         OW_CIS_TAG_BUILD_ID, overlong4, 4u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("a UTF-16 surrogate", &manifest,
                         OW_CIS_TAG_BUILD_ID, surrogate, 3u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("a code point above U+10FFFF", &manifest,
                         OW_CIS_TAG_BUILD_ID, too_high, 4u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("a lone continuation byte", &manifest,
                         OW_CIS_TAG_BUILD_ID, lone_cont, 1u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("a sequence truncated at the end of the value",
                         &manifest, OW_CIS_TAG_BUILD_ID, truncated, 2u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("a bad continuation byte", &manifest,
                         OW_CIS_TAG_BUILD_ID, bad_cont, 3u,
-                        OW_CIS_FORMAT_VALUE_NOT_UTF8);
+                        OW_CIS_FORMAT_VALUE_NOT_SUTF);
     cis_check_extra_tlv("valid multi-byte UTF-8", &manifest,
                         OW_CIS_TAG_BUILD_ID, valid, 9u, OW_CIS_FORMAT_OK);
   }
@@ -2167,7 +2168,7 @@ static void test_cis_format(void) {
     uint32_t i;
 
     for (i = 0U; i < n; i++) {
-      const bool got = OwCisFormatIsValidUtf8(cases[i].data, cases[i].size);
+      const bool got = OwCisFormatIsValidSutf(cases[i].data, cases[i].size);
       if (got == cases[i].want) {
         ++g_passed;
       } else {
@@ -4851,6 +4852,11 @@ int main(int argc, char **argv) {
    * callback runs against a real VAD tree, but no CPL3 transition happens in
    * this harness, so this is not a Ring 3 syscall test. */
   g_failures += test_skto_name_run(&sub_passed);
+  g_passed  += sub_passed;
+
+  /* SuperUnicode reference-library integration across character authority,
+   * filesystem naming, input, IPC, console, and conformance surfaces. */
+  g_failures += test_superunicode_run(&sub_passed);
   g_passed  += sub_passed;
 
   /* ------------------------------------------------------------------ */

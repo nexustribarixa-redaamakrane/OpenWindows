@@ -88,10 +88,16 @@ add_custom_target(owinit_image DEPENDS ${OWINIT_HEADER})
 # Ecosystem root directories
 set(SUTF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/sutf")
 set(SUAS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode")
+set(ESSENTIALS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials")
 set(VIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vip")
 set(STORAGE_COMMON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/common")
 set(OWFS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/owfs")
 set(USFS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/usfs")
+
+# Build the reusable SuperUnicode reference libraries once for hosted
+# integration tests.  The kernel keeps its existing freestanding source-level
+# integration; hosted consumers use the complete reference library targets.
+add_subdirectory(${SUAS_DIR} superunicode_reference EXCLUDE_FROM_ALL)
 
 # Include directories common to all targets
 set(OW_INCLUDE_DIRS
@@ -102,6 +108,10 @@ set(OW_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/bancode
     ${SUTF_DIR}/include
     ${SUAS_DIR}/include
+    ${ESSENTIALS_DIR}/Software/kconfctl
+    ${ESSENTIALS_DIR}/Software/banhammer
+    ${ESSENTIALS_DIR}/DLL/kconf64
+    ${ESSENTIALS_DIR}/Extensions
     ${VIP_DIR}
     ${STORAGE_COMMON_DIR}/include
     ${OWFS_DIR}/include
@@ -150,6 +160,8 @@ set(KERNEL_COMMON_SOURCES
     lib/kprintf.c
     lib/kalloc.c
     lib/sucs.c
+    lib/ow_superunicode.c
+    ${ESSENTIALS_DIR}/DLL/kconf64/kconf64.c
     lib/ow_sha256.c
     lib/ow_sha512.c
     lib/ow_ed25519.c
@@ -158,6 +170,9 @@ set(KERNEL_COMMON_SOURCES
     bancode/bancode_trap.c
     ${SUTF_DIR}/src/sutf8.c
     ${SUTF_DIR}/src/sucs_mode.c
+    ${SUAS_DIR}/src/sutr/sutr_sie.c
+    ${SUAS_DIR}/src/sutr/sutr_sim.c
+    ${SUAS_DIR}/src/sutr/sutr_skc.c
     ${VIP_DIR}/univip_fvip.c
     ${STORAGE_COMMON_DIR}/src/ow_checksum.c
     ${STORAGE_COMMON_DIR}/src/ow_string.c
@@ -421,6 +436,7 @@ set(HOSTTEST_SOURCES
     tools/hosttest/host_cis_verify.c
     tools/hosttest/host_cis_loader.c
     tools/hosttest/host_skto_name.c
+    tools/hosttest/host_superunicode.c
     ${KERNEL_COMMON_SOURCES}
     ${OWINIT_HEADER}
     # The harness audits and mounts all three userspace images, so the emergency
@@ -433,6 +449,7 @@ set(HOSTTEST_SOURCES
 add_executable(hosttest ${HOSTTEST_SOURCES})
 add_dependencies(hosttest owinit_image owinitv_image owrs_image)
 target_include_directories(hosttest PRIVATE ${OW_INCLUDE_DIRS})
+target_link_libraries(hosttest PRIVATE suas_static suts_static sutr_static)
 target_compile_definitions(hosttest PRIVATE ${CIS_DEV_TRUST_DEFS})
 target_compile_options(hosttest PRIVATE
     -std=c99 -Wall -Wextra -Werror -fno-pie -g -DOW_HOST_HAL
