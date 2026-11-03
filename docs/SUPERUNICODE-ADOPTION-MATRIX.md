@@ -47,8 +47,8 @@ not yet complete. It is not a compliance claim.
 | SUTS-008 | Source Code Handling (SUSCH) | `suts_susch.c`; compiled into OS | SUSCH tests | Partial | Build/developer tools |
 | SUTS-009 | Link Detection and Formatting (SULDF) | `suts_suldf.c`; compiled into OS | SULDF tests | Partial | Shell/terminal link consumer |
 | SUTS-011 | Set Notation (SUSN) | `suts_susn.c`; compiled into OS | SUSN tests | Partial | Query and tooling consumer |
-| SUTS-012 | System Console Text Service (SCTS) | SCTS plane in `ow_superunicode.c` | OpenWindows hosttest | Partial | Sink/font and full console integration |
-| SUTS-013 | System Console Terminal Emulation (SCTE) | SCTE terminal in `ow_superunicode.c` | OpenWindows hosttest | Partial | Route kernel console output/input fully |
+| SUTS-012 | System Console Text Service (SCTS) | SCTS plane and `OwSuperUnicodeConsoleWrite()` in `lib/ow_superunicode.c`; kernel formatter path | OpenWindows hosttest; `openwinkrnl_pe` build | Partial | VGA glyph sink/font integration |
+| SUTS-013 | System Console Terminal Emulation (SCTE) | SCTE terminal and incremental kernel output in `lib/ow_superunicode.c`/`lib/kprintf.c` | OpenWindows hosttest; `openwinkrnl_pe` build | Partial | Route physical console input and rendering sink fully |
 | SUTS-014 | Identifier and Collation Layer (SUICL) | `suts_suicl.c`; compiled into OS | subsystem tests | Partial | VFS and shell collation |
 | SUTS-015 | Locale and Presentation (SULP) | `suts_sulp.c`; compiled into OS | subsystem tests | Partial | Userspace locale service |
 | SUTS-016 | Text Rendering Subsystem (STRS) | `suts_strs.c`; compiled into OS | subsystem tests | Partial | Hardware/font backend |
@@ -77,7 +77,7 @@ SUTS-010 remains the deliberate specification gap and is not implemented.
 | SUTR-015 | System Input Events | `sutr_sie.c`; input adapter | Partial |
 | SUTR-016 | System Filesystem | `sutr_sfs.c`; VFS admission | Partial |
 | SUTR-017 | System IPC and Messaging | `sutr_sim.c`; IPC adapter | Partial |
-| SUTR-018 | System Kernel Console | `sutr_skc.c`; console adapter | Partial |
+| SUTR-018 | System Kernel Console | `sutr_skc.c`; `OwSuperUnicodeConsoleWrite()`; kernel formatter path | Partial |
 
 ## SUTN technical notes
 

@@ -1,4 +1,5 @@
 #include "../inc/ow_superunicode.h"
+#include "../../superunicode/sutf/include/sutf8.h"
 
 static sutr_sie_queue_t g_input;
 static sutr_sim_channel_t g_messages;
@@ -46,8 +47,34 @@ bool OwSuperUnicodeMessageReceive(void *data, size_t capacity, size_t *length) {
 }
 
 bool OwSuperUnicodeConsoleWrite(const char *text, size_t length) {
+    bool rendered;
     OwSuperUnicodeInitialize();
-    return sutr_skc_write(&g_console, text, length);
+    if (!text && length != 0u) {
+        return false;
+    }
+    if (!sutr_skc_write(&g_console, text, length)) {
+        return false;
+    }
+    rendered = suts_scte_feed(&g_terminal, (const uint8_t *)text, length) == SCTE_OK;
+    return rendered;
+}
+
+bool OwSuperUnicodeValidateSutf(const uint8_t *bytes, size_t length) {
+    size_t offset = 0u;
+    OwSuperUnicodeInitialize();
+    if (!bytes && length != 0u) {
+        return false;
+    }
+    while (offset < length) {
+        sucs_char_t codepoint;
+        size_t consumed = sutf8_decode_char(bytes + offset, length - offset,
+                                            &codepoint);
+        if (consumed == 0u || !sucs_is_valid(codepoint)) {
+            return false;
+        }
+        offset += consumed;
+    }
+    return true;
 }
 
 const sutr_skc_buffer_t *OwSuperUnicodeConsoleBuffer(void) {

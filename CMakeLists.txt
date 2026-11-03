@@ -87,6 +87,8 @@ add_custom_target(owinit_image DEPENDS ${OWINIT_HEADER})
 
 # Ecosystem root directories
 set(SUTF_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/sutf")
+set(SUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/sust")
+set(EXTSU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/superunicode_extended")
 set(SUAS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode")
 set(ESSENTIALS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials")
 
@@ -154,6 +156,18 @@ set(SUTR_REFERENCE_SOURCES
     ${SUAS_DIR}/src/sutr/sutr_sim.c
     ${SUAS_DIR}/src/sutr/sutr_skc.c
 )
+set(SUTF_REFERENCE_SOURCES
+    ${SUTF_DIR}/src/sutf8.c
+    ${SUTF_DIR}/src/sutf16.c
+    ${SUTF_DIR}/src/sutf4.c
+    ${SUTF_DIR}/src/sutf2.c
+    ${SUTF_DIR}/src/sucs_mode.c
+)
+set(SUST_REFERENCE_SOURCES
+    ${SUST_DIR}/src/sust16.c
+    ${SUST_DIR}/src/sustfixed.c
+    ${SUST_DIR}/src/esust.c
+)
 set(VIP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../vip")
 set(STORAGE_COMMON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/common")
 set(OWFS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Storage/owfs")
@@ -172,6 +186,8 @@ set(OW_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/inc/bancode
     ${CMAKE_CURRENT_SOURCE_DIR}/bancode
     ${SUTF_DIR}/include
+    ${SUST_DIR}/include
+    ${EXTSU_DIR}/include
     ${SUAS_DIR}/include
     ${ESSENTIALS_DIR}/Software/kconfctl
     ${ESSENTIALS_DIR}/Software/banhammer
@@ -216,6 +232,8 @@ set(KERNEL_COMMON_SOURCES
     ${SUAS_REFERENCE_SOURCES}
     ${SUTS_REFERENCE_SOURCES}
     ${SUTR_REFERENCE_SOURCES}
+    ${SUTF_REFERENCE_SOURCES}
+    ${SUST_REFERENCE_SOURCES}
     shell/shell.c
     ps/ps.c
     ps/switch.S
@@ -235,8 +253,6 @@ set(KERNEL_COMMON_SOURCES
     storage/owdisk.c
     bancode/bancode.c
     bancode/bancode_trap.c
-    ${SUTF_DIR}/src/sutf8.c
-    ${SUTF_DIR}/src/sucs_mode.c
     ${VIP_DIR}/univip_fvip.c
     ${STORAGE_COMMON_DIR}/src/ow_checksum.c
     ${STORAGE_COMMON_DIR}/src/ow_string.c

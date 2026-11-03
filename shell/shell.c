@@ -13,6 +13,7 @@
 #include "../inc/ow_shell.h"
 #include "../inc/ow_string.h"
 #include "../inc/ow_syscall.h"
+#include "../inc/ow_superunicode.h"
 #include "../inc/ow_vfs.h"
 #include "../storage/owdisk.h"
 
@@ -117,6 +118,7 @@ static void shell_read_line(void) {
     } else {
       continue;
     }
+    (void)OwSuperUnicodeInputPush((uint32_t)(uint8_t)c);
     if (c == '\r' || c == '\n') {
       OwHalUartWriteChar('\r');
       OwHalUartWriteChar('\n');
@@ -137,6 +139,10 @@ static void shell_read_line(void) {
     }
   }
   g_CmdLine[pos] = '\0';
+  if (!OwSuperUnicodeValidateSutf((const uint8_t *)g_CmdLine, pos)) {
+    ow_kprintf("shell: malformed SUTF command rejected\r\n");
+    g_CmdLine[0] = '\0';
+  }
 }
 
 OW_STATUS OwShellInitialize(void) {

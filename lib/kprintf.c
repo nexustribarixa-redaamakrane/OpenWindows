@@ -2,6 +2,7 @@
 #include "../inc/ow_kprintf.h"
 #include "../inc/ow_hal.h"
 #include "../inc/ow_io.h"
+#include "../inc/ow_superunicode.h"
 #include <stdarg.h>
 
 static int kfmt_out(void (*putc)(char, void*), void* ctx, const char* fmt, va_list ap) {
@@ -128,7 +129,12 @@ static int kfmt_out(void (*putc)(char, void*), void* ctx, const char* fmt, va_li
     return count;
 }
 
-static void uart_putc(char c, void* ctx) { (void)ctx; OwHalUartWriteChar(c); }
+static void uart_putc(char c, void* ctx) {
+    const uint8_t byte = (uint8_t)c;
+    (void)ctx;
+    (void)OwSuperUnicodeConsoleWrite(&c, 1u);
+    OwHalUartWriteChar((char)byte);
+}
 
 int ow_kprintf(const char* fmt, ...) {
     va_list ap;
