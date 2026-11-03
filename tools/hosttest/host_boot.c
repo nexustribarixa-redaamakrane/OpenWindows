@@ -70,6 +70,7 @@ int test_superunicode_run(int* out_passed);
 #include "../../inc/ow_syscall.h"
 #include "../../inc/ow_userspace.h"
 #include "../../inc/ow_vfs.h"
+#include "../../lib/kalloc.h"
 #include "../../emergency/owinitv_image.h"
 #include "../../emergency/owrs_image.h"
 #include "../../inc/ow_types.h"
@@ -4188,6 +4189,21 @@ int main(int argc, char **argv) {
   }
 
   (void)OwMemAllocatePage();
+
+  /* Allocator hardening: impossible sizes are refused before any arithmetic,
+   * so a failed request can never wrap around to a small "successful" block. */
+  check_window("kalloc refuses an impossible size",
+               kalloc((size_t)-1) == NULL, true);
+  check_window("kcalloc refuses a multiplying overflow",
+               kcalloc((size_t)-1, 2u) == NULL, true);
+  {
+    void *block = kalloc(16u);
+    check_window("krealloc leaves the old block intact when the new size is "
+                 "refused",
+                 block != NULL && krealloc(block, (size_t)-1) == NULL, true);
+  }
+  check_window("the page allocator refuses a wrapped page span",
+               OwMemAllocatePages(0xFFFFFFFFu) == (uint64_t)0, true);
 
   /* ------------------------------------------------------------------ */
   /* Phase 3: Object Manager                                            */

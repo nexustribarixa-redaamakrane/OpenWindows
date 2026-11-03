@@ -91,6 +91,18 @@ set(SUST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/sust")
 set(EXTSU_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode/superunicode_extended")
 set(SUAS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../superunicode")
 set(ESSENTIALS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../OpenWindows-Essentials")
+set(SUF_DIR "${ESSENTIALS_DIR}/vendor/superunicode/suf")
+set(OW_TERMINAL_FONT "${CMAKE_CURRENT_SOURCE_DIR}/assets/openwindows-terminal.suf")
+set(OW_TERMINAL_FONT_HEADER "${OWINIT_GENERATED_DIR}/ow_terminal_font.h")
+add_custom_command(
+    OUTPUT ${OW_TERMINAL_FONT_HEADER}
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_suf.py
+            ${OW_TERMINAL_FONT} ${OW_TERMINAL_FONT_HEADER}
+    DEPENDS ${OW_TERMINAL_FONT}
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/embed_suf.py
+    COMMENT "Embedding OpenWindows terminal SUF font"
+)
+add_custom_target(ow_terminal_font DEPENDS ${OW_TERMINAL_FONT_HEADER})
 
 # The OpenWindows kernel and hosted harness consume the complete SuperUnicode
 # reference surface, not only the ten OS integration adapters. These source
@@ -188,6 +200,7 @@ set(OW_INCLUDE_DIRS
     ${SUTF_DIR}/include
     ${SUST_DIR}/include
     ${EXTSU_DIR}/include
+    ${SUF_DIR}/include
     ${SUAS_DIR}/include
     ${ESSENTIALS_DIR}/Software/kconfctl
     ${ESSENTIALS_DIR}/Software/banhammer
@@ -247,6 +260,7 @@ set(KERNEL_COMMON_SOURCES
     lib/sucs.c
     lib/ow_superunicode.c
     ${ESSENTIALS_DIR}/DLL/kconf64/kconf64.c
+    ${SUF_DIR}/src/suf_parser.c
     lib/ow_sha256.c
     lib/ow_sha512.c
     lib/ow_ed25519.c
@@ -422,6 +436,7 @@ set(KERNEL_BAREMETAL_SOURCES
 )
 
 add_executable(openwinkrnl_pe ${KERNEL_BAREMETAL_SOURCES})
+add_dependencies(openwinkrnl_pe ow_terminal_font)
 set_target_properties(openwinkrnl_pe PROPERTIES
     OUTPUT_NAME "openwinkrnl.pe"
     SUFFIX ""
@@ -527,6 +542,7 @@ set(HOSTTEST_SOURCES
 )
 
 add_executable(hosttest ${HOSTTEST_SOURCES})
+add_dependencies(hosttest ow_terminal_font)
 add_dependencies(hosttest owinit_image owinitv_image owrs_image)
 target_include_directories(hosttest PRIVATE ${OW_INCLUDE_DIRS})
 target_link_libraries(hosttest PRIVATE suas_static suts_static sutr_static)
@@ -538,6 +554,32 @@ target_link_options(hosttest PRIVATE -mconsole)
 
 enable_testing()
 add_test(NAME hosttest COMMAND hosttest)
+
+# ==============================================================================
+# Hosted SUF renderer end-to-end check (sufrender_host)
+# ==============================================================================
+# This target deliberately loads the binary asset from disk and uses the
+# production sufrender library, so it proves the shipped .suf file is valid and
+# rasterises -- separate from hosttest, which proves the kernel-embedded copy
+# (generated ow_terminal_font.h) is what the OS queries at runtime.
+add_executable(sufrender_host
+    tools/sufrender_host.c
+    ${ESSENTIALS_DIR}/DLL/sufrender/sufrender.c
+    ${SUF_DIR}/src/suf_parser.c
+)
+target_include_directories(sufrender_host PRIVATE
+    ${OW_INCLUDE_DIRS}
+    ${ESSENTIALS_DIR}/DLL/sufrender
+)
+target_compile_definitions(sufrender_host PRIVATE
+    OW_SUFRENDER_ASSET="${OW_TERMINAL_FONT}"
+    OW_SUFRENDER_PPM="${CMAKE_CURRENT_BINARY_DIR}/sufrender.ppm"
+)
+target_compile_options(sufrender_host PRIVATE
+    -std=c99 -Wall -Wextra -Werror -fno-pie -g
+)
+target_link_options(sufrender_host PRIVATE -mconsole)
+add_test(NAME sufrender_host COMMAND sufrender_host)
 
 # ==============================================================================
 # Cross-implementation crypto cross-check

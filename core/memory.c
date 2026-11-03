@@ -113,7 +113,9 @@ static void ow_ram_avoid_nonram(size_t Span) {
   for (i = 0; i < OW_NONRAM_COUNT; i++) {
     uintptr_t a = base + g_RamPointer;
     if (a >= s_NonRam[i].Hi) continue;
-    if (a + Span <= s_NonRam[i].Lo) return;
+    /* Compare by distance from Lo, not a + Span: a huge span must not wrap
+     * around and look like a window that fits below the non-RAM hole. */
+    if (a < s_NonRam[i].Lo && Span <= s_NonRam[i].Lo - a) return;
     g_RamPointer = (size_t)(s_NonRam[i].Hi - base);
     i = (unsigned)-1;               /* re-test from the first window */
   }
@@ -122,7 +124,10 @@ static void ow_ram_avoid_nonram(size_t Span) {
 void *OwMemAllocatePage(void) {
   void *page;
   ow_ram_avoid_nonram(OW_PAGE_SIZE);
-  if (g_RamPointer + OW_PAGE_SIZE > sizeof(g_PhysicalRam))
+  /* Compare against the remaining capacity rather than adding to g_RamPointer:
+   * the sum must not be able to wrap and turn an exhausted pool into a pass. */
+  if (g_RamPointer > sizeof(g_PhysicalRam) ||
+      sizeof(g_PhysicalRam) - g_RamPointer < OW_PAGE_SIZE)
     return (void *)0;
   page = &g_PhysicalRam[g_RamPointer];
   g_RamPointer += OW_PAGE_SIZE;
@@ -134,9 +139,17 @@ uint64_t OwMemAllocatePages(uint32_t Count) {
   size_t span;
 
   if (Count == 0u) return (uint64_t)0;
+  /* A page count must not be able to wrap the byte span.  On a 64-bit target a
+   * uint32_t count cannot reach this limit, but the check keeps the arithmetic
+   * correct for every size_t width the kernel is built for. */
+#if SIZE_MAX < UINT64_MAX
+  if (Count > (uint32_t)(SIZE_MAX / OW_PAGE_SIZE)) return (uint64_t)0;
+#endif
   span = (size_t)Count * OW_PAGE_SIZE;
   ow_ram_avoid_nonram(span);
-  if (g_RamPointer + span > sizeof(g_PhysicalRam)) return (uint64_t)0;
+  if (g_RamPointer > sizeof(g_PhysicalRam) ||
+      span > sizeof(g_PhysicalRam) - g_RamPointer)
+    return (uint64_t)0;
   pages = &g_PhysicalRam[g_RamPointer];
   g_RamPointer += span;
   return (uint64_t)(uintptr_t)pages;
