@@ -47,7 +47,7 @@ not yet complete. It is not a compliance claim.
 | SUTS-008 | Source Code Handling (SUSCH) | `suts_susch.c`; compiled into OS | SUSCH tests | Partial | Build/developer tools |
 | SUTS-009 | Link Detection and Formatting (SULDF) | `suts_suldf.c`; compiled into OS | SULDF tests | Partial | Shell/terminal link consumer |
 | SUTS-011 | Set Notation (SUSN) | `suts_susn.c`; compiled into OS | SUSN tests | Partial | Query and tooling consumer |
-| SUTS-012 | System Console Text Service (SCTS) | SCTS plane and `OwSuperUnicodeConsoleWrite()` in `lib/ow_superunicode.c`; kernel formatter path | OpenWindows hosttest; `openwinkrnl_pe` build | Partial | VGA glyph sink/font integration |
+| SUTS-012 | System Console Text Service (SCTS) | SCTS plane and `OwSuperUnicodeConsoleWrite()` in `lib/ow_superunicode.c`; kernel formatter path; `OwSuperUnicodeRenderPlane()` rasterizes cells with the embedded 8x16 SUF boot bitmap | OpenWindows hosttest (header/cmap/glyph/pixel assertions); `sufrender_host`; `openwinkrnl_pe` build | Partial | Route the SCTS renderer to the physical VGA/GOP console |
 | SUTS-013 | System Console Terminal Emulation (SCTE) | SCTE terminal and incremental kernel output in `lib/ow_superunicode.c`/`lib/kprintf.c` | OpenWindows hosttest; `openwinkrnl_pe` build | Partial | Route physical console input and rendering sink fully |
 | SUTS-014 | Identifier and Collation Layer (SUICL) | `suts_suicl.c`; compiled into OS | subsystem tests | Partial | VFS and shell collation |
 | SUTS-015 | Locale and Presentation (SULP) | `suts_sulp.c`; compiled into OS | subsystem tests | Partial | Userspace locale service |
@@ -77,7 +77,7 @@ SUTS-010 remains the deliberate specification gap and is not implemented.
 | SUTR-015 | System Input Events | `sutr_sie.c`; input adapter | Partial |
 | SUTR-016 | System Filesystem | `sutr_sfs.c`; VFS admission | Partial |
 | SUTR-017 | System IPC and Messaging | `sutr_sim.c`; IPC adapter | Partial |
-| SUTR-018 | System Kernel Console | `sutr_skc.c`; `OwSuperUnicodeConsoleWrite()`; kernel formatter path | Partial |
+| SUTR-018 | System Kernel Console | `sutr_skc.c`; `OwSuperUnicodeConsoleWrite()`; kernel formatter path; embedded SUF glyph rasterization via `OwSuperUnicodeRenderPlane()` | Partial |
 
 ## SUTN technical notes
 
@@ -94,7 +94,11 @@ SUTS-010 remains the deliberate specification gap and is not implemented.
 
 The complete available SUAS, SUTS, and SUTR reference source surface is now
 compiled into the OpenWindows kernel/host build, and the SCTS/SCTE text
-pipeline is exercised by the OpenWindows host test. This is substantial
-adoption evidence, but it is **not yet full SuperUnicode compliance**: the
-matrix deliberately records partial status where runtime data, renderer
-backends, userspace consumers, or end-to-end evidence are still absent.
+pipeline is exercised by the OpenWindows host test. The terminal SUF asset is
+embedded into the kernel image and validated at runtime: header fields, the
+8x16 1bpp boot bitmap, the complete printable ASCII cmap, the fallback glyph,
+and pixel-exact rasterization through `OwSuperUnicodeRenderPlane()` are covered
+by `hosttest` and `sufrender_host`. This is substantial adoption evidence, but
+it is **not yet full SuperUnicode compliance**: the matrix deliberately records
+partial status where runtime data, renderer backends, userspace consumers, or
+end-to-end evidence are still absent.

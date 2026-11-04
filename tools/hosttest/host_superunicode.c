@@ -1,10 +1,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "../../superunicode/suf/include/suf/suf_parser.h"
-#include "build/generated/ow_terminal_font.h"
+#include "Build/generated/ow_terminal_font.h"
 
 #include "../../superunicode/include/suas/suas_sktc.h"
 #include "../../superunicode/include/suas/suas_sucha.h"
@@ -167,6 +168,7 @@ int test_superunicode_run(int *out_passed)
         failures += check((font_header.flags & SUF_FLAG_BOOT_BITMAP) != 0u,
                           &passed);
         failures += check(font_header.glyph_count == 96u, &passed);
+        failures += check(font_header.checksum == 0x7B472F5Cu, &passed);
         failures += check(font_header.boot_bitmap_width == 8u, &passed);
         failures += check(font_header.boot_bitmap_height == 16u, &passed);
         failures += check(font_header.boot_bitmap_bpp == 1u, &passed);
@@ -234,6 +236,21 @@ int test_superunicode_run(int *out_passed)
                               strncmp(family, "OpenWindows Terminal SUF",
                                       family_len) == 0,
                           &passed);
+        printf("[SUF] embedded=%lu bytes magic=0x%08lX glyphs=%lu "
+               "bitmap=%ux%u/%ubpp cmap=%lu checksum=0x%08lX family=%.*s\n",
+               (unsigned long)ow_terminal_font_size,
+               (unsigned long)font_header.magic,
+               (unsigned long)font_header.glyph_count,
+               (unsigned)font_header.boot_bitmap_width,
+               (unsigned)font_header.boot_bitmap_height,
+               (unsigned)font_header.boot_bitmap_bpp,
+               (unsigned long)cmap_count,
+               (unsigned long)font_header.checksum,
+               (int)(family != NULL ? family_len : 0u),
+               family != NULL ? family : "(missing)");
+        printf("[SUF] fallback: cp=0x0 gid=%lu bitmap_bytes=16 bits=%u\n",
+               (unsigned long)fallback_gid,
+               fallback != NULL ? glyph_bit_count(fallback) : 0u);
     }
 
     /* --- CLI bytes travel through SCTE into the SCTS cell plane --------- */
@@ -258,6 +275,8 @@ int test_superunicode_run(int *out_passed)
                               plane->cells[3].cp == (uint32_t)'>' &&
                               plane->cells[4].cp == (uint32_t)' ',
                           &passed);
+        printf("[SUF] CLI->SCTE->SCTS: row=%u col=%u cells=\"CLI> \"\n",
+               (unsigned)plane->cursor_row, (unsigned)plane->cursor_col);
     }
 
     /* --- The renderer draws the actual SUF bitmap into the framebuffer --- */
@@ -273,6 +292,7 @@ int test_superunicode_run(int *out_passed)
         size_t unknown_len;
         bool cells_ok = true;
         bool pixels_ok = true;
+        unsigned pixel_cells = 0u;
         unsigned i;
 
         failures += check(OwSuperUnicodeRenderSutf(clear_screen,
@@ -315,6 +335,8 @@ int test_superunicode_run(int *out_passed)
                 !framebuffer_matches_glyph(framebuffer, 640u, i * 8u, 0u,
                                            glyph, fg, bg)) {
                 pixels_ok = false;
+            } else {
+                ++pixel_cells;
             }
         }
         fallback = OwSuperUnicodeFontGlyph(0u);
@@ -323,8 +345,13 @@ int test_superunicode_run(int *out_passed)
                                        (uint32_t)proof_len * 8u, 0u,
                                        fallback, fg, bg)) {
             pixels_ok = false;
+        } else {
+            ++pixel_cells;
         }
         failures += check(pixels_ok, &passed);
+        printf("[SUF] renderer: %u/%u cells pixel-exact "
+               "(\"%s\" + fallback cp=0x10FFFF -> gid 0)\n",
+               pixel_cells, (unsigned)proof_len + 1u, (const char *)proof_text);
     }
 
     suas_sktc_reset(&report);
