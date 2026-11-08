@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "../../superunicode/suf/include/suf/suf_parser.h"
-#include "Build/generated/ow_terminal_font.h"
+#include "ow_terminal_font.h"
 
 #include "../../superunicode/include/suas/suas_sktc.h"
 #include "../../superunicode/include/suas/suas_sucha.h"

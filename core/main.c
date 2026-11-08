@@ -21,6 +21,7 @@
 #include "../inc/ow_acpi.h"
 #include "../inc/ow_cis.h"
 #include "../inc/ow_ps.h"
+#include "../inc/ow_kdb.h"
 #include "../storage/owdisk.h"
 #include "../inc/ow_usermode.h"
 #include <stdarg.h>
@@ -519,6 +520,35 @@ void _start(void) {
         km_line(0x0D, "[PS]", "idle system thread 0 registered");
         boot_diag_done(40, ok4c ? OW_C_PS_READY : (OW_STATUS)0,
                        "PS Init", ok4c);
+    }
+
+    /* Phase 4d: Kernel Dual Boot (KDB) for KAPA applications.
+     *
+     * KDB is a management subsystem, not a second bootloader: it owns the
+     * associated-kernel registry, compatibility policy, instance lifecycle,
+     * application associations and the bounded Service Bridge.  It needs the
+     * object/memory/diagnostic subsystems above and the OWX validation code in
+     * the PS image path; it does not require VFS, CIS or userspace.  A failure
+     * is reported as a warning and the rest of the boot continues: an absent
+     * KDB breaks KAPA applications, not the main kernel. */
+    boot_begin("KDB Init");
+    {
+        OW_STATUS kdbst = OwKdbInitialize();
+        if (ow_status_success(kdbst)) {
+            OW_KDB_STATS kstats;
+            OwKdbGetStats(&kstats);
+            km_line(0x0E, "[KDB]", "registry online: %u associated-kernel descriptor(s)",
+                    (unsigned)kstats.Kernels);
+            km_line(0x0E, "[KDB]", "service bridge online: %u built-in service(s)",
+                    (unsigned)kstats.Services);
+            boot_diag_done(41, OW_C_KDB_READY, "KDB Init", 1);
+        } else {
+            OwDiagLogWarning(OW_W_KDB_UNAVAILABLE,
+                             "KDB subsystem unavailable; KAPA associations disabled");
+            km_line(0x0C, "[KDB]", "initialization FAILED (0x%X) - continuing without KDB",
+                    (unsigned)kdbst);
+            boot_diag_done(41, OW_SUCCESS, "KDB Init", 1);
+        }
     }
 
     /* Phase 5: Virtual File System */

@@ -251,6 +251,14 @@ set(KERNEL_COMMON_SOURCES
     ps/ps.c
     ps/switch.S
     ps/owx_loader.c
+    kdb/kdb_core.c
+    kdb/kdb_registry.c
+    kdb/kdb_loader.c
+    kdb/kdb_manager.c
+    kdb/kdb_assoc.c
+    kdb/kdb_bridge.c
+    kdb/kdb_sweep.c
+    kdb/kdb_exec.c
     usermode/usermode.c
     lib/ow_htl.c
     lib/kmem.c

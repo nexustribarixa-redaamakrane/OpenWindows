@@ -1,7 +1,7 @@
 #include "../inc/ow_superunicode.h"
 #include "../../superunicode/sutf/include/sutf8.h"
 #include "../../superunicode/suf/include/suf/suf_parser.h"
-#include "Build/generated/ow_terminal_font.h"
+#include "ow_terminal_font.h"
 
 static sutr_sie_queue_t g_input;
 static sutr_sim_channel_t g_messages;

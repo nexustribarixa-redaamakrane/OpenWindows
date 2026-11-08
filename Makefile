@@ -9,6 +9,10 @@ CFLAGS = -std=c99 -ffreestanding -nostdlib -fno-stack-protector -fno-pie \
          -Wall -Wextra -Werror \
          -I./inc -I./inc/bancode \
          -I../superunicode/sutf/include -I../superunicode/include -I../vip \
+         -I../superunicode/sust/include \
+         -I../superunicode/superunicode_extended/include \
+         -I../OpenWindows-Essentials/vendor/superunicode/suf/include \
+         -I./build-generated/generated \
          -I../OpenWindows-Storage/common/include \
          -I../OpenWindows-Storage/owfs/include \
          -I../OpenWindows-Storage/usfs/include -g
@@ -16,11 +20,21 @@ CFLAGS = -std=c99 -ffreestanding -nostdlib -fno-stack-protector -fno-pie \
 # Ecosystem source directories
 BANCODE_DIR = ./bancode
 SUTF_DIR    = ../superunicode/sutf
+SUST_DIR    = ../superunicode/sust
+EXTSU_DIR   = ../superunicode/superunicode_extended
 SUAS_DIR    = ../superunicode
+SUF_DIR     = ../OpenWindows-Essentials/vendor/superunicode/suf
 VIP_DIR     = ../vip
 STORAGE_COMMON_DIR = ../OpenWindows-Storage/common
 OWFS_DIR    = ../OpenWindows-Storage/owfs
 USFS_DIR    = ../OpenWindows-Storage/usfs
+
+# Generated terminal font header (lib/ow_superunicode.c and the SuperUnicode
+# host tests include it as "ow_terminal_font.h"; the directory below is on
+# CFLAGS/HOSTTEST_INCLUDES so both build systems resolve the same name).
+TERMINAL_FONT = assets/openwindows-terminal.suf
+FONT_HEADER_DIR = build-generated/generated
+FONT_HEADER = $(FONT_HEADER_DIR)/ow_terminal_font.h
 
 # Object files - Kernel Core
 CORE_OBJS = core/main.o \
@@ -52,6 +66,16 @@ SYNC_OBJS = sync/ow_sync.o
 # Object files - Deferred procedure calls (NT-like DPC / work queue)
 DPC_OBJS = dpc/ow_dpc.o
 
+# Object files - Kernel Dual Boot (KAPA associated-kernel management)
+KDB_OBJS = kdb/kdb_core.o \
+           kdb/kdb_registry.o \
+           kdb/kdb_loader.o \
+           kdb/kdb_manager.o \
+           kdb/kdb_assoc.o \
+           kdb/kdb_bridge.o \
+           kdb/kdb_sweep.o \
+           kdb/kdb_exec.o
+
 # Object files - User-mode (ring 3) launcher
 USERMODE_OBJS = usermode/usermode.o
 
@@ -80,6 +104,7 @@ LIB_OBJS = lib/ow_htl.o \
            lib/kprintf.o \
            lib/kalloc.o \
            lib/sucs.o \
+           lib/ow_superunicode.o \
            lib/ow_sha256.o \
            lib/ow_sha512.o \
            lib/ow_ed25519.o
@@ -90,10 +115,76 @@ BANCODE_OBJS = bancode/bancode.o \
 
 # Object files - Ecosystem (superunicode SUTF)
 SUC_OBJS = sucs/sutf8.o \
+           sucs/sutf16.o \
+           sucs/sutf4.o \
+           sucs/sutf2.o \
            sucs/sucs_mode.o
 
 # Object files - Ecosystem (superunicode SUAS: SKTO name admission)
-SUAS_OBJS = suas/suas_skto.o
+SUAS_OBJS = suas/suas_sdf.o \
+            suas/suas_sgw.o \
+            suas/suas_sbr.o \
+            suas/suas_sucf.o \
+            suas/suas_ssp.o \
+            suas/suas_sts.o \
+            suas/suas_sis.o \
+            suas/suas_sncs.o \
+            suas/suas_sip.o \
+            suas/suas_ssre.o \
+            suas/suas_scms.o \
+            suas/suas_sucd.o \
+            suas/suas_sisr.o \
+            suas/suas_suvtl.o \
+            suas/suas_suamr.o \
+            suas/suas_sukemet.o \
+            suas/suas_sueasd.o \
+            suas/suas_skto.o \
+            suas/suas_stim.o \
+            suas/suas_sucha.o \
+            suas/suas_stx.o \
+            suas/suas_sktc.o \
+            suas/suas_subsystems.o \
+            suas/suas_core.o
+
+# Object files - Ecosystem (superunicode SUTS)
+SUTS_OBJS = suts/suts_suca.o \
+            suts/suts_sre.o \
+            suts/suts_sldf.o \
+            suts/suts_sivd.o \
+            suts/suts_scss.o \
+            suts/suts_sidn.o \
+            suts/suts_sueps.o \
+            suts/suts_susch.o \
+            suts/suts_suldf.o \
+            suts/suts_susn.o \
+            suts/suts_scts.o \
+            suts/suts_scte.o \
+            suts/suts_suicl.o \
+            suts/suts_sulp.o \
+            suts/suts_strs.o \
+            suts/suts_module.o
+
+# Object files - Ecosystem (superunicode SUTR)
+SUTR_OBJS = sutr/sutr_sucsl.o \
+            sutr/sutr_sueas.o \
+            sutr/sutr_sums.o \
+            sutr/sutr_sucem.o \
+            sutr/sutr_sucpm.o \
+            sutr/sutr_sumnls.o \
+            sutr/sutr_sucm.o \
+            sutr/sutr_oktp.o \
+            sutr/sutr_sie.o \
+            sutr/sutr_sfs.o \
+            sutr/sutr_sim.o \
+            sutr/sutr_skc.o
+
+# Object files - Ecosystem (superunicode SUST)
+SUST_OBJS = sust/sust16.o \
+            sust/sustfixed.o \
+            sust/esust.o
+
+# Object files - Ecosystem (superunicode SUF font parser)
+SUF_OBJS = suf/suf_parser.o
 
 # Object files - Ecosystem (vip UniVIP/FVIP)
 VIP_OBJS = vip/univip_fvip.o
@@ -129,11 +220,12 @@ STOR_CORE_OBJS = storage/owdisk.o
 
 # All object files
 ALL_OBJS = $(CORE_OBJS) $(HAL_OBJS) $(RC_OBJS) $(PS_OBJS) $(SYNC_OBJS) $(DPC_OBJS) \
-           $(USERMODE_OBJS) \
+           $(USERMODE_OBJS) $(KDB_OBJS) \
            $(DIAG_OBJS) $(VFS_OBJS) \
            $(NET_OBJS) $(SENT_OBJS) $(CIS_OBJS) $(SYSCALL_OBJS) $(KAPI_OBJS) \
            $(SHELL_OBJS) $(LIB_OBJS) $(BANCODE_OBJS) \
-           $(SUC_OBJS) $(SUAS_OBJS) $(VIP_OBJS) \
+           $(SUC_OBJS) $(SUAS_OBJS) $(SUTS_OBJS) $(SUTR_OBJS) \
+           $(SUST_OBJS) $(SUF_OBJS) $(VIP_OBJS) \
            $(STOR_COMMON_OBJS) $(OWFS_OBJS) $(USFS_OBJS) $(STOR_CORE_OBJS)
 
 # Intermediate image
@@ -286,6 +378,11 @@ usermode/%.o: usermode/%.c
 	@mkdir -p usermode
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Kernel Dual Boot (KAPA associated-kernel management)
+kdb/%.o: kdb/%.c
+	@mkdir -p kdb
+	$(CC) $(CFLAGS) -c $< -o $@
+
 # Libraries
 lib/%.o: lib/%.c
 	@mkdir -p lib
@@ -305,6 +402,35 @@ sucs/%.o: $(SUTF_DIR)/src/%.c
 suas/%.o: $(SUAS_DIR)/src/suas/%.c
 	@mkdir -p suas
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# superunicode SUTS ecosystem (compiled from sibling repo)
+suts/%.o: $(SUAS_DIR)/src/suts/%.c
+	@mkdir -p suts
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# superunicode SUTR ecosystem (compiled from sibling repo)
+sutr/%.o: $(SUAS_DIR)/src/sutr/%.c
+	@mkdir -p sutr
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# superunicode SUST ecosystem (compiled from sibling repo)
+sust/%.o: $(SUST_DIR)/src/%.c
+	@mkdir -p sust
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# superunicode SUF ecosystem (compiled from sibling repo)
+suf/%.o: $(SUF_DIR)/src/%.c
+	@mkdir -p suf
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Generated terminal font header.  tools/embed_suf.py creates the parent
+# directory itself, but spelling the rule out keeps the dependency visible and
+# rebuilds the header when the font or the generator changes.
+$(FONT_HEADER): $(TERMINAL_FONT) tools/embed_suf.py
+	python tools/embed_suf.py $(TERMINAL_FONT) $@
+
+# lib/ow_superunicode.c includes the generated header as "ow_terminal_font.h".
+lib/ow_superunicode.o: $(FONT_HEADER)
 
 # vip UniVIP/FVIP ecosystem (compiled from sibling repo)
 vip/%.o: $(VIP_DIR)/%.c
@@ -1043,6 +1169,7 @@ HOSTTEST_SRC = tools/hosttest/host_hal.c \
                tools/hosttest/host_cis_verify.c \
                tools/hosttest/host_cis_loader.c \
                tools/hosttest/host_skto_name.c \
+               tools/hosttest/host_superunicode.c \
                core/main.c core/object.c core/memory.c core/pgfault.c \
                core/alpc.c core/runlevel.c \
                rc/rc.c hal/acpi.c \
@@ -1052,13 +1179,73 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                 syscall/dispatcher.c kapi/kernel64.c \
                 kapi/ow_skto_name.c shell/shell.c \
                 lib/ow_htl.c lib/kmem.c lib/kstring.c lib/kprintf.c \
-                lib/kalloc.c lib/sucs.c lib/ow_sha256.c \
-                lib/ow_sha512.c lib/ow_ed25519.c storage/owdisk.c \
+                lib/kalloc.c lib/sucs.c lib/ow_superunicode.c \
+                lib/ow_sha256.c lib/ow_sha512.c lib/ow_ed25519.c \
+                storage/owdisk.c \
                ps/ps.c ps/switch.S ps/owx_loader.c sync/ow_sync.c dpc/ow_dpc.c \
+               kdb/kdb_core.c kdb/kdb_registry.c kdb/kdb_loader.c \
+               kdb/kdb_manager.c kdb/kdb_assoc.c kdb/kdb_bridge.c \
+               kdb/kdb_sweep.c kdb/kdb_exec.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
-               $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sucs_mode.c \
+               $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sutf16.c \
+               $(SUTF_DIR)/src/sutf4.c $(SUTF_DIR)/src/sutf2.c \
+               $(SUTF_DIR)/src/sucs_mode.c \
+               $(SUAS_DIR)/src/suas/suas_sdf.c \
+               $(SUAS_DIR)/src/suas/suas_sgw.c \
+               $(SUAS_DIR)/src/suas/suas_sbr.c \
+               $(SUAS_DIR)/src/suas/suas_sucf.c \
+               $(SUAS_DIR)/src/suas/suas_ssp.c \
+               $(SUAS_DIR)/src/suas/suas_sts.c \
+               $(SUAS_DIR)/src/suas/suas_sis.c \
+               $(SUAS_DIR)/src/suas/suas_sncs.c \
+               $(SUAS_DIR)/src/suas/suas_sip.c \
+               $(SUAS_DIR)/src/suas/suas_ssre.c \
+               $(SUAS_DIR)/src/suas/suas_scms.c \
+               $(SUAS_DIR)/src/suas/suas_sucd.c \
+               $(SUAS_DIR)/src/suas/suas_sisr.c \
+               $(SUAS_DIR)/src/suas/suas_suvtl.c \
+               $(SUAS_DIR)/src/suas/suas_suamr.c \
+               $(SUAS_DIR)/src/suas/suas_sukemet.c \
+               $(SUAS_DIR)/src/suas/suas_sueasd.c \
                $(SUAS_DIR)/src/suas/suas_skto.c \
+               $(SUAS_DIR)/src/suas/suas_stim.c \
+               $(SUAS_DIR)/src/suas/suas_sucha.c \
+               $(SUAS_DIR)/src/suas/suas_stx.c \
+               $(SUAS_DIR)/src/suas/suas_sktc.c \
+               $(SUAS_DIR)/src/suas/suas_subsystems.c \
+               $(SUAS_DIR)/src/suas/suas_core.c \
+               $(SUAS_DIR)/src/suts/suts_suca.c \
+               $(SUAS_DIR)/src/suts/suts_sre.c \
+               $(SUAS_DIR)/src/suts/suts_sldf.c \
+               $(SUAS_DIR)/src/suts/suts_sivd.c \
+               $(SUAS_DIR)/src/suts/suts_scss.c \
+               $(SUAS_DIR)/src/suts/suts_sidn.c \
+               $(SUAS_DIR)/src/suts/suts_sueps.c \
+               $(SUAS_DIR)/src/suts/suts_susch.c \
+               $(SUAS_DIR)/src/suts/suts_suldf.c \
+               $(SUAS_DIR)/src/suts/suts_susn.c \
+               $(SUAS_DIR)/src/suts/suts_scts.c \
+               $(SUAS_DIR)/src/suts/suts_scte.c \
+               $(SUAS_DIR)/src/suts/suts_suicl.c \
+               $(SUAS_DIR)/src/suts/suts_sulp.c \
+               $(SUAS_DIR)/src/suts/suts_strs.c \
+               $(SUAS_DIR)/src/suts/suts_module.c \
+               $(SUAS_DIR)/src/sutr/sutr_sucsl.c \
+               $(SUAS_DIR)/src/sutr/sutr_sueas.c \
+               $(SUAS_DIR)/src/sutr/sutr_sums.c \
+               $(SUAS_DIR)/src/sutr/sutr_sucem.c \
+               $(SUAS_DIR)/src/sutr/sutr_sucpm.c \
+               $(SUAS_DIR)/src/sutr/sutr_sumnls.c \
+               $(SUAS_DIR)/src/sutr/sutr_sucm.c \
+               $(SUAS_DIR)/src/sutr/sutr_oktp.c \
+               $(SUAS_DIR)/src/sutr/sutr_sie.c \
+               $(SUAS_DIR)/src/sutr/sutr_sfs.c \
+               $(SUAS_DIR)/src/sutr/sutr_sim.c \
+               $(SUAS_DIR)/src/sutr/sutr_skc.c \
+               $(SUST_DIR)/src/sust16.c $(SUST_DIR)/src/sustfixed.c \
+               $(SUST_DIR)/src/esust.c \
+               $(SUF_DIR)/src/suf_parser.c \
                $(VIP_DIR)/univip_fvip.c \
                $(STORAGE_COMMON_DIR)/src/ow_checksum.c \
                $(STORAGE_COMMON_DIR)/src/ow_sec.c \
@@ -1087,6 +1274,10 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
 # systems must therefore agree on the name, not on a relative path.
 HOSTTEST_INCLUDES = -I./boot -I./inc -I./inc/bancode -I$(BANCODE_DIR) \
                     -I../superunicode/sutf/include -I../superunicode/include -I../vip \
+                    -I../superunicode/sust/include \
+                    -I../superunicode/superunicode_extended/include \
+                    -I$(SUF_DIR)/include \
+                    -I./build-generated/generated \
                     -I../OpenWindows-Storage/common/include \
                     -I../OpenWindows-Storage/owfs/include \
                     -I../OpenWindows-Storage/usfs/include \
@@ -1113,7 +1304,7 @@ owx-entries:
 # does NOT link the seed objects -- boot/owinit_seed.o would race host_boot.c for
 # the same catalog entries.  It does depend on all three image headers, because
 # the classifier and CRC tests read the real packed bytes.
-hosttest: $(OWINIT_HEADER) $(EMERGENCY_HDRS)
+hosttest: $(OWINIT_HEADER) $(EMERGENCY_HDRS) $(FONT_HEADER)
 	$(MAKE) owx-entries
 	$(CC) $(HOSTTEST_FLAGS) $(HOSTTEST_SRC) -o $(HOSTTEST_OUT)
 	$(HOSTTEST_OUT)
@@ -1122,7 +1313,7 @@ hosttest: $(OWINIT_HEADER) $(EMERGENCY_HDRS)
 # folded into hosttest because the sanitizers roughly double the run time and
 # slow the edit/test loop down; run both before landing anything that touches
 # bounds arithmetic.
-hosttest-asan: $(OWINIT_HEADER) $(EMERGENCY_HDRS)
+hosttest-asan: $(OWINIT_HEADER) $(EMERGENCY_HDRS) $(FONT_HEADER)
 	$(CC) $(HOSTTEST_ASAN_FLAGS) $(HOSTTEST_SRC) -o $(HOSTTEST_ASAN_OUT)
 	$(HOSTTEST_ASAN_OUT)
 
