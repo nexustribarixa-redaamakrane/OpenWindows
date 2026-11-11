@@ -184,8 +184,8 @@ to end.
   `kdb_exec.c`/KDB objects and SuperUnicode objects/generated font header
   (`tools/embed_suf.py` → `build-generated/generated/ow_terminal_font.h`, included via
   `-I./build-generated/generated`, `lib/ow_superunicode.o`) are wired in Makefile/CMake.
-- Hosttest: `make hosttest` — **`=== RESULT: 1389 passed, 0 failed ===`**
-  (`build-hosttest-fix2.log`, completed). Kernel Integrity passed with the correctly
+- Hosttest: `make hosttest` — **`=== RESULT: 1418 passed, 0 failed ===`**
+  (`build-hosttest-kdb-exec.log`, completed). Kernel Integrity passed with the correctly
   provisioned full image (`provisioned openwinkrnl.owx on host OWFS (ino 5, size 1642496)`,
   `<<[FINISHED] Kernel Integrity>> x1`). `--- Kernel Dual Boot / KAPA verified` printed.
 - ASan: `make hosttest-asan` attempted; this w64devkit toolchain lacks `-lasan`/`-lubsan`
@@ -222,14 +222,20 @@ In `test_kdb()`/KDB suite, executed and passing: launch-plan construction for li
 READY/RUNNING instances with expected metadata, null/out-of-range handling, executor
 unavailable (`OwKdbExecutionAvailable()` false, `OW_KDB_BLOCKER_EXECUTOR_UNAVAILABLE`),
 faulted-instance plan inspectability, and Sweep service-ID bridge/authorization
-integration scaffolding (owner/instance/capability enforcement). The executor seam API
-(`OwKdbRegisterExecutor`/`OwKdbUnregisterExecutor`/`OwKdbExecuteInstance`, backend
-handoff success/failure with revalidation and fault cleanup) is implemented in source;
-dedicated hosttest assertions for registration/unregistration/handoff paths are not yet
-added (recommended follow-up).
+integration scaffolding (owner/instance/capability enforcement). Dedicated executor-seam
+assertions now install **test-only** backends and verify: registration makes execution
+available; `OwKdbExecuteInstance` invokes an accepting backend exactly once with the
+validated instance id; a null backend restores the unavailable default; execution without
+a backend returns `OW_ERR_UNSUPPORTED` without faulting or releasing pages; an unknown
+instance is rejected before the backend is reached; a rejecting backend propagates its
+error and faults the instance (page charge released, fault status recorded); unregistration
+restores the no-executor default. These backends do not execute a second kernel.
 
 - Sweep (separate project): engine slice `24 passed, 0 failed`; service handlers
-  `18 passed, 0 failed` (standalone host tests). See `C:\Users\KARIMABENDA\Documents\Sweep\SWEEP.md`.
+  `18 passed, 0 failed`; text `30 passed, 0 failed`; browser `39 passed, 0 failed`;
+  HTML `30 passed, 0 failed`; CSS/cascade/layout/paint `174 passed, 0 failed`
+  (**315 total, 0 failed** via `make sweep-tests`). See
+  `C:\Users\KARIMABENDA\Documents\Sweep\SWEEP.md`.
 
 ## Diagnostics
 
@@ -247,4 +253,4 @@ authorization, Sweep fixture attach/load path, launch-plan/executor-seam checks,
 Sweep service-ID bridge/authorization integration scaffolding.
 
 Run with `make hosttest` (or `cmake --build <build> --target hosttest && ctest -R hosttest`).
-The latest run is **not verified complete** (see status above).
+Latest verified run: **1418 passed, 0 failed** (`build-hosttest-kdb-exec.log`).

@@ -4224,6 +4224,31 @@ static OW_STATUS kdb_test_echo_handler(uint32_t ServiceId,
   return OW_SUCCESS;
 }
 
+/* Test-only executor backends.  They exercise the handoff contract and record
+ * what KDB validated; they do not run a second kernel.  The accept backend
+ * treats Context as a call counter so the test can prove when it is invoked. */
+static uint32_t kdb_test_exec_last_instance = OW_KDB_INVALID_ID;
+
+static OW_STATUS kdb_test_executor_accept(const OW_KDB_LAUNCH_PLAN *Plan,
+                                          void *Context) {
+  if (Plan == (const OW_KDB_LAUNCH_PLAN *)0 || Context == (void *)0) {
+    return OW_ERR_NULL_POINTER;
+  }
+  if (!Plan->ManagementReady) {
+    return OW_ERR_INVALID_PARAM;
+  }
+  ++*(uint32_t *)Context;
+  kdb_test_exec_last_instance = Plan->InstanceId;
+  return OW_SUCCESS;
+}
+
+static OW_STATUS kdb_test_executor_reject(const OW_KDB_LAUNCH_PLAN *Plan,
+                                          void *Context) {
+  (void)Plan;
+  (void)Context;
+  return OW_ERR_CORRUPT;
+}
+
 static void test_kdb(void) {
   static OW_KDB_KERNEL_DESC desc;
   static uint8_t corrupt[OWINIT_IMAGE_SIZE];
@@ -4981,6 +5006,109 @@ static void test_kdb(void) {
       check_eq("the execution-test application is disassociated",
                (unsigned long)st, (unsigned long)OW_SUCCESS);
     }
+  }
+
+  /* ---- Executor seam: registration, handoff, rejection -------------- */
+  /* No real associated-kernel backend is registered by this build.  These
+   * cases install test-only backends to verify that KDB validates the plan,
+   * invokes the backend exactly when reachable, and faults the instance when
+   * the backend fails.  They do not claim CPU/MMU execution. */
+  {
+    OW_KDB_LAUNCH_PLAN plan;
+    OW_STATUS pst;
+    uint32_t exec_app = OW_KDB_INVALID_ID;
+    uint32_t exec_inst = OW_KDB_INVALID_ID;
+    uint32_t calls = 0u;
+
+    st = OwKdbAssociateApplication("sweep-exec-seam", sweep_kernel,
+                                   OW_KDB_CAP_CALL, &exec_app);
+    check_eq("an executor-seam application associates", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+    st = OwKdbLoadInstance(exec_app, 8u, &exec_inst);
+    check_eq("the executor-seam instance loads", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+
+    kdb_test_exec_last_instance = OW_KDB_INVALID_ID;
+    st = OwKdbRegisterExecutor(kdb_test_executor_accept, &calls);
+    check_eq("a test executor backend registers", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+    check_window("registration makes execution available",
+                 OwKdbExecutionAvailable(), true);
+
+    pst = OwKdbBuildLaunchPlan(exec_inst, &plan);
+    check_eq("a registered backend still builds a plan", (unsigned long)pst,
+             (unsigned long)OW_SUCCESS);
+    check_window("the plan reports execution available",
+                 plan.ExecutionAvailable, true);
+    check_window("the plan has no blocker with a backend",
+                 plan.Blocker == OW_KDB_BLOCKER_NONE, true);
+
+    st = OwKdbExecuteInstance(exec_inst);
+    check_eq("execution is handed to the registered backend",
+             (unsigned long)st, (unsigned long)OW_SUCCESS);
+    check_eq("the backend is invoked exactly once", (unsigned long)calls, 1ul);
+    check_eq("the backend receives the validated instance id",
+             (unsigned long)kdb_test_exec_last_instance,
+             (unsigned long)exec_inst);
+
+    /* A null backend unregisters without claiming execution. */
+    calls = 0u;
+    st = OwKdbRegisterExecutor((OW_KDB_EXECUTOR_BACKEND)0, (void *)0);
+    check_eq("registering a null backend succeeds", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+    check_window("a null backend leaves execution unavailable",
+                 OwKdbExecutionAvailable(), false);
+    check_eq("execution without a backend is unsupported",
+             (unsigned long)OwKdbExecuteInstance(exec_inst),
+             (unsigned long)OW_ERR_UNSUPPORTED);
+    check_eq("the backend was not invoked without a registration",
+             (unsigned long)calls, 0ul);
+    st = OwKdbGetInstance(exec_inst, &inst);
+    check_eq("an unsupported execution leaves the instance inspectable",
+             (unsigned long)st, (unsigned long)OW_SUCCESS);
+    check_eq("an unsupported execution does not fault the instance",
+             (unsigned long)inst.State, (unsigned long)OW_KDB_INSTANCE_READY);
+    check_window("an unsupported execution does not release pages",
+                 inst.ResidentPages != 0u, true);
+
+    /* An unknown instance is rejected before the backend is reached. */
+    st = OwKdbRegisterExecutor(kdb_test_executor_accept, &calls);
+    check_eq("the accepting backend registers again", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+    calls = 0u;
+    check_eq("executing an unknown instance is refused",
+             (unsigned long)OwKdbExecuteInstance(0xFFFFu),
+             (unsigned long)OW_ERR_INVALID_PARAM);
+    check_eq("the backend is not reached for an unknown instance",
+             (unsigned long)calls, 0ul);
+
+    /* A backend failure must fault the instance and release its charge. */
+    st = OwKdbRegisterExecutor(kdb_test_executor_reject, (void *)0);
+    check_eq("a rejecting backend registers", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+    check_eq("a backend rejection is propagated",
+             (unsigned long)OwKdbExecuteInstance(exec_inst),
+             (unsigned long)OW_ERR_CORRUPT);
+    st = OwKdbGetInstance(exec_inst, &inst);
+    check_eq("the rejected instance remains inspectable", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+    check_eq("a backend rejection faults the instance",
+             (unsigned long)inst.State, (unsigned long)OW_KDB_INSTANCE_FAULTED);
+    check_eq("a backend rejection releases the page charge",
+             (unsigned long)inst.ResidentPages, 0ul);
+    check_eq("a backend rejection records the fault status",
+             (unsigned long)inst.LastFault, (unsigned long)OW_ERR_CORRUPT);
+
+    OwKdbUnregisterExecutor();
+    check_window("unregistration restores the no-executor default",
+                 OwKdbExecutionAvailable(), false);
+
+    st = OwKdbDestroyInstance(exec_inst);
+    check_eq("the rejected instance is destroyed", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
+    st = OwKdbDisassociateApplication(exec_app);
+    check_eq("the executor-seam application is disassociated", (unsigned long)st,
+             (unsigned long)OW_SUCCESS);
   }
 
   /* ---- Sweep service integration (bridge/instance context) ---------- */
