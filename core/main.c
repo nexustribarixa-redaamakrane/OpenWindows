@@ -23,6 +23,7 @@
 #include "../inc/ow_ps.h"
 #include "../inc/ow_kdb.h"
 #include "../inc/ow_kapa.h"
+#include "../inc/owksan.h"
 #include "../storage/owdisk.h"
 #include "../inc/ow_usermode.h"
 #include <stdarg.h>
@@ -563,6 +564,26 @@ void _start(void) {
         } else {
             km_line(0x0C, "[KAPA]", "initialization FAILED (0x%X) - continuing",
                     (unsigned)kapast);
+        }
+    }
+
+    /* Phase 4f: OWKSan Suite framework core (Phase 1 of the suite: the
+     * framework only - module registry, configuration, reporting, panic hook).
+     * The check modules register themselves in later phases.  The core starts
+     * inert (master switch off) so an unconfigured kernel pays no diagnostic
+     * cost, and a failure here disables the suite without halting the machine:
+     * a broken sanitizer must never take the main kernel down on its own. */
+    boot_begin("KSAN Init");
+    {
+        OW_STATUS ksanst = OwKSanInitialize();
+        if (ow_status_success(ksanst)) {
+            /* Explicit configuration: the suite runs only while armed. */
+            OwKSanSetMasterEnabled(false);
+            boot_diag_done(42, OW_C_OWKSAN_READY, "KSAN Init", 1);
+        } else {
+            OwDiagLogWarning(OW_W_OWKSAN_UNAVAILABLE,
+                            "OWKSan core unavailable; sanitization deferred");
+            boot_diag_failed(42, ksanst, "KSAN Init");
         }
     }
 

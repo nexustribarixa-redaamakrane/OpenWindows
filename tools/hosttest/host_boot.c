@@ -55,6 +55,7 @@ int test_superunicode_run(int* out_passed);
 #include "../../inc/ow_hal.h"
 #include "../../inc/ow_kdb.h"
 #include "../../inc/ow_kapa.h"
+#include "../../inc/owksan.h"
 #include "../../inc/ow_kprintf.h"
 /* Resolved on the include path, not by relative path: the generated header
  * lives in the build tree -- boot/ under the Makefile, <build>/generated under
@@ -5282,6 +5283,105 @@ static uint32_t kdb_test_build_elf(uint8_t *Image, uint16_t Type,
   return KDB_TEST_ELF_SIZE;
 }
 
+static int ksan_test_init(void) { return OW_SUCCESS; }
+static void ksan_test_shutdown(void) { }
+
+/* Phase 1 of the OWKSan Suite: framework-core behaviour.  The boot phase has
+ * already run the suite core (inert, master off, empty module table); this
+ * drives the registry / configuration / reporting / counter / panic seams that
+ * the Phase-2+ check modules hang their checks off, so the foundation itself is
+ * regression-tested before any check module lands. */
+static void test_owksan_core(void) {
+  static OW_KSAN_MODULE mod;
+  const char* name = "OWKTestSynthetic";
+  OW_STATUS st;
+  OW_KSAN_SEVERITY sev;
+  uint32_t i;
+
+  printf("\n=== OWKSan Suite (Phase 1 framework core) ===\n");
+
+  check_window("OWKSan core is ready after the boot phase", OwKSanReady(), true);
+  check_eq("OWKSan module table starts empty", (unsigned long)OwKSanModuleCount(), 0ul);
+  check_eq("OWKSan starts with no module enabled", (unsigned long)OwKSanEnabledModuleCount(), 0ul);
+  check_window("OWKSan master switch defaults to disabled", OwKSanMasterEnabled(), false);
+
+  mod.InitOrder = 100u;
+  mod.Enabled = true;
+  mod.DependsOn = (const char*)0;
+  mod.Initialize = ksan_test_init;
+  mod.Shutdown = ksan_test_shutdown;
+  mod.Inited = false;
+  mod.InitStatus = OW_SUCCESS;
+  for (i = 0; i < (OW_KSAN_MODULE_NAME_MAX - 1u) && name[i] != '\0'; ++i) {
+    mod.Name[i] = name[i];
+  }
+  mod.Name[i] = '\0';
+
+  st = OwKSanRegisterModule(&mod);
+  check_eq("OWKSan registers a synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("OWKSan module table holds the synthetic module", (unsigned long)OwKSanModuleCount(), 1ul);
+
+  st = OwKSanGetModule(name, &mod);
+  check_eq("the synthetic module is queryable", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("the synthetic module is enabled by default", mod.Enabled, true);
+  check_eq("the synthetic module init status is success", (unsigned long)mod.InitStatus, (unsigned long)OW_SUCCESS);
+
+  st = OwKSanEnableModule(name);
+  check_eq("OWKSan refuses an unknown module name", (unsigned long)OwKSanEnableModule("OWKNoSuchModule"), (unsigned long)OW_ERR_NOT_FOUND);
+  check_eq("OWKSan enables the synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("OWKSan enabled-module count is one", (unsigned long)OwKSanEnabledModuleCount(), 1ul);
+  check_eq("OWKSan initialises the enabled module", (unsigned long)OwKSanInitializeEnabledModules(), (unsigned long)OW_SUCCESS);
+  st = OwKSanGetModule(name, &mod);
+  check_window("the synthetic module is now inited", mod.Inited, true);
+
+  /* The suite boots inert (master off); arm it so the reporting path runs. */
+  OwKSanSetMasterEnabled(true);
+
+  OwKSanResetCounters();
+  sev = OwKSanReport(OW_KSAN_SEVERITY_OK, name, "synthetic ok");
+  check_window("a synthetic OK report is accepted", sev == OW_KSAN_SEVERITY_OK, true);
+  check_eq("the report counter counted the OK report", (unsigned long)OwKSanReportCount(), 1ul);
+  check_eq("no fatal was recorded by an OK report", (unsigned long)OwKSanFatalCount(), 0ul);
+
+  sev = OwKSanReport(OW_KSAN_SEVERITY_WARNING, name, "synthetic warn");
+  check_window("a synthetic WARNING report is accepted", sev == OW_KSAN_SEVERITY_WARNING, true);
+  check_eq("the report counter counted the WARNING report", (unsigned long)OwKSanReportCount(), 2ul);
+
+  sev = OwKSanReport(OW_KSAN_SEVERITY_ERROR, name, "synthetic error");
+  check_window("a synthetic ERROR report is accepted", sev == OW_KSAN_SEVERITY_ERROR, true);
+  check_eq("the report counter counted the ERROR report", (unsigned long)OwKSanReportCount(), 3ul);
+
+  OwKSanSetMasterEnabled(false);
+  sev = OwKSanReport(OW_KSAN_SEVERITY_ERROR, name, "synthetic waived");
+  check_window("a master-disabled report is waived", sev == OW_KSAN_SEVERITY_OK, true);
+  check_eq("a waived report is not counted", (unsigned long)OwKSanReportCount(), 3ul);
+
+  OwKSanSetMasterEnabled(true);
+  st = OwKSanConfigureModule(name, false);
+  check_eq("OWKSan disables the synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  sev = OwKSanReport(OW_KSAN_SEVERITY_ERROR, name, "synthetic waived2");
+  check_window("a disabled-module report is waived", sev == OW_KSAN_SEVERITY_OK, true);
+  check_eq("a disabled-module report is not counted", (unsigned long)OwKSanReportCount(), 3ul);
+  st = OwKSanConfigureModule(name, true);
+  check_eq("OWKSan re-enables the synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
+
+  sev = OwKSanReport(OW_KSAN_SEVERITY_FATAL, name, "synthetic fatal");
+  check_window("a synthetic FATAL report is accepted", sev == OW_KSAN_SEVERITY_FATAL, true);
+  check_eq("the fatal counter recorded the FATAL report", (unsigned long)OwKSanFatalCount(), 1ul);
+  OwKSanPanic(name, "synthetic detail", OW_ERR_CORRUPT);
+  check_eq("the fatal counter is unchanged by the panic sink", (unsigned long)OwKSanFatalCount(), 1ul);
+
+  st = OwKSanDisableModule(name);
+  check_eq("OWKSan disables the synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  OwKSanShutdown();
+  check_window("OWKSan is no longer ready after shutdown", OwKSanReady(), false);
+  OwKSanUnregisterModule(name);
+  check_eq("the synthetic module is gone from the table", (unsigned long)OwKSanModuleCount(), 0ul);
+
+  check_eq("OWKSan re-initialises to ready", (unsigned long)OwKSanInitialize(), (unsigned long)OW_SUCCESS);
+  check_window("OWKSan re-armed off after re-initialisation", OwKSanMasterEnabled(), false);
+}
+
 static void test_kdb_extensions(void) {
   static const char k_mf_base[] =
       "# base raw custom ABI\n"
@@ -6171,6 +6271,19 @@ int main(int argc, char **argv) {
   }
 
   /* ------------------------------------------------------------------ */
+  /* Phase 4f: OWKSan Suite framework core                               */
+  /* ------------------------------------------------------------------ */
+
+  st = OwKSanInitialize();
+
+  if (!ow_status_success(st)) {
+    printf("[BOOT] OWKSan init failed\n");
+    return 1;
+  }
+
+  OwKSanSetMasterEnabled(false);
+
+  /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */
   /* ------------------------------------------------------------------ */
   /* Placed where the kernel arms it: after the process subsystem and before
@@ -6732,6 +6845,12 @@ int main(int argc, char **argv) {
 
   test_kdb();
   test_kdb_extensions();
+
+  /* ------------------------------------------------------------------ */
+  /* OWKSan Suite (Phase 1 framework core)                              */
+  /* ------------------------------------------------------------------ */
+
+  test_owksan_core();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */

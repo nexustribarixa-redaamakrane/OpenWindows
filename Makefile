@@ -84,6 +84,9 @@ KDB_OBJS = kdb/kdb_core.o \
 # Object files - KAPA application facade
 KAPA_OBJS = kapa/kapa_core.o
 
+# Object files - OWKSan Suite (kernel sanitization framework core)
+SANITIZER_OBJS = sanitizer/owksan_core.o
+
 # Object files - User-mode (ring 3) launcher
 USERMODE_OBJS = usermode/usermode.o
 
@@ -228,7 +231,7 @@ STOR_CORE_OBJS = storage/owdisk.o
 
 # All object files
 ALL_OBJS = $(CORE_OBJS) $(HAL_OBJS) $(RC_OBJS) $(PS_OBJS) $(SYNC_OBJS) $(DPC_OBJS) \
-           $(USERMODE_OBJS) $(KDB_OBJS) $(KAPA_OBJS) \
+           $(USERMODE_OBJS) $(KDB_OBJS) $(KAPA_OBJS) $(SANITIZER_OBJS) \
            $(DIAG_OBJS) $(VFS_OBJS) \
            $(NET_OBJS) $(SENT_OBJS) $(CIS_OBJS) $(SYSCALL_OBJS) $(KAPI_OBJS) \
            $(SHELL_OBJS) $(LIB_OBJS) $(BANCODE_OBJS) \
@@ -389,6 +392,11 @@ usermode/%.o: usermode/%.c
 # Kernel Dual Boot (KAPA associated-kernel management)
 kdb/%.o: kdb/%.c
 	@mkdir -p kdb
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# OWKSan Suite
+sanitizer/%.o: sanitizer/%.c
+	@mkdir -p sanitizer
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # Libraries
@@ -1196,6 +1204,7 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                kdb/kdb_sweep.c kdb/kdb_exec.c \
                kdb/kdb_abi.c kdb/kdb_elf.c kdb/kdb_manifest.c \
                kdb/kdb_history.c kdb/kdb_exec_ps.c kapa/kapa_core.c \
+               sanitizer/owksan_core.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
                $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sutf16.c \

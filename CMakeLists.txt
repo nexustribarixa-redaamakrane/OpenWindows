@@ -265,6 +265,7 @@ set(KERNEL_COMMON_SOURCES
     kdb/kdb_history.c
     kdb/kdb_exec_ps.c
     kapa/kapa_core.c
+    sanitizer/owksan_core.c
     usermode/usermode.c
     lib/ow_htl.c
     lib/kmem.c
