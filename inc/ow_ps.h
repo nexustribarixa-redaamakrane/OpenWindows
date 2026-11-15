@@ -210,9 +210,17 @@ OW_STATUS    OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc);
  * built by the MinGW-w64 GCC target (x86_64-w64-mingw32) and its PE entry point
  * is the compiled C `main`, which reads argc from RCX and argv from RDX.  A
  * SysV image would read RDI/RSI instead and therefore is not supported by this
- * contract. */
+ * contract.
+ *
+ * `Publish` controls when the entry thread becomes schedulable.  true (the
+ * default used by OwPsLaunchUserImage) enqueues it before returning, so any
+ * CPL3 entry can happen as soon as a scheduling event picks it up.  false
+ * leaves it DORMANT: the caller is expected to complete its own bookkeeping
+ * (for KDB, installing the instance binding) and then call OwPsWakeThread().
+ * That closes the window in which a PIT preemption could enter a payload whose
+ * authority is not yet recorded. */
 OW_STATUS    OwPsLaunchUserImageEx(OW_PROCESS_OBJECT* Proc, int argc,
-                                   const char* const argv[]);
+                                   const char* const argv[], bool Publish);
 
 /* Pure, host-testable stamp for the process-entry argument registers.  Sets the
  * Microsoft x64 slots in `Context` that ow_ps_resume_thread loads at CPL3:
@@ -280,6 +288,11 @@ void          OwPsYield(void);
 void          OwPsSchedulerTick(void* Frame);
 void          OwPsScheduleNext(void);     /* block current thread, run next */
 void          OwPsWakeThread(OW_THREAD_OBJECT* Thr);
+/* Retire a prepared-but-undispatched thread: removes it from the ready queue
+ * (if present) and marks it TERMINATED.  A thread that is already running is
+ * left to the owning exit path.  Used by the KDB executor when an instance is
+ * abandoned before its bound thread ever resumed. */
+void          OwPsAbandonThread(uint32_t ThreadId, uint32_t ProcessId);
 OW_THREAD_OBJECT* OwPsGetCurrentThread(void);
 OW_THREAD_OBJECT* OwPsGetThreadByIndex(uint32_t Index);
 OW_PROCESS_OBJECT* OwPsGetProcessById(uint32_t ProcessId);

@@ -259,6 +259,12 @@ set(KERNEL_COMMON_SOURCES
     kdb/kdb_bridge.c
     kdb/kdb_sweep.c
     kdb/kdb_exec.c
+    kdb/kdb_abi.c
+    kdb/kdb_elf.c
+    kdb/kdb_manifest.c
+    kdb/kdb_history.c
+    kdb/kdb_exec_ps.c
+    kapa/kapa_core.c
     usermode/usermode.c
     lib/ow_htl.c
     lib/kmem.c

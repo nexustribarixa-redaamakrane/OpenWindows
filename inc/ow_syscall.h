@@ -91,6 +91,36 @@
  * A caller polls and sleeps between polls. */
 #define OW_SYS_UART_READ               0x021U
 
+/* KAPA Service Bridge from CPL3.
+ *
+ *   P1 = user VA of an OW_SYS_KDB_BRIDGE_CALL request/response block
+ *   P2 = P3 = 0
+ *   returns 0 on success, -1 on any refusal.
+ *
+ * Authorization is derived from the calling thread's live KDB executor
+ * binding, never from a caller-supplied association.  A thread with no binding
+ * is refused, so an ordinary userspace process cannot reach the associated-
+ * kernel bridge.  The request struct, the request payload and the response
+ * buffer are each validated against the caller's own VAD tree and the guarded
+ * user window before any byte is copied.  Lengths are bounded by
+ * OW_KDB_BRIDGE_MAX_REQUEST / OW_KDB_BRIDGE_MAX_RESPONSE. */
+#define OW_SYS_KDB_BRIDGE              0x022U
+#define OW_SYS_KDB_BRIDGE_MAGIC        0x4B444243U /* 'KDB C' */
+#define OW_SYS_KDB_BRIDGE_VERSION      1U
+
+typedef struct _OW_SYS_KDB_BRIDGE_CALL {
+    uint32_t Magic;              /* OW_SYS_KDB_BRIDGE_MAGIC                   */
+    uint32_t Version;            /* OW_SYS_KDB_BRIDGE_VERSION                 */
+    uint32_t ServiceId;          /* explicit bridge service id                */
+    uint32_t TargetInstanceId;   /* 0 = main kernel; else caller's instance   */
+    uint64_t RequestVa;          /* user request payload, may be 0 if len 0   */
+    uint64_t ResponseVa;         /* user response buffer, may be 0 if cap 0   */
+    uint32_t RequestLength;
+    uint32_t ResponseCapacity;
+    uint32_t ResponseLength;     /* out: bytes written to ResponseVa          */
+    uint32_t Reserved;           /* must be 0                                 */
+} OW_SYS_KDB_BRIDGE_CALL;
+
 OW_STATUS    OwSyscallInitialize(void);
 int64_t      OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2, uint64_t P3);
 

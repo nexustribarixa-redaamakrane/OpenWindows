@@ -20,6 +20,7 @@
 #include "../inc/ow_memory.h"
 #include "../inc/ow_pgfault.h"
 #include "../inc/ow_ps.h"
+#include "../inc/ow_kdb.h"
 #include "../hal/idt.h"
 
 static OW_PF_STATS s_Stats;
@@ -376,6 +377,29 @@ bool OwPfDispatch(void* Frame) {
 
     pf_account(Kind);
     pf_log(F, Addr, Err, Kind);
+
+    /* KAPA execution attribution.  A terminal fault -- one the resolver did not
+     * resolve, so the instruction is not retried -- on a thread holding a live
+     * KDB binding is attributed to that instance: the instance is faulted
+     * through the normal fault path, which releases its frames/pages, drops the
+     * association and clears the binding, and the thread is then retired
+     * through the ordinary exit path.  The fault kind becomes the instance's
+     * recorded fault, so the outcome is concrete (guard, not-mapped,
+     * protection, starved, ...) rather than an anonymous kernel crash.
+     *
+     * Only ring-3 faults are eligible: a CPL0 fault is classified OW_PF_KERNEL
+     * before this point and is never laundered into a KAPA fault, and a thread
+     * without a live KDB binding never reaches the notify, so the pre-existing
+     * terminal behaviour is preserved for the normal cases. */
+    if ((Kind != OW_PF_RESOLVED) && Thr != (OW_THREAD_OBJECT*)0 &&
+        (F->Cs & 3u) == 3u) {
+        if (OwKdbNotifyThreadFault(Thr->Tid, Thr->ProcessId, (OW_STATUS)Kind)) {
+            OwPsExitThread((uint64_t)Kind);
+            /* OwPsExitThread only returns when no ready thread is left, in
+             * which case it halts; returning past it is not expected. */
+            return false;
+        }
+    }
 
     /* A guard hit ends the task.  Everything else that reaches here is either
      * resolved (retry) or terminal (crash banner). */

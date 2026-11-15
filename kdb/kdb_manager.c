@@ -160,12 +160,21 @@ OW_STATUS OwKdbLoadInstance(uint32_t AssociationId, uint32_t PageLimit,
     g_Instances[free_slot].LastFault = OW_SUCCESS;
     g_Instances[free_slot].EntryPoint = entry;
     g_Instances[free_slot].MappedBase = base;
+    g_Instances[free_slot].Abi = kernel->Abi;
+    g_Instances[free_slot].Format = kernel->Format;
+    g_Instances[free_slot].ProcessId = 0U;
+    g_Instances[free_slot].ThreadId = 0U;
+    g_Instances[free_slot].ExitStatus = 0U;
+    g_Instances[free_slot].ExecutionStarted = false;
 
     if (!OwKdbAssociationSetInstance(AssociationId, instance_id)) {
         g_Instances[free_slot].Id = OW_KDB_INVALID_ID;
         return OW_ERR_INSUFFICIENT;
     }
     g_InstanceInUse[free_slot] = true;
+
+    OwKdbHistoryRecord(OW_KDB_EVENT_LOADED, instance_id, OW_SUCCESS, 0U, 0U,
+                       entry);
 
     if (OutInstanceId != (uint32_t*)0) {
         *OutInstanceId = instance_id;
@@ -191,6 +200,8 @@ OW_STATUS OwKdbStartInstance(uint32_t InstanceId) {
     case OW_KDB_INSTANCE_READY:
     case OW_KDB_INSTANCE_STOPPED:
         g_Instances[InstanceId - 1U].State = OW_KDB_INSTANCE_RUNNING;
+        OwKdbHistoryRecord(OW_KDB_EVENT_STARTED, InstanceId, OW_SUCCESS, 0U, 0U,
+                           g_Instances[InstanceId - 1U].EntryPoint);
         return OW_SUCCESS;
     case OW_KDB_INSTANCE_RUNNING:
         return OW_ERR_ALREADY_EXISTS;
@@ -211,7 +222,18 @@ OW_STATUS OwKdbStopInstance(uint32_t InstanceId) {
     switch (g_Instances[InstanceId - 1U].State) {
     case OW_KDB_INSTANCE_RUNNING:
     case OW_KDB_INSTANCE_READY:
+        /* A logical stop must also retire the concrete execution binding: if a
+         * PS process/thread was prepared for this instance, leaving it alive
+         * would make "STOPPED" a lie and leave the thread able to call the
+         * bridge after the owner asked for it to stop.  Abandoning the binding
+         * first means the transition below describes the real world. */
+        OwKdbExecPsAbandonInstance(InstanceId,
+                                   (uint64_t)OW_KDB_INSTANCE_STOPPED);
         g_Instances[InstanceId - 1U].State = OW_KDB_INSTANCE_STOPPED;
+        OwKdbHistoryRecord(OW_KDB_EVENT_STOPPED, InstanceId, OW_SUCCESS,
+                           g_Instances[InstanceId - 1U].ProcessId,
+                           g_Instances[InstanceId - 1U].ThreadId,
+                           g_Instances[InstanceId - 1U].EntryPoint);
         return OW_SUCCESS;
     case OW_KDB_INSTANCE_STOPPED:
         return OW_SUCCESS;
@@ -219,6 +241,99 @@ OW_STATUS OwKdbStopInstance(uint32_t InstanceId) {
     default:
         return OW_ERR_INVALID_PARAM;
     }
+}
+
+/* READY/STOPPED -> RUNNING.  Called only from the scheduler dispatch hook,
+ * which is the first moment the bound thread is actually about to run. */
+OW_STATUS OwKdbManagerMarkRunning(uint32_t InstanceId) {
+    OW_KDB_INSTANCE* instance;
+
+    if (!OwKdbIsReady()) {
+        return OW_ERR_NOT_INITIALIZED;
+    }
+    if (!OwKdbManagerExists(InstanceId)) {
+        return OW_ERR_NOT_FOUND;
+    }
+
+    instance = &g_Instances[InstanceId - 1U];
+    switch (instance->State) {
+    case OW_KDB_INSTANCE_READY:
+    case OW_KDB_INSTANCE_STOPPED:
+        instance->State = OW_KDB_INSTANCE_RUNNING;
+        instance->ExecutionStarted = true;
+        OwKdbHistoryRecord(OW_KDB_EVENT_RUNNING, InstanceId, OW_SUCCESS,
+                           instance->ProcessId, instance->ThreadId,
+                           instance->EntryPoint);
+        ow_kprintf("[KDB] instance %u: bound thread resumed on CPU "
+                   "(state=RUNNING)\r\n",
+                   (unsigned)InstanceId);
+        return OW_SUCCESS;
+    case OW_KDB_INSTANCE_RUNNING:
+        instance->ExecutionStarted = true;
+        return OW_ERR_ALREADY_EXISTS;
+    case OW_KDB_INSTANCE_FAULTED:
+    default:
+        return OW_ERR_INVALID_PARAM;
+    }
+}
+
+/* Normal (non-fault) finish: the bound thread exited with ExitStatus.  The
+ * process and its frame run are released by the executor's exit hook before
+ * this runs; the manager only retires the logical instance.  It keeps the
+ * instance queryable (including ExitStatus and the historical ProcessId/
+ * ThreadId identifiers) but releases the page charge, drops the association
+ * link and removes any services the instance owned. */
+OW_STATUS OwKdbManagerFinish(uint32_t InstanceId, uint64_t ExitStatus) {
+    OW_KDB_INSTANCE* instance;
+
+    if (!OwKdbIsReady()) {
+        return OW_ERR_NOT_INITIALIZED;
+    }
+    if (!OwKdbManagerExists(InstanceId)) {
+        return OW_ERR_NOT_FOUND;
+    }
+
+    instance = &g_Instances[InstanceId - 1U];
+    if (instance->State == OW_KDB_INSTANCE_FAULTED) {
+        return OW_ERR_INVALID_PARAM;
+    }
+
+    instance->ExitStatus = ExitStatus;
+    instance->State = OW_KDB_INSTANCE_STOPPED;
+    instance->ResidentPages = 0U;
+
+    OwKdbBridgeDropOwner(InstanceId);
+    (void)OwKdbAssociationSetInstance(instance->AssociationId,
+                                      OW_KDB_INVALID_ID);
+    OwKdbHistoryRecord(OW_KDB_EVENT_STOPPED, InstanceId, OW_SUCCESS,
+                       instance->ProcessId, instance->ThreadId,
+                       instance->EntryPoint);
+    return OW_SUCCESS;
+}
+
+/* Record the facts the executor produced for a prepared instance: the PS
+ * identifiers of the process/thread that owns the execution, plus the entry the
+ * real loader computed (which can differ from the header value a descriptor
+ * carries, because a loader may relocate the entry onto a window base). */
+OW_STATUS OwKdbManagerRecordExecution(uint32_t InstanceId, uint32_t ProcessId,
+                                      uint32_t ThreadId, uint64_t EntryPoint) {
+    OW_KDB_INSTANCE* instance;
+
+    if (!OwKdbIsReady()) {
+        return OW_ERR_NOT_INITIALIZED;
+    }
+    if (!OwKdbManagerExists(InstanceId)) {
+        return OW_ERR_NOT_FOUND;
+    }
+
+    instance = &g_Instances[InstanceId - 1U];
+    instance->ProcessId = ProcessId;
+    instance->ThreadId = ThreadId;
+    instance->ExecutionStarted = false;
+    instance->EntryPoint = EntryPoint;
+    OwKdbHistoryRecord(OW_KDB_EVENT_EXECUTED, InstanceId, OW_SUCCESS, ProcessId,
+                       ThreadId, EntryPoint);
+    return OW_SUCCESS;
 }
 
 OW_STATUS OwKdbFaultInstance(uint32_t InstanceId, OW_STATUS FaultStatus) {
@@ -240,6 +355,12 @@ OW_STATUS OwKdbFaultInstance(uint32_t InstanceId, OW_STATUS FaultStatus) {
         FaultStatus = OW_ERR_CORRUPT;
     }
 
+    /* If the caller faulted an instance whose process is still prepared, tear
+     * that process down first.  Doing it here, rather than trusting every
+     * caller to have done it, is what keeps "faulted" from meaning "maybe a
+     * stray thread is still runnable". */
+    OwKdbExecPsAbandonInstance(InstanceId, (uint64_t)FaultStatus);
+
     instance->LastFault = FaultStatus;
     instance->State = OW_KDB_INSTANCE_FAULTED;
     instance->ResidentPages = 0U;
@@ -248,6 +369,9 @@ OW_STATUS OwKdbFaultInstance(uint32_t InstanceId, OW_STATUS FaultStatus) {
     (void)OwKdbAssociationSetInstance(instance->AssociationId,
                                       OW_KDB_INVALID_ID);
     ++g_FaultCount;
+    OwKdbHistoryRecord(OW_KDB_EVENT_FAULTED, InstanceId, FaultStatus,
+                       instance->ProcessId, instance->ThreadId,
+                       instance->EntryPoint);
 
     ow_kprintf("[KDB] instance %u faulted (0x%X); resources released\r\n",
                (unsigned)InstanceId, (unsigned)FaultStatus);
@@ -266,9 +390,13 @@ OW_STATUS OwKdbDestroyInstance(uint32_t InstanceId) {
 
     instance = &g_Instances[InstanceId - 1U];
 
+    OwKdbExecPsAbandonInstance(InstanceId, instance->ExitStatus);
     OwKdbBridgeDropOwner(InstanceId);
     (void)OwKdbAssociationSetInstance(instance->AssociationId,
                                       OW_KDB_INVALID_ID);
+    OwKdbHistoryRecord(OW_KDB_EVENT_DESTROYED, InstanceId, OW_SUCCESS,
+                       instance->ProcessId, instance->ThreadId,
+                       instance->EntryPoint);
     instance->ResidentPages = 0U;
     instance->Id = OW_KDB_INVALID_ID;
     g_InstanceInUse[InstanceId - 1U] = false;

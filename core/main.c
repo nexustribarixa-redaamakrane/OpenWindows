@@ -22,6 +22,7 @@
 #include "../inc/ow_cis.h"
 #include "../inc/ow_ps.h"
 #include "../inc/ow_kdb.h"
+#include "../inc/ow_kapa.h"
 #include "../storage/owdisk.h"
 #include "../inc/ow_usermode.h"
 #include <stdarg.h>
@@ -400,7 +401,7 @@ static OW_PROCESS_OBJECT* boot_launch_init(const char* image_name,
         OW_STATUS          lres;
 
         if (boot_test_argv(&test_argc, &test_argv)) {
-            lres = OwPsLaunchUserImageEx(oproc, test_argc, test_argv);
+            lres = OwPsLaunchUserImageEx(oproc, test_argc, test_argv, true);
         } else {
             lres = OwPsLaunchUserImage(oproc);
         }
@@ -548,6 +549,20 @@ void _start(void) {
             km_line(0x0C, "[KDB]", "initialization FAILED (0x%X) - continuing without KDB",
                     (unsigned)kdbst);
             boot_diag_done(41, OW_SUCCESS, "KDB Init", 1);
+        }
+    }
+
+    /* Phase 4e: KAPA application facade.  It is a thin, bounded layer over the
+     * KDB tables above; failure here disables KAPA applications but does not
+     * affect the main kernel or the KDB management plane. */
+    {
+        OW_STATUS kapast = OwKapaInitialize();
+        if (ow_status_success(kapast)) {
+            km_line(0x0E, "[KAPA]", "application facade online (%u slots)",
+                    (unsigned)OW_KAPA_MAX_APPLICATIONS);
+        } else {
+            km_line(0x0C, "[KAPA]", "initialization FAILED (0x%X) - continuing",
+                    (unsigned)kapast);
         }
     }
 

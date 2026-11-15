@@ -3,6 +3,7 @@
 #include "../inc/ow_alpc.h"
 #include "../inc/ow_dpc.h"
 #include "../inc/ow_hal.h"
+#include "../inc/ow_kdb.h"
 #include "../inc/ow_kprintf.h"
 #include "../inc/ow_mem.h"
 #include "../inc/ow_memory.h"
@@ -651,6 +652,73 @@ int64_t OwSyscallDispatch(uint32_t SyscallId, uint64_t P1, uint64_t P2,
     if (spawned == NULL)
       return -1;
     return (int64_t)(uint32_t)spawned->ProcessId;
+  }
+  case OW_SYS_KDB_BRIDGE: {
+    OW_SYS_KDB_BRIDGE_CALL call;
+    OW_PROCESS_OBJECT *proc = syscall_current_process();
+    OW_THREAD_OBJECT *thr = OwPsGetCurrentThread();
+    OW_KDB_BINDING binding;
+    OW_STATUS status;
+    static uint8_t request[OW_KDB_BRIDGE_MAX_REQUEST];
+    static uint8_t response[OW_KDB_BRIDGE_MAX_RESPONSE];
+    uint32_t response_length = 0u;
+
+    if (proc == NULL || thr == NULL)
+      return -1;
+    if (P1 == 0u ||
+        !syscall_user_range(proc, P1, (uint64_t)sizeof(call)))
+      return -1;
+
+    ow_memcpy(&call, (const void *)(uintptr_t)P1, sizeof(call));
+    if (call.Magic != OW_SYS_KDB_BRIDGE_MAGIC ||
+        call.Version != OW_SYS_KDB_BRIDGE_VERSION || call.Reserved != 0u)
+      return -1;
+    if (call.RequestLength > OW_KDB_BRIDGE_MAX_REQUEST ||
+        call.ResponseCapacity > OW_KDB_BRIDGE_MAX_RESPONSE)
+      return -1;
+
+    /* Authority comes from the binding the executor installed for this exact
+     * process/thread pair.  A caller that merely guesses an instance id cannot
+     * use this gateway, and an ordinary user process has no binding at all. */
+    if (!ow_status_success(OwKdbFindBindingByThread(thr->Tid, thr->ProcessId,
+                                                    &binding)))
+      return -1;
+    if (call.TargetInstanceId != 0u &&
+        call.TargetInstanceId != binding.InstanceId)
+      return -1;
+
+    if (call.RequestLength != 0u) {
+      if (call.RequestVa == 0u ||
+          !syscall_user_range(proc, call.RequestVa,
+                              (uint64_t)call.RequestLength))
+        return -1;
+      ow_memcpy(request, (const void *)(uintptr_t)call.RequestVa,
+                call.RequestLength);
+    }
+    if (call.ResponseCapacity != 0u &&
+        (call.ResponseVa == 0u ||
+         !syscall_user_range(proc, call.ResponseVa,
+                             (uint64_t)call.ResponseCapacity)))
+      return -1;
+
+    status = OwKdbBridgeCall(binding.AssociationId, call.TargetInstanceId,
+                             call.ServiceId, request, call.RequestLength,
+                             response, call.ResponseCapacity,
+                             &response_length);
+    if (ow_status_error(status))
+      return -1;
+    if (response_length > call.ResponseCapacity)
+      return -1;
+    if (response_length != 0u) {
+      if (call.ResponseVa == 0u)
+        return -1;
+      ow_memcpy((void *)(uintptr_t)call.ResponseVa, response,
+                response_length);
+    }
+
+    call.ResponseLength = response_length;
+    ow_memcpy((void *)(uintptr_t)P1, &call, sizeof(call));
+    return 0;
   }
   default:
     return -1;

@@ -74,7 +74,15 @@ KDB_OBJS = kdb/kdb_core.o \
            kdb/kdb_assoc.o \
            kdb/kdb_bridge.o \
            kdb/kdb_sweep.o \
-           kdb/kdb_exec.o
+           kdb/kdb_exec.o \
+           kdb/kdb_abi.o \
+           kdb/kdb_elf.o \
+           kdb/kdb_manifest.o \
+           kdb/kdb_history.o \
+           kdb/kdb_exec_ps.o
+
+# Object files - KAPA application facade
+KAPA_OBJS = kapa/kapa_core.o
 
 # Object files - User-mode (ring 3) launcher
 USERMODE_OBJS = usermode/usermode.o
@@ -220,7 +228,7 @@ STOR_CORE_OBJS = storage/owdisk.o
 
 # All object files
 ALL_OBJS = $(CORE_OBJS) $(HAL_OBJS) $(RC_OBJS) $(PS_OBJS) $(SYNC_OBJS) $(DPC_OBJS) \
-           $(USERMODE_OBJS) $(KDB_OBJS) \
+           $(USERMODE_OBJS) $(KDB_OBJS) $(KAPA_OBJS) \
            $(DIAG_OBJS) $(VFS_OBJS) \
            $(NET_OBJS) $(SENT_OBJS) $(CIS_OBJS) $(SYSCALL_OBJS) $(KAPI_OBJS) \
            $(SHELL_OBJS) $(LIB_OBJS) $(BANCODE_OBJS) \
@@ -1186,6 +1194,8 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                kdb/kdb_core.c kdb/kdb_registry.c kdb/kdb_loader.c \
                kdb/kdb_manager.c kdb/kdb_assoc.c kdb/kdb_bridge.c \
                kdb/kdb_sweep.c kdb/kdb_exec.c \
+               kdb/kdb_abi.c kdb/kdb_elf.c kdb/kdb_manifest.c \
+               kdb/kdb_history.c kdb/kdb_exec_ps.c kapa/kapa_core.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
                $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sutf16.c \

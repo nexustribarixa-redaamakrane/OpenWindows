@@ -4,14 +4,18 @@
  * what would an executor be handed?" by building a launch plan from live KDB
  * state and re-validating the caller-owned image at call time.
  *
- * Executor seam (interface only; no real backend registered by default): a
- * single backend slot can be registered.  OwKdbExecuteInstance() rebuilds the
- * authoritative plan, never trusts a caller-owned plan, validates invariants,
- * and hands the validated plan to the backend.  A missing backend returns
- * OW_ERR_UNSUPPORTED without changing instance state.  A backend failure faults
- * the instance (releasing charged resources via the manager's fault path) and
- * returns the error.  A backend success means the backend accepted the plan;
- * KDB does not invent a fake "executing on separate CPU" state.
+ * Executor seam: a single backend slot can be registered.  OwKdbExecuteInstance()
+ * rebuilds the authoritative plan, never trusts a caller-owned plan, validates
+ * invariants, and hands the validated plan to the backend.  A missing backend,
+ * or an ABI this build has no execution path for, returns OW_ERR_UNSUPPORTED
+ * without changing instance state.  A backend failure faults the instance
+ * (releasing charged resources via the manager's fault path) and returns the
+ * error.
+ *
+ * The distinction between "ABI not executable" and "image inadmissible" is
+ * deliberate: a validated Linux/BSD/Unix/raw image is a perfectly good managed
+ * object, and must remain inspectable rather than being faulted because this
+ * build does not run foreign code.
  */
 #include "kdb_internal.h"
 
@@ -29,6 +33,8 @@ static const char* blocker_reason(OW_KDB_EXEC_BLOCKER Blocker) {
     case OW_KDB_BLOCKER_NO_ENTRY_POINT:          return "image has no entry point";
     case OW_KDB_BLOCKER_EXECUTOR_UNAVAILABLE:
         return "no associated-kernel executor backend registered";
+    case OW_KDB_BLOCKER_ABI_UNSUPPORTED:
+        return "ABI is validated but this build has no execution path for it";
     case OW_KDB_BLOCKER_BACKEND_REJECTED:
         return "executor backend rejected the validated launch plan";
     default:                                     return "unknown blocker";
@@ -58,15 +64,35 @@ void OwKdbUnregisterExecutor(void) {
     g_ExecutorContext = (void*)0;
 }
 
+static void plan_clear(OW_KDB_LAUNCH_PLAN* Plan, OW_KDB_EXEC_BLOCKER Blocker) {
+    Plan->InstanceId = OW_KDB_INVALID_ID;
+    Plan->KernelId = OW_KDB_INVALID_ID;
+    Plan->AssociationId = OW_KDB_INVALID_ID;
+    Plan->Abi = OW_KDB_INVALID_ID;
+    Plan->Format = 0U;
+    Plan->ImageSize = 0U;
+    Plan->ResidentPages = 0U;
+    Plan->PageLimit = 0U;
+    Plan->EntryPoint = 0U;
+    Plan->MappedBase = 0U;
+    Plan->IsolationDomain = 0U;
+    Plan->State = OW_KDB_INSTANCE_FAULTED;
+    Plan->ManagementReady = false;
+    Plan->ExecutionAvailable = false;
+    Plan->Blocker = Blocker;
+    Plan->BlockerReason = blocker_reason(Blocker);
+}
+
 OW_STATUS OwKdbBuildLaunchPlan(uint32_t InstanceId,
                                OW_KDB_LAUNCH_PLAN* OutPlan) {
     OW_KDB_INSTANCE instance;
     const OW_KDB_KERNEL_DESC* kernel;
+    const OW_KDB_ABI_DESC* abi;
     OW_STATUS status;
     uint32_t pages = 0U;
     uint64_t entry = 0U;
     uint64_t base = 0U;
-    OW_KDB_EXEC_BLOCKER blocker;
+    OW_KDB_EXEC_BLOCKER blocker = OW_KDB_BLOCKER_NONE;
 
     if (!OwKdbIsReady()) {
         return OW_ERR_NOT_INITIALIZED;
@@ -77,25 +103,9 @@ OW_STATUS OwKdbBuildLaunchPlan(uint32_t InstanceId,
 
     status = OwKdbGetInstance(InstanceId, &instance);
     if (ow_status_error(status)) {
-        OutPlan->InstanceId = OW_KDB_INVALID_ID;
-        OutPlan->KernelId = OW_KDB_INVALID_ID;
-        OutPlan->AssociationId = OW_KDB_INVALID_ID;
-        OutPlan->ImageSize = 0U;
-        OutPlan->ResidentPages = 0U;
-        OutPlan->PageLimit = 0U;
-        OutPlan->EntryPoint = 0U;
-        OutPlan->MappedBase = 0U;
-        OutPlan->IsolationDomain = 0U;
-        OutPlan->State = OW_KDB_INSTANCE_FAULTED;
-        OutPlan->ManagementReady = false;
-        OutPlan->ExecutionAvailable = false;
-        OutPlan->Blocker = OW_KDB_BLOCKER_INSTANCE_NOT_FOUND;
-        OutPlan->BlockerReason =
-            blocker_reason(OW_KDB_BLOCKER_INSTANCE_NOT_FOUND);
+        plan_clear(OutPlan, OW_KDB_BLOCKER_INSTANCE_NOT_FOUND);
         return status;
     }
-
-    blocker = OW_KDB_BLOCKER_NONE;
 
     if (instance.State == OW_KDB_INSTANCE_FAULTED) {
         blocker = OW_KDB_BLOCKER_INSTANCE_FAULTED;
@@ -123,6 +133,8 @@ OW_STATUS OwKdbBuildLaunchPlan(uint32_t InstanceId,
     OutPlan->InstanceId = instance.Id;
     OutPlan->KernelId = instance.KernelId;
     OutPlan->AssociationId = instance.AssociationId;
+    OutPlan->Abi = instance.Abi;
+    OutPlan->Format = instance.Format;
     OutPlan->ResidentPages = instance.ResidentPages;
     OutPlan->PageLimit = instance.PageLimit;
     OutPlan->EntryPoint = instance.EntryPoint;
@@ -138,7 +150,11 @@ OW_STATUS OwKdbBuildLaunchPlan(uint32_t InstanceId,
 
     if (blocker == OW_KDB_BLOCKER_NONE) {
         OutPlan->ManagementReady = true;
-        if (g_Executor != (OW_KDB_EXECUTOR_BACKEND)0) {
+        abi = OwKdbAbiPtr(instance.Abi);
+        if (abi == (const OW_KDB_ABI_DESC*)0 || !abi->ExecutionSupported) {
+            OutPlan->ExecutionAvailable = false;
+            OutPlan->Blocker = OW_KDB_BLOCKER_ABI_UNSUPPORTED;
+        } else if (g_Executor != (OW_KDB_EXECUTOR_BACKEND)0) {
             OutPlan->ExecutionAvailable = true;
             OutPlan->Blocker = OW_KDB_BLOCKER_NONE;
         } else {
@@ -169,6 +185,12 @@ OW_STATUS OwKdbExecuteInstance(uint32_t InstanceId) {
     if (ow_status_error(status)) {
         return status;
     }
+    if (plan.Blocker == OW_KDB_BLOCKER_ABI_UNSUPPORTED ||
+        plan.Blocker == OW_KDB_BLOCKER_EXECUTOR_UNAVAILABLE) {
+        /* The instance is admissible; this build simply has no path to run it.
+         * Do not fault a perfectly good managed object over that. */
+        return OW_ERR_UNSUPPORTED;
+    }
     if (!plan.ManagementReady) {
         if (plan.State != OW_KDB_INSTANCE_FAULTED) {
             (void)OwKdbFaultInstance(InstanceId, OW_ERR_NOT_INITIALIZED);
@@ -182,7 +204,7 @@ OW_STATUS OwKdbExecuteInstance(uint32_t InstanceId) {
         return status;
     }
     /* Backend accepted the validated plan.  KDB does not fabricate an
-     * "executing on hardware" state; bridge eligibility remains governed by
-     * the instance lifecycle (RUNNING). */
+     * "executing on hardware" state; the scheduler dispatch hook records the
+     * first real resume. */
     return OW_SUCCESS;
 }

@@ -14,6 +14,7 @@
 #include "../inc/ow_mem.h"
 #include "../inc/ow_kprintf.h"
 #include "../inc/ow_diag.h"
+#include "../inc/ow_kdb.h"
 #include "../hal/idt.h"
 
 /* ---- Static tables ---------------------------------------------------- */
@@ -401,6 +402,16 @@ static void OwPsPrepResume(OW_THREAD_OBJECT* Thr) {
     OW_PROCESS_OBJECT* P;
 #endif
     if (!Thr) return;
+
+    /* Scheduler dispatch attribution.  OwPsPrepResume is the single resume
+     * point every switch funnels through (timer tick, yield, exit, abandon), so
+     * it is also the single point where a KAPA-bound thread's first real
+     * dispatch is observable.  Binding lookup is by identifier, and a thread
+     * with no live KDB binding takes the no-op path, so the normal
+     * (shell/kernel) scheduler is untouched.  Under OW_HOST_HAL Thr is never a
+     * bound KAPA thread, so this is inert in the host harness. */
+    (void)OwKdbNotifyThreadDispatch(Thr->Tid, Thr->ProcessId);
+
 #ifndef OW_HOST_HAL
     if (Thr->StackSize != 0) {
         OwHalTssSetRsp0(Thr->StackBase + Thr->StackSize);
@@ -421,7 +432,12 @@ OW_THREAD_OBJECT* OwPsCreateUserThread(OW_PROCESS_OBJECT* Proc,
                                        uint64_t UserStackTop) {
     /* No C-ABI return address: this is the "enter and never come back" form
      * used by the synthetic Ring 3 payload, whose tail is a self-loop. */
-    return OwPsCreateUserThreadFrame(Proc, EntryAddress, UserStackTop, 0);
+    OW_THREAD_OBJECT* T = OwPsCreateUserThreadFrame(Proc, EntryAddress,
+                                                     UserStackTop, 0);
+    if (T) {
+        OwPsWakeThread(T);
+    }
+    return T;
 }
 
 /* ====================================================================== */
@@ -477,7 +493,12 @@ OW_THREAD_OBJECT* OwPsCreateUserThreadFrame(OW_PROCESS_OBJECT* Proc,
 
     T->Tid           = s_NextTid++;
     T->ProcessId     = Proc->ProcessId;
-    T->State         = OW_THR_READY;
+    /* Deliberately unpublished: the thread is created DORMANT and stays out of
+     * the ready queue.  The caller publishes it with OwPsWakeThread() once its
+     * own bookkeeping is complete (the CPL3 launch path out of
+     * OwPsLaunchUserImageEx publishes only when asked), so a PIT preemption
+     * cannot hand the CPU to a thread whose KDB binding is not yet in place. */
+    T->State         = OW_THR_DORMANT;
     T->EntryFunction = EntryAddress;
     T->EntryArg      = ResumeRsp;
     T->Quantum       = OW_PS_DEFAULT_QUANTUM;
@@ -516,8 +537,8 @@ OW_THREAD_OBJECT* OwPsCreateUserThreadFrame(OW_PROCESS_OBJECT* Proc,
         }
     }
 
-    ready_enqueue(T);
-
+    /* The caller publishes this thread to the scheduler (see the comment at
+     * its creation site). */
     ow_kprintf("[PS] %s: USER thread %u created, ring3 entry 0x%llX stack 0x%llX\r\n",
                Proc->Header.Name, (unsigned)T->Tid,
                (unsigned long long)EntryAddress,
@@ -657,13 +678,13 @@ OW_STATUS OwPsLaunchUserImage(OW_PROCESS_OBJECT* Proc) {
      * the launcher, so no user pointer is involved. */
     const char* argv[1];
     argv[0] = (Proc && Proc->Header.Name[0]) ? Proc->Header.Name : "owx";
-    return OwPsLaunchUserImageEx(Proc, 1, argv);
+    return OwPsLaunchUserImageEx(Proc, 1, argv, true);
 }
 
 OW_STATUS OwPsLaunchUserImageEx(OW_PROCESS_OBJECT* Proc, int argc,
-                                const char* const argv[]) {
+                                const char* const argv[], bool Publish) {
 #ifdef OW_HOST_HAL
-    (void)Proc; (void)argc; (void)argv;
+    (void)Proc; (void)argc; (void)argv; (void)Publish;
     return OW_ERR_NOT_INITIALIZED;
 #else
     uint64_t           resume_rsp;
@@ -806,6 +827,13 @@ OW_STATUS OwPsLaunchUserImageEx(OW_PROCESS_OBJECT* Proc, int argc,
                Proc->Header.Name,
                (unsigned long long)resume_rsp,
                (unsigned long long)Proc->EntryReturn);
+
+    /* Publish only when asked.  The KAPA executor path passes false so it can
+     * bind the instance to this exact thread before any CPU can reach it; the
+     * spawn paths pass true and get the classic behavior. */
+    if (Publish) {
+        OwPsWakeThread(T);
+    }
     return OW_SUCCESS;
 #endif
 }
@@ -849,6 +877,12 @@ void OwPsExitThread(uint64_t ExitStatus) {
         }
     }
 
+    /* Attribute the exit outcome to the owning KDB instance, if any.  Only a
+     * thread that still holds a live KDB binding reaches this; the lookup is
+     * by identifier and takes the no-op path for every unbound thread, so the
+     * kernel's own boot/shell thread and ordinary spawns are untouched. */
+    (void)OwKdbNotifyThreadExit(cur->Tid, cur->ProcessId, ExitStatus);
+
     next = ready_dequeue();
     if (next) {
         s_CurrentThread = next;
@@ -862,6 +896,36 @@ void OwPsExitThread(uint64_t ExitStatus) {
     /* No ready threads left. */
     ow_kprintf("[PS] last thread terminated, halting\r\n");
     ow_hlt_loop();
+}
+
+/* ====================================================================== */
+/* Recycle a process's VAD nodes back to the pool.  The frame run and the
+ * private page-table pages come from the bump arena and can never be
+ * returned, but the VAD tree is pool-allocated, so a create/terminate cycle
+ * must not strand pool slots either.  OwPsTerminateProcess is the single
+ * point every teardown funnels through, so doing it here covers both spawn
+ * and fault paths.  The process is dead, so nothing can reference its tree
+ * any more.  Iterative pre-order walk with an explicit stack bounded by the
+ * AVL height bound -- no recursion on the kernel stack. */
+static void ps_free_vad_tree(OW_VAD_NODE** Root) {
+    OW_VAD_NODE* stack[32];
+    uint32_t sp = 0u;
+
+    if (!Root || !*Root) {
+        return;
+    }
+    stack[sp++] = *Root;
+    while (sp > 0u) {
+        OW_VAD_NODE* n = stack[--sp];
+        if (n->LeftChild && sp < 32u) {
+            stack[sp++] = n->LeftChild;
+        }
+        if (n->RightChild && sp < 32u) {
+            stack[sp++] = n->RightChild;
+        }
+        OwMemFreeVad(n);
+    }
+    *Root = (OW_VAD_NODE*)0;
 }
 
 /* ====================================================================== */
@@ -881,6 +945,12 @@ void OwPsTerminateProcess(OW_PROCESS_OBJECT* Proc, uint64_t ExitStatus) {
     Proc->FrameRun.Base = 0;
     Proc->FrameRun.Pages = 0;
     Proc->FrameRun.Committed = 0;
+
+    /* Recycle the VAD tree to the pool: the one process-owned structure that
+     * is not bump-arena.  The frames are already zeroed by RunReleaseAll, and
+     * the private page-table pages are never recycled in this allocator
+     * (documented limitation). */
+    ps_free_vad_tree(&Proc->VadRoot);
 
     ow_kprintf("[PS] %s: process terminated (PID %u, exit %llu)\r\n",
                Proc->Header.Name, (unsigned)Proc->ProcessId,
@@ -1048,6 +1118,34 @@ void OwPsWakeThread(OW_THREAD_OBJECT* Thr) {
     if (Thr->State == OW_THR_READY || Thr->State == OW_THR_RUNNING) return;
     Thr->State = OW_THR_READY;
     ready_enqueue(Thr);
+}
+
+/* ====================================================================== */
+/* OwPsAbandonThread - retire a prepared-but-undispatched thread           */
+/* ====================================================================== */
+/* Used by the KDB executor when an instance is abandoned before its bound
+ * thread ever resumed.  A thread that is still in the ready queue must leave it
+ * before being marked terminated, or the scheduler would hand the CPU to a dead
+ * thread.  A thread that is already running (current or preempted) is left to
+ * the owning exit path. */
+void OwPsAbandonThread(uint32_t ThreadId, uint32_t ProcessId) {
+    uint32_t i;
+
+    for (i = 0U; i < OW_PS_MAX_THREADS; ++i) {
+        OW_THREAD_OBJECT* T = &s_Threads[i];
+        if (T->Tid != ThreadId || T->ProcessId != ProcessId) continue;
+        if (T->State == OW_THR_READY) {
+            /* Unlink from the ready list (intrusive singly-linked head/tail). */
+            OW_THREAD_OBJECT** slot = &s_ReadyHead;
+            while (*slot && *slot != T) slot = &(*slot)->NextReady;
+            if (*slot) {
+                *slot = T->NextReady;
+                if (!*slot) s_ReadyTail = (void*)0;
+            }
+        }
+        T->State = OW_THR_TERMINATED;
+        return;
+    }
 }
 
 /* ====================================================================== */

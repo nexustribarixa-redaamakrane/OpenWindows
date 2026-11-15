@@ -14,6 +14,8 @@
  * is the management/data path a future execution adapter would sit behind.
  */
 #include "kdb_internal.h"
+#include "../inc/ow_hal.h"
+#include "../inc/ow_kprintf.h"
 
 typedef struct _OW_KDB_SERVICE_ENTRY {
     bool                 InUse;
@@ -25,10 +27,12 @@ typedef struct _OW_KDB_SERVICE_ENTRY {
     uint32_t             MaxResponse;
     OW_KDB_SERVICE_HANDLER Handler;
     void*                Context;
+    uint32_t             CallCount;
 } OW_KDB_SERVICE_ENTRY;
 
 static OW_KDB_SERVICE_ENTRY g_Services[OW_KDB_MAX_SERVICES];
 static uint32_t              g_BridgeCalls = 0U;
+static OW_KDB_CALL_ATTR      g_CurrentCall = { 0U, 0U };
 
 static OW_KDB_SERVICE_ENTRY* service_find(uint32_t OwnerInstanceId,
                                           uint32_t ServiceId) {
@@ -49,8 +53,19 @@ void OwKdbBridgeReset(void) {
 
     for (i = 0U; i < OW_KDB_MAX_SERVICES; ++i) {
         g_Services[i].InUse = false;
+        g_Services[i].CallCount = 0U;
     }
     g_BridgeCalls = 0U;
+    g_CurrentCall.CallerAssociationId = 0U;
+    g_CurrentCall.TargetInstanceId = 0U;
+}
+
+const OW_KDB_CALL_ATTR* OwKdbBridgeGetCallAttr(void) {
+    return &g_CurrentCall;
+}
+
+const OW_KDB_CALL_ATTR* OwKdbBridgeCallAttrInternal(void) {
+    return &g_CurrentCall;
 }
 
 static OW_STATUS ping_handler(uint32_t ServiceId,
@@ -94,6 +109,68 @@ static OW_STATUS echo_handler(uint32_t ServiceId,
     return OW_SUCCESS;
 }
 
+static OW_STATUS log_handler(uint32_t ServiceId,
+                             const uint8_t* Request, uint32_t RequestLength,
+                             uint8_t* Response, uint32_t ResponseCapacity,
+                             uint32_t* ResponseLength, void* Context) {
+    const OW_KDB_CALL_ATTR* attr;
+    char msg[OW_KDB_BRIDGE_MAX_REQUEST + 1U];
+    uint32_t i;
+
+    (void)ServiceId;
+    (void)Response;
+    (void)ResponseCapacity;
+    (void)Context;
+
+    /* Bounded attributed log.  Message bytes are emitted as data (no format
+     * interpretation).  Request is not required to be NUL-terminated. */
+    for (i = 0U; i < RequestLength && i < OW_KDB_BRIDGE_MAX_REQUEST; ++i) {
+        msg[i] = (char)Request[i];
+    }
+    msg[i] = '\0';
+
+    attr = OwKdbBridgeGetCallAttr();
+    if (attr == (const OW_KDB_CALL_ATTR*)0) {
+        ow_kprintf("[KDB][LOG] assoc=? target=? len=%u: %s\r\n",
+                   (unsigned)RequestLength, msg);
+    } else {
+        ow_kprintf("[KDB][LOG] assoc=%u target=%u len=%u: %s\r\n",
+                   (unsigned)attr->CallerAssociationId,
+                   (unsigned)attr->TargetInstanceId,
+                   (unsigned)RequestLength, msg);
+    }
+
+    *ResponseLength = 0U;
+    return OW_SUCCESS;
+}
+
+static OW_STATUS runtime_info_handler(uint32_t ServiceId,
+                                      const uint8_t* Request,
+                                      uint32_t RequestLength,
+                                      uint8_t* Response,
+                                      uint32_t ResponseCapacity,
+                                      uint32_t* ResponseLength,
+                                      void* Context) {
+    uint64_t uptime_ms;
+    uint32_t i;
+
+    (void)ServiceId;
+    (void)Request;
+    (void)RequestLength;
+    (void)Context;
+
+    if (ResponseCapacity < 8U) {
+        return OW_ERR_INSUFFICIENT;
+    }
+
+    uptime_ms = OwHalUptimeMs();
+    for (i = 0U; i < 8U; ++i) {
+        Response[i] = (uint8_t)((uptime_ms >> (i * 8U)) & 0xFFu);
+    }
+    *ResponseLength = 8U;
+    return OW_SUCCESS;
+}
+
 OW_STATUS OwKdbBridgeInitializeBuiltins(void) {
     OW_STATUS status;
 
@@ -107,6 +184,21 @@ OW_STATUS OwKdbBridgeInitializeBuiltins(void) {
     status = OwKdbServiceRegister(0U, OW_KDB_SERVICE_ECHO, "main.echo",
                                   OW_KDB_CAP_CALL, 64U, 64U,
                                   echo_handler, (void*)0);
+    if (ow_status_error(status)) {
+        return status;
+    }
+
+    status = OwKdbServiceRegister(0U, OW_KDB_SERVICE_LOG, "main.log",
+                                  OW_KDB_CAP_CALL, 128U, 0U,
+                                  log_handler, (void*)0);
+    if (ow_status_error(status)) {
+        return status;
+    }
+
+    status = OwKdbServiceRegister(0U, OW_KDB_SERVICE_RUNTIME_INFO,
+                                  "main.runtime_info",
+                                  OW_KDB_CAP_CALL, 0U, 8U,
+                                  runtime_info_handler, (void*)0);
     return status;
 }
 
@@ -156,6 +248,7 @@ OW_STATUS OwKdbServiceRegister(uint32_t OwnerInstanceId, uint32_t ServiceId,
     g_Services[free_slot].MaxResponse = MaxResponse;
     g_Services[free_slot].Handler = Handler;
     g_Services[free_slot].Context = Context;
+    g_Services[free_slot].CallCount = 0U;
     g_Services[free_slot].InUse = true;
     return OW_SUCCESS;
 }
@@ -204,6 +297,51 @@ uint32_t OwKdbBridgeServiceCount(void) {
 
 uint32_t OwKdbBridgeCallCount(void) {
     return g_BridgeCalls;
+}
+
+OW_STATUS OwKdbBridgeGetServiceByIndex(uint32_t Index,
+                                       OW_KDB_SERVICE_INFO* OutService) {
+    uint32_t i;
+    uint32_t seen = 0U;
+
+    if (OutService == (OW_KDB_SERVICE_INFO*)0) {
+        return OW_ERR_NULL_POINTER;
+    }
+    for (i = 0U; i < OW_KDB_MAX_SERVICES; ++i) {
+        if (!g_Services[i].InUse) {
+            continue;
+        }
+        if (seen == Index) {
+            OutService->OwnerInstanceId = g_Services[i].OwnerInstanceId;
+            OutService->ServiceId = g_Services[i].ServiceId;
+            (void)OwKdbCopyName(OutService->Name, OW_KDB_MAX_NAME,
+                                g_Services[i].Name);
+            OutService->RequiredCapabilities =
+                g_Services[i].RequiredCapabilities;
+            OutService->MaxRequest = g_Services[i].MaxRequest;
+            OutService->MaxResponse = g_Services[i].MaxResponse;
+            OutService->CallCount = g_Services[i].CallCount;
+            return OW_SUCCESS;
+        }
+        ++seen;
+    }
+    return OW_ERR_NOT_FOUND;
+}
+
+/* ---- Public wrappers ---------------------------------------------------- */
+OW_STATUS OwKdbGetServiceByIndex(uint32_t Index,
+                                 OW_KDB_SERVICE_INFO* OutService) {
+    if (!OwKdbIsReady()) {
+        return OW_ERR_NOT_INITIALIZED;
+    }
+    return OwKdbBridgeGetServiceByIndex(Index, OutService);
+}
+
+uint32_t OwKdbServiceCount(void) {
+    if (!OwKdbIsReady()) {
+        return 0U;
+    }
+    return OwKdbBridgeServiceCount();
 }
 
 OW_STATUS OwKdbBridgeCall(uint32_t CallerAssociationId,
@@ -280,9 +418,14 @@ OW_STATUS OwKdbBridgeCall(uint32_t CallerAssociationId,
         local_capacity = OW_KDB_BRIDGE_MAX_RESPONSE;
     }
 
+    g_CurrentCall.CallerAssociationId = CallerAssociationId;
+    g_CurrentCall.TargetInstanceId = TargetInstanceId;
+    ++g_Services[(uint32_t)(service - g_Services)].CallCount;
     status = service->Handler(ServiceId, request_copy, RequestLength,
                               response_copy, local_capacity, &produced,
                               service->Context);
+    g_CurrentCall.CallerAssociationId = 0U;
+    g_CurrentCall.TargetInstanceId = 0U;
     if (ow_status_success(status)) {
         if (produced > local_capacity || produced > ResponseCapacity) {
             /* A handler that overruns its stated capacity does not get to

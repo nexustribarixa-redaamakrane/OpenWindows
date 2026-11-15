@@ -8,6 +8,7 @@
 #include "../inc/ow_kprintf.h"
 
 static bool g_KdbReady = false;
+static uint32_t g_Policy = 0U;
 
 bool OwKdbCopyName(char* Dst, uint32_t DstSize, const char* Src) {
     uint32_t i;
@@ -43,15 +44,27 @@ OW_STATUS OwKdbInitialize(void) {
     OW_STATUS status;
 
     g_KdbReady = false;
+    g_Policy = 0U;
 
     OwKdbAssociationReset();
     OwKdbManagerReset();
     OwKdbRegistryReset();
+    OwKdbAbiReset();
+    OwKdbHistoryReset();
     OwKdbBridgeReset();
     OwKdbExecReset();
+    OwKdbExecPsReset();
 
     /* From here on the public registration/service paths are usable. */
     g_KdbReady = true;
+
+    status = OwKdbAbiInitializeBuiltins();
+    if (ow_status_error(status)) {
+        g_KdbReady = false;
+        ow_kprintf("[KDB] ABI registry initialization FAILED (0x%X)\r\n",
+                   (unsigned)status);
+        return status;
+    }
 
     status = OwKdbBridgeInitializeBuiltins();
     if (ow_status_error(status)) {
@@ -72,8 +85,22 @@ OW_STATUS OwKdbInitialize(void) {
         return status;
     }
 
-    ow_kprintf("[KDB] ready: %u kernel descriptor(s), %u service(s)\r\n",
+#ifndef OW_HOST_HAL
+    /* A real PS-backed executor is installed only where CPL3 launch exists.
+     * The host harness keeps the executor seam empty so its handoff tests can
+     * still observe "no backend" deterministically. */
+    status = OwKdbExecPsInitialize();
+    if (ow_status_error(status)) {
+        g_KdbReady = false;
+        ow_kprintf("[KDB] PS executor installation FAILED (0x%X)\r\n",
+                   (unsigned)status);
+        return status;
+    }
+#endif
+
+    ow_kprintf("[KDB] ready: %u kernel descriptor(s), %u ABI(s), %u service(s)\r\n",
                (unsigned)OwKdbKernelCount(),
+               (unsigned)OwKdbAbiCount(),
                (unsigned)OwKdbBridgeServiceCount());
 
     return OW_SUCCESS;
@@ -90,6 +117,8 @@ const char* OwKdbKernelKindName(OW_KDB_KERNEL_KIND Kind) {
     case OW_KDB_KIND_MODIFIED_OPENWINDOWS: return "modified-openwindows";
     case OW_KDB_KIND_LINUX:                return "linux";
     case OW_KDB_KIND_CUSTOM:               return "custom";
+    case OW_KDB_KIND_BSD:                  return "bsd";
+    case OW_KDB_KIND_UNIX:                 return "unix";
     default:                               return "unknown";
     }
 }
@@ -130,4 +159,14 @@ void OwKdbGetStats(OW_KDB_STATS* OutStats) {
     OutStats->IsolationDomains = OwKdbManagerCount();
     OutStats->BridgeCalls = OwKdbBridgeCallCount();
     OutStats->Faults = OwKdbManagerFaultCount();
+}
+
+void OwKdbSetPolicy(uint32_t PolicyFlags) {
+    g_Policy = PolicyFlags &
+               (OW_KDB_POLICY_ALLOW_SHARED_MEMORY |
+                OW_KDB_POLICY_ALLOW_KERNEL_PRIVILEGE);
+}
+
+uint32_t OwKdbGetPolicy(void) {
+    return g_Policy;
 }

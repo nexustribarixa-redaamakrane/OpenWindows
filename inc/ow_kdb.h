@@ -39,6 +39,16 @@
 #define OW_KDB_MAX_SERVICES      16U
 #define OW_KDB_MAX_NAME          64U
 
+/* ABI registry.  Built-in descriptors plus manifest-composed custom ABIs share
+ * this bounded table; no dynamic allocation is used. */
+#define OW_KDB_MAX_ABIS           32U
+#define OW_KDB_MAX_ABI_SEGMENTS   16U
+#define OW_KDB_MAX_MANIFEST_FILES 8U
+
+/* Bounded lifecycle/execution event log.  Each entry is a fact recorded by the
+ * manager or an executor hook, never a speculative state. */
+#define OW_KDB_MAX_HISTORY        128U
+
 #define OW_KDB_BRIDGE_MAX_REQUEST   256U
 #define OW_KDB_BRIDGE_MAX_RESPONSE  256U
 
@@ -52,20 +62,42 @@ typedef enum _OW_KDB_KERNEL_KIND {
     OW_KDB_KIND_NATIVE_OPENWINDOWS = 1, /* same kernel family, full image     */
     OW_KDB_KIND_STRIPPED_OPENWINDOWS,   /* reduced OpenWindows kernel         */
     OW_KDB_KIND_MODIFIED_OPENWINDOWS,   /* ABI-compatible patched kernel      */
-    OW_KDB_KIND_LINUX,                  /* foreign ABI: no adapter in build   */
-    OW_KDB_KIND_CUSTOM                  /* application-specific kernel        */
+    OW_KDB_KIND_LINUX,                  /* foreign ABI: Linux x86-64          */
+    OW_KDB_KIND_CUSTOM,                 /* application-specific kernel        */
+    OW_KDB_KIND_BSD,                    /* foreign ABI: BSD family            */
+    OW_KDB_KIND_UNIX                    /* foreign ABI: SysV Unix             */
 } OW_KDB_KERNEL_KIND;
 
-/* ABI identifiers are descriptive, not promises.  Only the OpenWindows
- * identifiers have a loader backend in this build. */
+/* ABI identifiers are descriptive, not promises about execution.  Every
+ * built-in identifier has an ABI descriptor in the ABI registry; the
+ * descriptor records which image format the ABI uses and whether this build
+ * has an execution path for it. */
 #define OW_KDB_ABI_OPENWINDOWS_NATIVE 0x4F570001U
 #define OW_KDB_ABI_OPENWINDOWS_COMPAT 0x4F570002U
 #define OW_KDB_ABI_LINUX_X86_64       0x4C4E5801U
+#define OW_KDB_ABI_BSD_X86_64         0x42534401U
+#define OW_KDB_ABI_FREEBSD_X86_64     0x42534402U
+#define OW_KDB_ABI_NETBSD_X86_64      0x42534403U
+#define OW_KDB_ABI_OPENBSD_X86_64     0x42534404U
+#define OW_KDB_ABI_UNIX_SYSV_X86_64   0x55535801U
 #define OW_KDB_ABI_CUSTOM             0x43555301U
+
+/* Manifest-composed custom ABIs are allocated from this window.  The generic
+ * custom ABI above remains the identity used by a descriptor that does not
+ * name a specific manifest. */
+#define OW_KDB_ABI_CUSTOM_BASE        0x43555300U
+#define OW_KDB_ABI_CUSTOM_MAX         0x435553FFU
 
 #define OW_KDB_FORMAT_OWX  1U
 #define OW_KDB_FORMAT_ELF  2U
 #define OW_KDB_FORMAT_RAW  3U
+
+/* ELF e_ident[EI_OSABI] values this loader recognises. */
+#define OW_KDB_ELF_OSABI_SYSV    0U
+#define OW_KDB_ELF_OSABI_NETBSD  2U
+#define OW_KDB_ELF_OSABI_LINUX   3U
+#define OW_KDB_ELF_OSABI_FREEBSD 9U
+#define OW_KDB_ELF_OSABI_OPENBSD 12U
 
 #define OW_KDB_MEMORY_PRIVATE 1U
 #define OW_KDB_MEMORY_SHARED  2U
@@ -77,8 +109,73 @@ typedef enum _OW_KDB_KERNEL_KIND {
 
 /* Descriptor flags.  A declarative descriptor documents an associated kernel
  * that has no image provisioned in this volume/build.  It is listed and
- * assessed, but loading it returns OW_ERR_UNSUPPORTED. */
-#define OW_KDB_DESC_DECLARATIVE 0x00000001U
+ * assessed, but loading it returns OW_ERR_UNSUPPORTED.  MANIFEST_DEFINED marks
+ * a descriptor whose ABI came from a composed manifest rather than a built-in
+ * table entry. */
+#define OW_KDB_DESC_DECLARATIVE      0x00000001U
+#define OW_KDB_DESC_MANIFEST_DEFINED 0x00000002U
+
+/* ---- ABI registry -------------------------------------------------------- */
+typedef enum _OW_KDB_ABI_FAMILY {
+    OW_KDB_ABI_FAMILY_OPENWINDOWS = 1,
+    OW_KDB_ABI_FAMILY_LINUX,
+    OW_KDB_ABI_FAMILY_BSD,
+    OW_KDB_ABI_FAMILY_UNIX,
+    OW_KDB_ABI_FAMILY_CUSTOM
+} OW_KDB_ABI_FAMILY;
+
+typedef enum _OW_KDB_ABI_ORIGIN {
+    OW_KDB_ABI_ORIGIN_BUILTIN = 1,
+    OW_KDB_ABI_ORIGIN_MANIFEST
+} OW_KDB_ABI_ORIGIN;
+
+/* One loadable segment of a manifest-composed ABI.  For a raw image these are
+ * the authority for validation; for an ELF image they document the expected
+ * layout and are cross-checked by the loader. */
+typedef struct _OW_KDB_ABI_SEGMENT {
+    char     Name[32];
+    uint64_t VirtualAddress;
+    uint64_t FileOffset;
+    uint64_t FileSize;
+    uint64_t MemorySize;
+    uint32_t Flags;       /* OW_KDB_SEGMENT_* below                          */
+} OW_KDB_ABI_SEGMENT;
+
+#define OW_KDB_SEGMENT_READ    0x1U
+#define OW_KDB_SEGMENT_WRITE   0x2U
+#define OW_KDB_SEGMENT_EXECUTE 0x4U
+
+/* ABI flags.  A manifest may declare that the ABI expects a shared memory
+ * model or kernel-equivalent privilege; the matching descriptor must say the
+ * same, and the global policy must allow it. */
+#define OW_KDB_ABI_FLAG_REQUIRES_SHARED_MEMORY    0x00000001U
+#define OW_KDB_ABI_FLAG_REQUIRES_KERNEL_PRIVILEGE 0x00000002U
+
+typedef struct _OW_KDB_ABI_DESC {
+    uint32_t          Id;
+    char              Name[OW_KDB_MAX_NAME];
+    OW_KDB_ABI_FAMILY Family;
+    OW_KDB_KERNEL_KIND Kind;
+    uint32_t          Format;
+    uint32_t          TargetArch;
+    uint32_t          ElfOsAbi;
+    OW_KDB_ABI_ORIGIN Origin;
+    uint32_t          Flags;
+    uint64_t          LoadBase;
+    uint64_t          EntryPoint;
+    uint32_t          SegmentCount;
+    OW_KDB_ABI_SEGMENT Segments[OW_KDB_MAX_ABI_SEGMENTS];
+    /* True only when this build has an execution path that can hand the image
+     * to a real executor.  Foreign ELF/raw ABIs are admitted, validated and
+     * planned, but do not claim execution. */
+    bool              ExecutionSupported;
+} OW_KDB_ABI_DESC;
+
+typedef struct _OW_KDB_MANIFEST_FILE {
+    const char*    Name;
+    const uint8_t* Data;
+    uint32_t       Size;
+} OW_KDB_MANIFEST_FILE;
 
 typedef struct _OW_KDB_KERNEL_DESC {
     char                Name[OW_KDB_MAX_NAME];
@@ -148,6 +245,21 @@ typedef struct _OW_KDB_INSTANCE {
     OW_STATUS             LastFault;
     uint64_t              EntryPoint;
     uint64_t              MappedBase;
+    uint32_t              Abi;
+    uint32_t              Format;
+
+    /* Execution bookkeeping.  ProcessId/ThreadId are PS *identifiers*, never
+     * pointers: KDB resolves them through the PS accessors at event time, so a
+     * terminated process cannot leave a dangling pointer behind.  They remain
+     * as a historical record after the process terminates.
+     *
+     * ExecutionStarted becomes true only when the scheduler is about to resume
+     * the bound thread on a CPU; it is never set by preparation or by a logical
+     * state change. */
+    uint32_t              ProcessId;
+    uint32_t              ThreadId;
+    uint64_t              ExitStatus;
+    bool                  ExecutionStarted;
 } OW_KDB_INSTANCE;
 
 /* ---- Service Bridge ------------------------------------------------------ */
@@ -157,6 +269,12 @@ typedef struct _OW_KDB_INSTANCE {
  * same ID without colliding. */
 #define OW_KDB_SERVICE_PING 0x4B440001U
 #define OW_KDB_SERVICE_ECHO 0x4B440002U
+/* Bounded KAPA log: request is message bytes (not NUL-terminated), attributed
+ * to the caller association/target instance by the bridge.  Response: none. */
+#define OW_KDB_SERVICE_LOG 0x4B440003U
+/* Monotonic runtime info: request empty.  Response: uint64_t uptime_ms
+ * (little-endian), sourced from the HAL's 64-bit uptime. */
+#define OW_KDB_SERVICE_RUNTIME_INFO 0x4B440004U
 
 /* Handler contract:
  *   Request/RequestLength   KDB-owned copy of the caller's request.
@@ -208,10 +326,117 @@ OW_STATUS    OwKdbAssessCompatibility(const OW_KDB_KERNEL_DESC* Desc,
                                       OW_KDB_COMPAT_REPORT* OutReport);
 
 /* Loader front-end introspection.  OWX validation and page accounting are
- * real; execution is not.  Linux/custom kinds report false. */
+ * real; execution is not.  Linux/BSD/Unix/custom kinds report true once their
+ * ABI is known. */
 bool         OwKdbLoaderSupports(OW_KDB_KERNEL_KIND Kind);
 OW_STATUS    OwKdbLoaderValidate(const OW_KDB_KERNEL_DESC* Desc,
                                  uint32_t* OutResidentPages);
+
+/* ---- ABI registry -------------------------------------------------------- */
+/* Every descriptor names an ABI.  The ABI registry is the single authority for
+ * the image family, format, ELF OSABI, default load base/entry, manifest
+ * segments and whether this build can execute the result.  Built-ins are
+ * installed by OwKdbInitialize(); custom ABIs are composed from one or more
+ * manifest files with OwKdbAbiComposeCustom(). */
+const char*  OwKdbAbiFamilyName(OW_KDB_ABI_FAMILY Family);
+const char*  OwKdbAbiOriginName(OW_KDB_ABI_ORIGIN Origin);
+
+OW_STATUS    OwKdbGetAbi(uint32_t AbiId, OW_KDB_ABI_DESC* OutAbi);
+OW_STATUS    OwKdbGetAbiByIndex(uint32_t Index, OW_KDB_ABI_DESC* OutAbi);
+OW_STATUS    OwKdbFindAbi(const char* Name, uint32_t* OutAbiId);
+uint32_t     OwKdbAbiCount(void);
+
+/* Compose (and register) a custom ABI from one or more bounded text manifests.
+ * Later files override earlier ones.  Required keys: [abi] name, kind, format.
+ * Optional: id (0 => allocate from OW_KDB_ABI_CUSTOM_BASE), family, arch, osabi,
+ * [image] base/entry, [policy] shared_memory/kernel_privilege, and any number of
+ * [segment] sections.  The caller keeps ownership of the file buffers. */
+OW_STATUS    OwKdbAbiComposeCustom(const OW_KDB_MANIFEST_FILE* Files,
+                                  uint32_t FileCount, uint32_t* OutAbiId);
+OW_STATUS    OwKdbUnregisterAbi(uint32_t AbiId);
+
+/* ---- ELF image inspection ------------------------------------------------ */
+#define OW_KDB_ELF_CLASS_64 2U
+#define OW_KDB_ELF_DATA_LSB 1U
+#define OW_KDB_ELF_TYPE_EXEC 2U
+#define OW_KDB_ELF_TYPE_DYN  3U
+
+typedef struct _OW_KDB_ELF_INFO {
+    bool     Valid;
+    uint8_t  Class;
+    uint8_t  Data;
+    uint8_t  OsAbi;
+    uint16_t Type;
+    uint16_t Machine;
+    bool     EntryInExecutable;
+    uint64_t Entry;
+    uint64_t PreferredBase;
+    uint64_t Limit;
+    uint32_t SegmentCount;
+    uint32_t LoadSegments;
+    uint32_t ResidentPages;
+} OW_KDB_ELF_INFO;
+
+/* Parse/validate an ELF64 x86-64 image.  ExpectedOsAbi == 0xFF disables the
+ * OSABI check; otherwise the header must carry exactly that value. */
+OW_STATUS    OwKdbElfInspect(const uint8_t* Image, uint32_t ImageSize,
+                             OW_KDB_ELF_INFO* OutInfo);
+OW_STATUS    OwKdbElfValidate(const uint8_t* Image, uint32_t ImageSize,
+                              uint32_t ExpectedOsAbi,
+                              uint32_t* OutResidentPages);
+
+/* ---- Compatibility policy ------------------------------------------------ */
+/* The default policy refuses shared memory and kernel-equivalent privilege.
+ * An operator may deliberately widen it; every assessment then reports the
+ * active policy rather than silently assuming isolation. */
+#define OW_KDB_POLICY_ALLOW_SHARED_MEMORY    0x00000001U
+#define OW_KDB_POLICY_ALLOW_KERNEL_PRIVILEGE 0x00000002U
+
+void         OwKdbSetPolicy(uint32_t PolicyFlags);
+uint32_t     OwKdbGetPolicy(void);
+
+/* ---- Lifecycle history --------------------------------------------------- */
+typedef enum _OW_KDB_INSTANCE_EVENT {
+    OW_KDB_EVENT_LOADED = 1,
+    OW_KDB_EVENT_STARTED,
+    OW_KDB_EVENT_RUNNING,
+    OW_KDB_EVENT_STOPPED,
+    OW_KDB_EVENT_FAULTED,
+    OW_KDB_EVENT_EXECUTED,
+    OW_KDB_EVENT_DESTROYED
+} OW_KDB_INSTANCE_EVENT;
+
+typedef struct _OW_KDB_HISTORY_EVENT {
+    OW_KDB_INSTANCE_EVENT Event;
+    OW_STATUS             Status;
+    uint32_t              InstanceId;
+    uint32_t              ProcessId;
+    uint32_t              ThreadId;
+    uint64_t              EntryPoint;
+} OW_KDB_HISTORY_EVENT;
+
+const char*  OwKdbInstanceEventName(OW_KDB_INSTANCE_EVENT Event);
+uint32_t     OwKdbHistoryCount(void);
+OW_STATUS    OwKdbGetHistoryEvent(uint32_t Index, OW_KDB_HISTORY_EVENT* OutEvent);
+OW_STATUS    OwKdbGetHistoryEventForInstance(uint32_t InstanceId, uint32_t Index,
+                                            OW_KDB_HISTORY_EVENT* OutEvent);
+uint32_t     OwKdbHistoryCountForInstance(uint32_t InstanceId);
+void         OwKdbClearHistory(void);
+
+/* ---- Service enumeration ------------------------------------------------- */
+typedef struct _OW_KDB_SERVICE_INFO {
+    uint32_t OwnerInstanceId;
+    uint32_t ServiceId;
+    char     Name[OW_KDB_MAX_NAME];
+    uint32_t RequiredCapabilities;
+    uint32_t MaxRequest;
+    uint32_t MaxResponse;
+    uint32_t CallCount;
+} OW_KDB_SERVICE_INFO;
+
+OW_STATUS    OwKdbGetServiceByIndex(uint32_t Index,
+                                    OW_KDB_SERVICE_INFO* OutService);
+uint32_t     OwKdbServiceCount(void);
 
 /* ---- Associations -------------------------------------------------------- */
 OW_STATUS    OwKdbAssociateApplication(const char* Application, uint32_t KernelId,
@@ -265,6 +490,17 @@ OW_STATUS    OwKdbBridgeCall(uint32_t CallerAssociationId,
                              void* Response, uint32_t ResponseCapacity,
                              uint32_t* ResponseLength);
 
+/* Attribution for the bridge call currently inside a handler.  The pointer is
+ * only valid for the duration of that handler on the single-threaded kernel
+ * execution context; it lets a built-in service attribute a request without
+ * receiving caller-controlled identifiers. */
+typedef struct _OW_KDB_CALL_ATTR {
+    uint32_t CallerAssociationId;
+    uint32_t TargetInstanceId;
+} OW_KDB_CALL_ATTR;
+
+const OW_KDB_CALL_ATTR* OwKdbBridgeGetCallAttr(void);
+
 /* ---- Execution model (launch plan + executor seam) ----------------------- */
 /* KDB's management half materializes, for one live instance, every fact an
  * executor would need: the still-valid image (re-validated at call time, since
@@ -292,6 +528,7 @@ typedef enum _OW_KDB_EXEC_BLOCKER {
     OW_KDB_BLOCKER_NO_ISOLATION_DOMAIN,
     OW_KDB_BLOCKER_NO_ENTRY_POINT,
     OW_KDB_BLOCKER_EXECUTOR_UNAVAILABLE,  /* no backend registered             */
+    OW_KDB_BLOCKER_ABI_UNSUPPORTED,       /* ABI validated, no execution path  */
     OW_KDB_BLOCKER_BACKEND_REJECTED       /* backend refused the validated plan */
 } OW_KDB_EXEC_BLOCKER;
 
@@ -299,6 +536,8 @@ typedef struct _OW_KDB_LAUNCH_PLAN {
     uint32_t            InstanceId;
     uint32_t            KernelId;
     uint32_t            AssociationId;
+    uint32_t            Abi;
+    uint32_t            Format;
     uint32_t            ImageSize;
     uint32_t            ResidentPages;
     uint32_t            PageLimit;
@@ -344,6 +583,38 @@ void         OwKdbUnregisterExecutor(void);
  * propagates plan/instance lookup errors, or faults the instance and returns
  * the backend/validation error on a failed handoff. */
 OW_STATUS    OwKdbExecuteInstance(uint32_t InstanceId);
+
+/* ---- Executor binding view ----------------------------------------------- */
+/* A binding is the executor's own record that InstanceId is owned by a concrete
+ * PS process/thread.  It is exposed read-only so the syscall gateway and the
+ * scheduler attribution hooks can derive authority from the thread that is
+ * actually running instead of trusting a caller-supplied identifier. */
+typedef struct _OW_KDB_BINDING {
+    bool     InUse;
+    uint32_t InstanceId;
+    uint32_t AssociationId;
+    uint32_t KernelId;
+    uint32_t ProcessId;
+    uint32_t ThreadId;
+    uint64_t EntryPoint;
+    uint64_t MappedBase;
+    uint32_t IsolationDomain;
+} OW_KDB_BINDING;
+
+OW_STATUS    OwKdbGetBinding(uint32_t InstanceId, OW_KDB_BINDING* OutBinding);
+OW_STATUS    OwKdbFindBindingByThread(uint32_t ThreadId, uint32_t ProcessId,
+                                      OW_KDB_BINDING* OutBinding);
+uint32_t     OwKdbBindingCount(void);
+
+/* ---- PS scheduler/exception integration hooks ---------------------------- */
+/* These are the only places where PS events become KDB execution facts.  They
+ * are called by ps/ps.c and core/pgfault.c.  A thread without a live binding
+ * always takes the no-op path, so normal kernel/shell threads are untouched. */
+bool         OwKdbNotifyThreadDispatch(uint32_t ThreadId, uint32_t ProcessId);
+bool         OwKdbNotifyThreadExit(uint32_t ThreadId, uint32_t ProcessId,
+                                   uint64_t ExitStatus);
+bool         OwKdbNotifyThreadFault(uint32_t ThreadId, uint32_t ProcessId,
+                                    OW_STATUS FaultStatus);
 
 /* ---- Sweep reference integration ---------------------------------------- */
 /* Sweep is the primary reference associated kernel: a stripped OpenWindows

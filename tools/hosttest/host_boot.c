@@ -54,6 +54,7 @@ int test_superunicode_run(int* out_passed);
 #include "../../inc/ow_ecosys.h"
 #include "../../inc/ow_hal.h"
 #include "../../inc/ow_kdb.h"
+#include "../../inc/ow_kapa.h"
 #include "../../inc/ow_kprintf.h"
 /* Resolved on the include path, not by relative path: the generated header
  * lives in the build tree -- boot/ under the Makefile, <build>/generated under
@@ -4288,8 +4289,8 @@ static void test_kdb(void) {
   OwKdbGetStats(&stats);
   check_eq("KDB registers the Sweep reference at init",
            (unsigned long)stats.Kernels, 1ul);
-  check_eq("KDB exposes two main-kernel services",
-           (unsigned long)stats.Services, 2ul);
+  check_eq("KDB exposes four main-kernel services",
+           (unsigned long)stats.Services, 4ul);
   check_eq("KDB starts with no associations",
            (unsigned long)stats.Associations, 0ul);
   check_eq("KDB starts with no instances", (unsigned long)stats.Instances, 0ul);
@@ -4415,20 +4416,20 @@ static void test_kdb(void) {
   kdb_test_desc(&desc, "linux", OW_KDB_KIND_LINUX, OW_KDB_ABI_LINUX_X86_64,
                 OW_KDB_FORMAT_ELF);
   st = OwKdbAssessCompatibility(&desc, &report);
-  check_eq("a well-formed Linux descriptor has no adapter",
-           (unsigned long)st, (unsigned long)OW_ERR_UNSUPPORTED);
-  check_eq("the Linux verdict is UNSUPPORTED_KIND",
+  check_eq("a well-formed Linux descriptor is admitted",
+           (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the Linux verdict is COMPATIBLE (execution is a separate blocker)",
            (unsigned long)report.Verdict,
-           (unsigned long)OW_KDB_COMPAT_UNSUPPORTED_KIND);
+           (unsigned long)OW_KDB_COMPATIBLE);
 
   kdb_test_desc(&desc, "custom", OW_KDB_KIND_CUSTOM, OW_KDB_ABI_CUSTOM,
                 OW_KDB_FORMAT_RAW);
   st = OwKdbAssessCompatibility(&desc, &report);
-  check_eq("a well-formed custom descriptor has no adapter",
-           (unsigned long)st, (unsigned long)OW_ERR_UNSUPPORTED);
-  check_eq("the custom verdict is UNSUPPORTED_KIND",
+  check_eq("a well-formed custom descriptor is admitted",
+           (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the custom verdict is COMPATIBLE (execution is a separate blocker)",
            (unsigned long)report.Verdict,
-           (unsigned long)OW_KDB_COMPAT_UNSUPPORTED_KIND);
+           (unsigned long)OW_KDB_COMPATIBLE);
 
   kdb_test_desc(&desc, "linux-bad-format", OW_KDB_KIND_LINUX,
                 OW_KDB_ABI_LINUX_X86_64, OW_KDB_FORMAT_OWX);
@@ -4458,10 +4459,10 @@ static void test_kdb(void) {
                OwKdbLoaderSupports(OW_KDB_KIND_STRIPPED_OPENWINDOWS), true);
   check_window("the loader supports modified OpenWindows",
                OwKdbLoaderSupports(OW_KDB_KIND_MODIFIED_OPENWINDOWS), true);
-  check_window("the loader does not claim Linux support",
-               OwKdbLoaderSupports(OW_KDB_KIND_LINUX), false);
-  check_window("the loader does not claim custom-kernel support",
-               OwKdbLoaderSupports(OW_KDB_KIND_CUSTOM), false);
+  check_window("the loader claims Linux ELF support",
+               OwKdbLoaderSupports(OW_KDB_KIND_LINUX), true);
+  check_window("the loader claims custom-kernel support",
+               OwKdbLoaderSupports(OW_KDB_KIND_CUSTOM), true);
 
   kdb_test_desc(&desc, "loader-native", OW_KDB_KIND_NATIVE_OPENWINDOWS,
                 OW_KDB_ABI_OPENWINDOWS_NATIVE, OW_KDB_FORMAT_OWX);
@@ -4706,7 +4707,7 @@ static void test_kdb(void) {
   /* ---- Service registration rules ---------------------------------- */
   OwKdbGetStats(&stats);
   check_eq("only the built-ins are registered so far",
-           (unsigned long)stats.Services, 2ul);
+           (unsigned long)stats.Services, 4ul);
   check_eq("a service without a name is refused",
            (unsigned long)OwKdbServiceRegister(
                0u, 0x4B44A100u, (const char *)0, OW_KDB_CAP_CALL, 0u, 0u,
@@ -4816,7 +4817,7 @@ static void test_kdb(void) {
   OwKdbGetStats(&stats);
   services_before = stats.Services;
   check_eq("the service is counted before the fault",
-           (unsigned long)services_before, 3ul);
+           (unsigned long)services_before, 5ul);
 
   check_eq("faulting an instance succeeds",
            (unsigned long)OwKdbFaultInstance(demo_inst, OW_ERR_CORRUPT),
@@ -5212,6 +5213,805 @@ static void test_kdb(void) {
   printf("--- Kernel Dual Boot / KAPA verified\n");
 }
 
+/* -------------------------------------------------------------------- */
+/* KDB ABI / ELF / manifest / history / KAPA facade extensions          */
+/* -------------------------------------------------------------------- */
+/* The suites below exercise the parts of KDB that are data rather than
+ * lifecycle: the ABI registry, the foreign-image validators, the manifest
+ * composer, the bounded history and the KAPA application facade.  They are
+ * deliberately separate from test_kdb() so a failure names the layer that
+ * broke instead of a single monolithic "KDB" verdict. */
+
+#define KDB_TEST_ELF_SIZE 0x1000u
+#define KDB_TEST_ELF_SEG_OFF 0x200u
+
+static void kdb_test_put16(uint8_t *p, uint16_t v) {
+  p[0] = (uint8_t)(v & 0xFFu);
+  p[1] = (uint8_t)((v >> 8) & 0xFFu);
+}
+
+static void kdb_test_put32(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v & 0xFFu);
+  p[1] = (uint8_t)((v >> 8) & 0xFFu);
+  p[2] = (uint8_t)((v >> 16) & 0xFFu);
+  p[3] = (uint8_t)((v >> 24) & 0xFFu);
+}
+
+static void kdb_test_put64(uint8_t *p, uint64_t v) {
+  kdb_test_put32(p, (uint32_t)(v & 0xFFFFFFFFu));
+  kdb_test_put32(p + 4, (uint32_t)(v >> 32));
+}
+
+/* Build a minimal, structurally valid ELF64 x86-64 image with one PT_LOAD
+ * segment.  Vaddr/Entry are the values written verbatim; an ET_DYN caller
+ * passes zero for both and relies on the parser's user-image relocation. */
+static uint32_t kdb_test_build_elf(uint8_t *Image, uint16_t Type,
+                                   uint8_t OsAbi, uint64_t Vaddr,
+                                   uint64_t Entry, uint32_t Flags) {
+  uint8_t *ph;
+
+  memset(Image, 0, KDB_TEST_ELF_SIZE);
+  Image[0] = 0x7Fu;
+  Image[1] = 'E';
+  Image[2] = 'L';
+  Image[3] = 'F';
+  Image[4] = 2u; /* ELFCLASS64 */
+  Image[5] = 1u; /* ELFDATA2LSB */
+  Image[6] = 1u; /* EV_CURRENT */
+  Image[7] = OsAbi;
+  kdb_test_put16(Image + 16, Type);
+  kdb_test_put16(Image + 18, 0x3Eu); /* EM_X86_64 */
+  kdb_test_put32(Image + 20, 1u);    /* EV_CURRENT */
+  kdb_test_put64(Image + 24, Entry);
+  kdb_test_put64(Image + 32, 64u); /* e_phoff */
+  kdb_test_put16(Image + 52, 64u); /* e_ehsize */
+  kdb_test_put16(Image + 54, 56u); /* e_phentsize */
+  kdb_test_put16(Image + 56, 1u);  /* e_phnum */
+
+  ph = Image + 64;
+  kdb_test_put32(ph + 0, 1u);        /* PT_LOAD */
+  kdb_test_put32(ph + 4, Flags);     /* p_flags */
+  kdb_test_put64(ph + 8, KDB_TEST_ELF_SEG_OFF);
+  kdb_test_put64(ph + 16, Vaddr);    /* p_vaddr */
+  kdb_test_put64(ph + 24, Vaddr);    /* p_paddr */
+  kdb_test_put64(ph + 32, 16u);      /* p_filesz */
+  kdb_test_put64(ph + 40, 0x1000u);  /* p_memsz */
+  kdb_test_put64(ph + 48, 1u);       /* p_align: no congruence constraint */
+
+  memset(Image + KDB_TEST_ELF_SEG_OFF, 0x90, 16u);
+  return KDB_TEST_ELF_SIZE;
+}
+
+static void test_kdb_extensions(void) {
+  static const char k_mf_base[] =
+      "# base raw custom ABI\n"
+      "[abi]\n"
+      "name = test.raw.base\n"
+      "family = custom\n"
+      "kind = custom\n"
+      "format = raw\n"
+      "[image]\n"
+      "base = 0x4000000\n"
+      "entry = 0x4000000\n"
+      "[segment]\n"
+      "name = code\n"
+      "vaddr = 0x4000000\n"
+      "offset = 0\n"
+      "filesz = 0x40\n"
+      "memsz = 0x1000\n"
+      "flags = rx\n";
+  static const char k_mf_overlay[] =
+      "# local overlay: rename and widen the policy requirement\n"
+      "[abi]\n"
+      "name = test.raw.overlay\n"
+      "[policy]\n"
+      "shared_memory = true\n";
+  static const char k_mf_kapa[] =
+      "[abi]\n"
+      "name = test.kapa.raw\n"
+      "family = custom\n"
+      "kind = custom\n"
+      "format = raw\n"
+      "[image]\n"
+      "base = 0x4000000\n"
+      "entry = 0x4000000\n"
+      "[segment]\n"
+      "vaddr = 0x4000000\n"
+      "filesz = 0x40\n"
+      "memsz = 0x1000\n"
+      "flags = rx\n";
+  static const char k_mf_bad_key[] =
+      "[abi]\n"
+      "name = bad.key\n"
+      "bogus = 1\n";
+  static const char k_mf_no_name[] =
+      "[abi]\n"
+      "kind = custom\n";
+  static const char k_mf_raw_nobase[] =
+      "[abi]\n"
+      "name = bad.raw\n"
+      "format = raw\n";
+
+  static OW_KDB_KERNEL_DESC desc;
+  static uint8_t elf[KDB_TEST_ELF_SIZE];
+  static uint8_t raw_image[0x40];
+  static uint8_t response[64];
+  OW_KDB_MANIFEST_FILE files[2];
+  OW_KDB_ABI_DESC abi;
+  OW_KDB_ELF_INFO elf_info;
+  OW_KDB_COMPAT_REPORT report;
+  OW_KDB_INSTANCE inst;
+  OW_KDB_LAUNCH_PLAN plan;
+  OW_KDB_BINDING binding;
+  OW_KDB_SERVICE_INFO svc;
+  OW_KDB_HISTORY_EVENT event;
+  OW_KAPA_APPLICATION app;
+  OW_KAPA_STATS kstats;
+  OW_STATUS st;
+  uint32_t abi_id = OW_KDB_INVALID_ID;
+  uint32_t raw_abi = OW_KDB_INVALID_ID;
+  uint32_t overlay_abi = OW_KDB_INVALID_ID;
+  uint32_t kapa_abi = OW_KDB_INVALID_ID;
+  uint32_t bad_id = OW_KDB_INVALID_ID;
+  uint32_t custom_kernel = OW_KDB_INVALID_ID;
+  uint32_t custom_app = OW_KDB_INVALID_ID;
+  uint32_t custom_inst = OW_KDB_INVALID_ID;
+  uint32_t kapa_kernel = OW_KDB_INVALID_ID;
+  uint32_t kapa_app = OW_KDB_INVALID_ID;
+  uint32_t association = OW_KDB_INVALID_ID;
+  uint32_t pages = 0u;
+  uint32_t len = 0u;
+  uint32_t exec_count = 0u;
+  uint32_t i;
+  uint32_t service_count;
+  bool found_ping = false;
+  bool found_echo = false;
+  bool found_log = false;
+  bool found_runtime = false;
+
+  memset(raw_image, 0x90, sizeof(raw_image));
+
+  /* ---- ABI registry ------------------------------------------------ */
+  printf("\n=== KDB extensions: ABI registry ===\n");
+
+  check_eq("nine built-in ABIs are registered", (unsigned long)OwKdbAbiCount(),
+           9ul);
+  st = OwKdbFindAbi("linux.x86_64", &abi_id);
+  check_eq("the Linux ABI is discoverable by name", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the Linux ABI lookup returns its declared id",
+           (unsigned long)abi_id, (unsigned long)OW_KDB_ABI_LINUX_X86_64);
+  st = OwKdbGetAbi(OW_KDB_ABI_LINUX_X86_64, &abi);
+  check_eq("the Linux ABI descriptor is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the Linux ABI family is linux", (unsigned long)abi.Family,
+           (unsigned long)OW_KDB_ABI_FAMILY_LINUX);
+  check_eq("the Linux ABI kind is linux", (unsigned long)abi.Kind,
+           (unsigned long)OW_KDB_KIND_LINUX);
+  check_eq("the Linux ABI format is ELF", (unsigned long)abi.Format,
+           (unsigned long)OW_KDB_FORMAT_ELF);
+  check_eq("the Linux ABI OSABI is Linux", (unsigned long)abi.ElfOsAbi,
+           (unsigned long)OW_KDB_ELF_OSABI_LINUX);
+  check_eq("the Linux ABI origin is builtin", (unsigned long)abi.Origin,
+           (unsigned long)OW_KDB_ABI_ORIGIN_BUILTIN);
+  check_window("the Linux ABI does not claim execution",
+               abi.ExecutionSupported, false);
+
+  st = OwKdbGetAbi(OW_KDB_ABI_OPENWINDOWS_NATIVE, &abi);
+  check_eq("the native ABI is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_window("the native OWX ABI claims execution", abi.ExecutionSupported,
+               true);
+
+  st = OwKdbGetAbi(0xDEADBEEFu, &abi);
+  check_eq("an unknown ABI id is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  st = OwKdbGetAbiByIndex(0u, &abi);
+  check_eq("the first ABI is enumerable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbGetAbiByIndex(9u, &abi);
+  check_eq("an out-of-range ABI index is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  check_eq("ABI family names are stable",
+           (unsigned long)strcmp(OwKdbAbiFamilyName(OW_KDB_ABI_FAMILY_BSD),
+                                 "bsd"),
+           0ul);
+  check_eq("ABI origin names are stable",
+           (unsigned long)strcmp(
+               OwKdbAbiOriginName(OW_KDB_ABI_ORIGIN_MANIFEST), "manifest"),
+           0ul);
+
+  /* ---- ELF validator ----------------------------------------------- */
+  printf("\n=== KDB extensions: ELF validation ===\n");
+
+  (void)kdb_test_build_elf(elf, OW_KDB_ELF_TYPE_EXEC, OW_KDB_ELF_OSABI_LINUX,
+                           OW_USER_IMAGE_BASE, OW_USER_IMAGE_BASE, 5u);
+  st = OwKdbElfInspect(elf, KDB_TEST_ELF_SIZE, &elf_info);
+  check_eq("a valid ELF64 image is inspected", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_window("the inspected ELF is valid", elf_info.Valid, true);
+  check_eq("the ELF type is ET_EXEC", (unsigned long)elf_info.Type,
+           (unsigned long)OW_KDB_ELF_TYPE_EXEC);
+  check_eq("the ELF machine is x86-64", (unsigned long)elf_info.Machine, 0x3Eul);
+  check_eq("the ELF OSABI is reported", (unsigned long)elf_info.OsAbi,
+           (unsigned long)OW_KDB_ELF_OSABI_LINUX);
+  check_eq("the ELF has one load segment",
+           (unsigned long)elf_info.LoadSegments, 1ul);
+  check_window("the ELF entry is executable", elf_info.EntryInExecutable, true);
+  check_eq("the ELF preferred base is preserved",
+           (unsigned long)elf_info.PreferredBase,
+           (unsigned long)OW_USER_IMAGE_BASE);
+  check_eq("the ELF entry is preserved", (unsigned long)elf_info.Entry,
+           (unsigned long)OW_USER_IMAGE_BASE);
+  check_eq("the ELF occupies one page", (unsigned long)elf_info.ResidentPages,
+           1ul);
+
+  st = OwKdbElfValidate(elf, KDB_TEST_ELF_SIZE, OW_KDB_ELF_OSABI_LINUX, &pages);
+  check_eq("ELF validation accepts the matching OSABI", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("ELF validation reports one resident page", (unsigned long)pages,
+           1ul);
+  st = OwKdbElfValidate(elf, KDB_TEST_ELF_SIZE, OW_KDB_ELF_OSABI_SYSV, &pages);
+  check_eq("ELF validation refuses the wrong OSABI", (unsigned long)st,
+           (unsigned long)OW_ERR_UNSUPPORTED);
+  st = OwKdbElfValidate(elf, KDB_TEST_ELF_SIZE, OW_KDB_ELF_OSABI_LINUX,
+                        (uint32_t *)0);
+  check_eq("ELF validation refuses a null page output", (unsigned long)st,
+           (unsigned long)OW_ERR_NULL_POINTER);
+
+  (void)kdb_test_build_elf(elf, OW_KDB_ELF_TYPE_EXEC, OW_KDB_ELF_OSABI_LINUX,
+                           OW_USER_IMAGE_BASE, OW_USER_IMAGE_BASE, 5u);
+  elf[0] = 0u;
+  st = OwKdbElfInspect(elf, KDB_TEST_ELF_SIZE, &elf_info);
+  check_eq("a non-ELF magic is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_CORRUPT);
+
+  (void)kdb_test_build_elf(elf, OW_KDB_ELF_TYPE_EXEC, OW_KDB_ELF_OSABI_LINUX,
+                           OW_USER_IMAGE_BASE, OW_USER_IMAGE_BASE + 0x2000u,
+                           5u);
+  st = OwKdbElfInspect(elf, KDB_TEST_ELF_SIZE, &elf_info);
+  check_eq("an entry outside the executable segment is refused",
+           (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+
+  (void)kdb_test_build_elf(elf, OW_KDB_ELF_TYPE_EXEC, OW_KDB_ELF_OSABI_LINUX,
+                           0x1000u, 0x1000u, 5u);
+  st = OwKdbElfInspect(elf, KDB_TEST_ELF_SIZE, &elf_info);
+  check_eq("a segment outside the user window is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_UNSUPPORTED);
+
+  (void)kdb_test_build_elf(elf, 1u /* ET_REL */, OW_KDB_ELF_OSABI_LINUX,
+                           OW_USER_IMAGE_BASE, OW_USER_IMAGE_BASE, 5u);
+  st = OwKdbElfInspect(elf, KDB_TEST_ELF_SIZE, &elf_info);
+  check_eq("an unsupported ELF type is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_UNSUPPORTED);
+
+  st = OwKdbElfInspect(elf, 32u, &elf_info);
+  check_eq("a truncated ELF header is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_CORRUPT);
+
+  (void)kdb_test_build_elf(elf, OW_KDB_ELF_TYPE_DYN, OW_KDB_ELF_OSABI_LINUX,
+                           0u, 0u, 5u);
+  st = OwKdbElfInspect(elf, KDB_TEST_ELF_SIZE, &elf_info);
+  check_eq("a position-independent ELF is inspected", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("ET_DYN relocates its base to the user image base",
+           (unsigned long)elf_info.PreferredBase,
+           (unsigned long)OW_USER_IMAGE_BASE);
+  check_eq("ET_DYN relocates its entry to the user image base",
+           (unsigned long)elf_info.Entry, (unsigned long)OW_USER_IMAGE_BASE);
+
+  /* ---- Manifest-composed ABIs -------------------------------------- */
+  printf("\n=== KDB extensions: manifest-composed ABIs ===\n");
+
+  files[0].Name = "base.manifest";
+  files[0].Data = (const uint8_t *)k_mf_base;
+  files[0].Size = (uint32_t)(sizeof(k_mf_base) - 1u);
+
+  st = OwKdbAbiComposeCustom(files, 1u, &raw_abi);
+  check_eq("a raw custom ABI composes from a manifest", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_window("the composed ABI uses the custom window",
+               raw_abi >= OW_KDB_ABI_CUSTOM_BASE + 2u &&
+                   raw_abi <= OW_KDB_ABI_CUSTOM_MAX,
+               true);
+  st = OwKdbGetAbi(raw_abi, &abi);
+  check_eq("the composed ABI is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the composed ABI family is custom", (unsigned long)abi.Family,
+           (unsigned long)OW_KDB_ABI_FAMILY_CUSTOM);
+  check_eq("the composed ABI kind is custom", (unsigned long)abi.Kind,
+           (unsigned long)OW_KDB_KIND_CUSTOM);
+  check_eq("the composed ABI format is raw", (unsigned long)abi.Format,
+           (unsigned long)OW_KDB_FORMAT_RAW);
+  check_eq("the composed ABI origin is manifest", (unsigned long)abi.Origin,
+           (unsigned long)OW_KDB_ABI_ORIGIN_MANIFEST);
+  check_eq("the composed ABI declares one segment",
+           (unsigned long)abi.SegmentCount, 1ul);
+  check_eq("the composed ABI load base comes from the manifest",
+           (unsigned long)abi.LoadBase, (unsigned long)OW_USER_IMAGE_BASE);
+  check_eq("the composed ABI entry comes from the manifest",
+           (unsigned long)abi.EntryPoint, (unsigned long)OW_USER_IMAGE_BASE);
+  check_window("the composed ABI does not claim execution",
+               abi.ExecutionSupported, false);
+  st = OwKdbFindAbi("test.raw.base", &abi_id);
+  check_eq("the composed ABI is discoverable by name", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the composed ABI name lookup matches its id",
+           (unsigned long)abi_id, (unsigned long)raw_abi);
+
+  files[1].Name = "local.overlay";
+  files[1].Data = (const uint8_t *)k_mf_overlay;
+  files[1].Size = (uint32_t)(sizeof(k_mf_overlay) - 1u);
+  st = OwKdbAbiComposeCustom(files, 2u, &overlay_abi);
+  check_eq("a multi-file overlay composes", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbGetAbi(overlay_abi, &abi);
+  check_eq("the overlay ABI is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("a later manifest overrides the name",
+           (unsigned long)strcmp(abi.Name, "test.raw.overlay"), 0ul);
+  check_window("a later manifest adds the shared-memory requirement",
+               (abi.Flags & OW_KDB_ABI_FLAG_REQUIRES_SHARED_MEMORY) != 0u, true);
+  check_eq("the overlay keeps the base segment",
+           (unsigned long)abi.SegmentCount, 1ul);
+
+  files[0].Name = "bad.key";
+  files[0].Data = (const uint8_t *)k_mf_bad_key;
+  files[0].Size = (uint32_t)(sizeof(k_mf_bad_key) - 1u);
+  st = OwKdbAbiComposeCustom(files, 1u, &bad_id);
+  check_eq("an unknown manifest key is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_INVALID_PARAM);
+
+  files[0].Name = "no.name";
+  files[0].Data = (const uint8_t *)k_mf_no_name;
+  files[0].Size = (uint32_t)(sizeof(k_mf_no_name) - 1u);
+  st = OwKdbAbiComposeCustom(files, 1u, &bad_id);
+  check_eq("a manifest without a name is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_INVALID_PARAM);
+
+  files[0].Name = "raw.nobase";
+  files[0].Data = (const uint8_t *)k_mf_raw_nobase;
+  files[0].Size = (uint32_t)(sizeof(k_mf_raw_nobase) - 1u);
+  st = OwKdbAbiComposeCustom(files, 1u, &bad_id);
+  check_eq("a raw manifest without base/entry is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_INVALID_PARAM);
+
+  st = OwKdbAbiComposeCustom(files, 0u, &bad_id);
+  check_eq("an empty manifest list is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_INVALID_PARAM);
+  st = OwKdbAbiComposeCustom((const OW_KDB_MANIFEST_FILE *)0, 1u, &bad_id);
+  check_eq("a null manifest list is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_INVALID_PARAM);
+
+  /* ---- Policy and raw launch plans --------------------------------- */
+  printf("\n=== KDB extensions: policy and raw launch plans ===\n");
+
+  check_eq("the default policy is closed", (unsigned long)OwKdbGetPolicy(), 0ul);
+
+  kdb_test_desc(&desc, "custom-raw", OW_KDB_KIND_CUSTOM, raw_abi,
+                OW_KDB_FORMAT_RAW);
+  desc.Image = raw_image;
+  desc.ImageSize = (uint32_t)sizeof(raw_image);
+  st = OwKdbLoaderValidate(&desc, &pages);
+  check_eq("a manifest raw image validates", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the raw image occupies one page", (unsigned long)pages, 1ul);
+
+  st = OwKdbRegisterKernel(&desc, &custom_kernel);
+  check_eq("the raw custom kernel registers", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbAssociateApplication("custom-app", custom_kernel, OW_KDB_CAP_CALL,
+                                 &custom_app);
+  check_eq("the raw custom kernel associates", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+
+  OwKdbClearHistory();
+  st = OwKdbLoadInstance(custom_app, 0u, &custom_inst);
+  check_eq("the raw custom instance loads", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbGetInstance(custom_inst, &inst);
+  check_eq("the raw instance is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the raw instance reports its ABI", (unsigned long)inst.Abi,
+           (unsigned long)raw_abi);
+  check_eq("the raw instance reports RAW format", (unsigned long)inst.Format,
+           (unsigned long)OW_KDB_FORMAT_RAW);
+  check_eq("the raw instance entry comes from the manifest",
+           (unsigned long)inst.EntryPoint, (unsigned long)OW_USER_IMAGE_BASE);
+  check_eq("the raw instance base comes from the manifest",
+           (unsigned long)inst.MappedBase, (unsigned long)OW_USER_IMAGE_BASE);
+
+  st = OwKdbBuildLaunchPlan(custom_inst, &plan);
+  check_eq("a launch plan is built for the raw instance", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_window("the raw plan is management-ready", plan.ManagementReady, true);
+  check_eq("the raw plan is blocked by ABI support",
+           (unsigned long)plan.Blocker,
+           (unsigned long)OW_KDB_BLOCKER_ABI_UNSUPPORTED);
+  check_window("the raw plan does not claim execution",
+               plan.ExecutionAvailable, false);
+
+  st = OwKdbExecuteInstance(custom_inst);
+  check_eq("executing a raw instance is unsupported", (unsigned long)st,
+           (unsigned long)OW_ERR_UNSUPPORTED);
+  st = OwKdbGetInstance(custom_inst, &inst);
+  check_eq("an unsupported ABI does not fault the instance",
+           (unsigned long)inst.State, (unsigned long)OW_KDB_INSTANCE_READY);
+
+  st = OwKdbRegisterExecutor(kdb_test_executor_accept, &exec_count);
+  check_eq("a test executor registers", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_window("execution becomes available with a backend",
+               OwKdbExecutionAvailable(), true);
+  st = OwKdbExecuteInstance(custom_inst);
+  check_eq("a foreign ABI is still not handed to the backend",
+           (unsigned long)st, (unsigned long)OW_ERR_UNSUPPORTED);
+  check_eq("the backend is not invoked for a foreign ABI",
+           (unsigned long)exec_count, 0ul);
+  OwKdbUnregisterExecutor();
+  check_window("execution is unavailable after unregistering",
+               OwKdbExecutionAvailable(), false);
+
+  /* ---- Lifecycle history ------------------------------------------- */
+  st = OwKdbStartInstance(custom_inst);
+  check_eq("the raw instance starts logically", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbStopInstance(custom_inst);
+  check_eq("the raw instance stops", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbDestroyInstance(custom_inst);
+  check_eq("the raw instance is destroyed", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+
+  check_eq("history records the whole lifecycle",
+           (unsigned long)OwKdbHistoryCount(), 4ul);
+  check_eq("history is attributable to the instance",
+           (unsigned long)OwKdbHistoryCountForInstance(custom_inst), 4ul);
+  st = OwKdbGetHistoryEvent(0u, &event);
+  check_eq("the first history event is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the first history event is LOADED", (unsigned long)event.Event,
+           (unsigned long)OW_KDB_EVENT_LOADED);
+  check_eq("the first history event names the instance",
+           (unsigned long)event.InstanceId, (unsigned long)custom_inst);
+  st = OwKdbGetHistoryEvent(1u, &event);
+  check_eq("the second history event is STARTED", (unsigned long)event.Event,
+           (unsigned long)OW_KDB_EVENT_STARTED);
+  st = OwKdbGetHistoryEventForInstance(custom_inst, 3u, &event);
+  check_eq("the last instance event is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the last instance event is DESTROYED",
+           (unsigned long)event.Event, (unsigned long)OW_KDB_EVENT_DESTROYED);
+  st = OwKdbGetHistoryEvent(4u, &event);
+  check_eq("an out-of-range history index is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  st = OwKdbGetHistoryEventForInstance(custom_inst, 4u, &event);
+  check_eq("an out-of-range instance event is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  check_eq("history event names are stable",
+           (unsigned long)strcmp(
+               OwKdbInstanceEventName(OW_KDB_EVENT_RUNNING), "running"),
+           0ul);
+  OwKdbClearHistory();
+  check_eq("history clears", (unsigned long)OwKdbHistoryCount(), 0ul);
+
+  /* ---- Compatibility policy ---------------------------------------- */
+  kdb_test_desc(&desc, "custom-private", OW_KDB_KIND_CUSTOM, raw_abi,
+                OW_KDB_FORMAT_RAW);
+  desc.Image = raw_image;
+  desc.ImageSize = (uint32_t)sizeof(raw_image);
+  st = OwKdbAssessCompatibility(&desc, &report);
+  check_eq("a private custom descriptor is compatible", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+
+  desc.MemoryModel = OW_KDB_MEMORY_SHARED;
+  st = OwKdbAssessCompatibility(&desc, &report);
+  check_eq("shared memory is refused by default", (unsigned long)st,
+           (unsigned long)OW_ERR_UNSUPPORTED);
+  check_eq("the shared-memory verdict is explicit",
+           (unsigned long)report.Verdict,
+           (unsigned long)OW_KDB_COMPAT_MEMORY_MODEL);
+  OwKdbSetPolicy(OW_KDB_POLICY_ALLOW_SHARED_MEMORY);
+  check_eq("the policy widens explicitly", (unsigned long)OwKdbGetPolicy(),
+           (unsigned long)OW_KDB_POLICY_ALLOW_SHARED_MEMORY);
+  st = OwKdbAssessCompatibility(&desc, &report);
+  check_eq("shared memory is admitted when the policy allows it",
+           (unsigned long)st, (unsigned long)OW_SUCCESS);
+  OwKdbSetPolicy(0u);
+  check_eq("the policy is restored", (unsigned long)OwKdbGetPolicy(), 0ul);
+
+  kdb_test_desc(&desc, "overlay-private", OW_KDB_KIND_CUSTOM, overlay_abi,
+                OW_KDB_FORMAT_RAW);
+  desc.Image = raw_image;
+  desc.ImageSize = (uint32_t)sizeof(raw_image);
+  st = OwKdbAssessCompatibility(&desc, &report);
+  check_eq("an ABI requiring shared memory refuses a private descriptor",
+           (unsigned long)st, (unsigned long)OW_ERR_UNSUPPORTED);
+  check_eq("the ABI-requirement verdict is the memory model",
+           (unsigned long)report.Verdict,
+           (unsigned long)OW_KDB_COMPAT_MEMORY_MODEL);
+  desc.MemoryModel = OW_KDB_MEMORY_SHARED;
+  OwKdbSetPolicy(OW_KDB_POLICY_ALLOW_SHARED_MEMORY);
+  st = OwKdbAssessCompatibility(&desc, &report);
+  check_eq("the overlay ABI is admitted with matching model and policy",
+           (unsigned long)st, (unsigned long)OW_SUCCESS);
+  OwKdbSetPolicy(0u);
+
+  kdb_test_desc(&desc, "kernel-priv", OW_KDB_KIND_NATIVE_OPENWINDOWS,
+                OW_KDB_ABI_OPENWINDOWS_NATIVE, OW_KDB_FORMAT_OWX);
+  desc.PrivilegeModel = OW_KDB_PRIVILEGE_KERNEL_EQUIVALENT;
+  st = OwKdbAssessCompatibility(&desc, &report);
+  check_eq("kernel privilege is refused by default", (unsigned long)st,
+           (unsigned long)OW_ERR_UNSUPPORTED);
+  OwKdbSetPolicy(OW_KDB_POLICY_ALLOW_KERNEL_PRIVILEGE);
+  st = OwKdbAssessCompatibility(&desc, &report);
+  check_eq("kernel privilege is admitted when the policy allows it",
+           (unsigned long)st, (unsigned long)OW_SUCCESS);
+  OwKdbSetPolicy(0u);
+
+  /* ---- Registry and ABI teardown ----------------------------------- */
+  st = OwKdbUnregisterKernel(custom_kernel);
+  check_eq("a kernel with a live association cannot be unregistered",
+           (unsigned long)st, (unsigned long)OW_ERR_INSUFFICIENT);
+  st = OwKdbDisassociateApplication(custom_app);
+  check_eq("the raw custom app disassociates", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbUnregisterKernel(custom_kernel);
+  check_eq("the raw custom kernel unregisters", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbUnregisterAbi(raw_abi);
+  check_eq("the raw custom ABI unregisters", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbUnregisterAbi(overlay_abi);
+  check_eq("the overlay ABI unregisters", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbUnregisterAbi(OW_KDB_ABI_LINUX_X86_64);
+  check_eq("a built-in ABI cannot be unregistered", (unsigned long)st,
+           (unsigned long)OW_ERR_INSUFFICIENT);
+  check_eq("the built-in ABI count is restored",
+           (unsigned long)OwKdbAbiCount(), 9ul);
+
+  /* ---- Executor bindings ------------------------------------------- */
+  printf("\n=== KDB extensions: executor bindings ===\n");
+
+  check_eq("no executor bindings exist in the host build",
+           (unsigned long)OwKdbBindingCount(), 0ul);
+  st = OwKdbGetBinding(1u, &binding);
+  check_eq("an unbound instance has no binding", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  st = OwKdbFindBindingByThread(1u, 1u, &binding);
+  check_eq("an unbound thread has no binding", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+
+  /* ---- KAPA application facade ------------------------------------- */
+  printf("\n=== KDB extensions: KAPA facade ===\n");
+
+  check_window("the KAPA facade is ready", OwKapaIsReady(), true);
+  check_eq("KAPA starts with no applications",
+           (unsigned long)OwKapaApplicationCount(), 0ul);
+
+  kdb_test_desc(&desc, "kapa-native", OW_KDB_KIND_NATIVE_OPENWINDOWS,
+                OW_KDB_ABI_OPENWINDOWS_NATIVE, OW_KDB_FORMAT_OWX);
+  st = OwKdbRegisterKernel(&desc, &kapa_kernel);
+  check_eq("the KAPA native kernel registers", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+
+  st = OwKapaRegisterApplication("kapa.app", kapa_kernel, OW_KDB_CAP_CALL,
+                                 &kapa_app);
+  check_eq("a KAPA application registers", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("KAPA counts the application",
+           (unsigned long)OwKapaApplicationCount(), 1ul);
+  st = OwKapaGetApplication(kapa_app, &app);
+  check_eq("the KAPA application is queryable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the KAPA application starts associated",
+           (unsigned long)app.State, (unsigned long)OW_KAPA_STATE_ASSOCIATED);
+  check_eq("the KAPA application records its kernel",
+           (unsigned long)app.KernelId, (unsigned long)kapa_kernel);
+  check_window("the KAPA application has an association",
+               app.AssociationId != OW_KDB_INVALID_ID, true);
+  check_eq("the KAPA state name is stable",
+           (unsigned long)strcmp(OwKapaStateName(app.State), "associated"),
+           0ul);
+
+  st = OwKapaRegisterApplication("kapa.app", kapa_kernel, OW_KDB_CAP_CALL,
+                                 &kapa_app);
+  check_eq("a duplicate KAPA name is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_ALREADY_EXISTS);
+  st = OwKapaFindApplication("kapa.app", &app);
+  check_eq("the KAPA application is discoverable by name", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaGetApplicationByIndex(0u, &app);
+  check_eq("the KAPA application is enumerable", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaGetApplicationByIndex(1u, &app);
+  check_eq("an out-of-range KAPA index is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  st = OwKapaGetApplication(999u, &app);
+  check_eq("an unknown KAPA application is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+
+  st = OwKapaLoad(kapa_app, 0u);
+  check_eq("the KAPA application loads", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaGetApplication(kapa_app, &app);
+  check_eq("the KAPA application reports loaded", (unsigned long)app.State,
+           (unsigned long)OW_KAPA_STATE_LOADED);
+  check_window("the KAPA application has an instance",
+               app.InstanceId != OW_KDB_INVALID_ID, true);
+  association = app.AssociationId;
+  OwKapaGetStats(&kstats);
+  check_eq("KAPA stats count the application",
+           (unsigned long)kstats.Applications, 1ul);
+  check_eq("KAPA stats count the loaded application",
+           (unsigned long)kstats.Loaded, 1ul);
+  check_eq("KAPA stats show nothing running", (unsigned long)kstats.Running,
+           0ul);
+
+  st = OwKapaLoad(kapa_app, 0u);
+  check_eq("a second load is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_ALREADY_EXISTS);
+  st = OwKapaExecute(kapa_app);
+  check_eq("KAPA execute without a backend is unsupported",
+           (unsigned long)st, (unsigned long)OW_ERR_UNSUPPORTED);
+  st = OwKapaGetApplication(kapa_app, &app);
+  check_eq("an unsupported execute leaves the application loaded",
+           (unsigned long)app.State, (unsigned long)OW_KAPA_STATE_LOADED);
+
+  /* ---- Service Bridge built-ins ------------------------------------ */
+  printf("\n=== KDB extensions: Service Bridge built-ins ===\n");
+
+  st = OwKapaBridgeCall(kapa_app, 0u, OW_KDB_SERVICE_PING, (const void *)0, 0u,
+                        response, (uint32_t)sizeof(response), &len);
+  check_eq("a KAPA application reaches the main-kernel bridge",
+           (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the PING response length is 8", (unsigned long)len, 8ul);
+  check_eq("the PING response is the documented pong",
+           (unsigned long)memcmp(response, "kdb-pong", 8u), 0ul);
+
+  st = OwKdbBridgeCall(association, 0u, OW_KDB_SERVICE_ECHO, "abc", 3u,
+                       response, (uint32_t)sizeof(response), &len);
+  check_eq("ECHO echoes the request", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the ECHO response length is 3", (unsigned long)len, 3ul);
+  check_eq("the ECHO response bytes match",
+           (unsigned long)memcmp(response, "abc", 3u), 0ul);
+
+  st = OwKdbBridgeCall(association, 0u, OW_KDB_SERVICE_LOG, "kapa", 4u,
+                       response, 0u, &len);
+  check_eq("LOG accepts a bounded message", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("LOG produces no response", (unsigned long)len, 0ul);
+
+  st = OwKdbBridgeCall(association, 0u, OW_KDB_SERVICE_RUNTIME_INFO,
+                       (const void *)0, 0u, response,
+                       (uint32_t)sizeof(response), &len);
+  check_eq("RUNTIME_INFO responds", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("RUNTIME_INFO returns 8 bytes", (unsigned long)len, 8ul);
+
+  service_count = OwKdbServiceCount();
+  check_window("the bridge exposes at least the four built-ins",
+               service_count >= 4u, true);
+  for (i = 0u; i < service_count; ++i) {
+    st = OwKdbGetServiceByIndex(i, &svc);
+    if (ow_status_error(st)) {
+      break;
+    }
+    if (svc.OwnerInstanceId != 0u) {
+      continue;
+    }
+    if (svc.ServiceId == OW_KDB_SERVICE_PING) {
+      found_ping = true;
+      check_eq("the PING service is named main.ping",
+               (unsigned long)strcmp(svc.Name, "main.ping"), 0ul);
+      check_window("PING recorded at least one call", svc.CallCount > 0u, true);
+    } else if (svc.ServiceId == OW_KDB_SERVICE_ECHO) {
+      found_echo = true;
+      check_eq("the ECHO service is named main.echo",
+               (unsigned long)strcmp(svc.Name, "main.echo"), 0ul);
+      check_window("ECHO recorded at least one call", svc.CallCount > 0u, true);
+    } else if (svc.ServiceId == OW_KDB_SERVICE_LOG) {
+      found_log = true;
+      check_eq("the LOG service is named main.log",
+               (unsigned long)strcmp(svc.Name, "main.log"), 0ul);
+      check_window("LOG recorded at least one call", svc.CallCount > 0u, true);
+    } else if (svc.ServiceId == OW_KDB_SERVICE_RUNTIME_INFO) {
+      found_runtime = true;
+      check_eq("the runtime-info service is named main.runtime_info",
+               (unsigned long)strcmp(svc.Name, "main.runtime_info"), 0ul);
+      check_window("RUNTIME_INFO recorded at least one call",
+                   svc.CallCount > 0u, true);
+    }
+  }
+  check_window("PING is enumerable", found_ping, true);
+  check_window("ECHO is enumerable", found_echo, true);
+  check_window("LOG is enumerable", found_log, true);
+  check_window("RUNTIME_INFO is enumerable", found_runtime, true);
+  st = OwKdbGetServiceByIndex(service_count, &svc);
+  check_eq("an out-of-range service index is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  st = OwKdbGetServiceByIndex(0u, (OW_KDB_SERVICE_INFO *)0);
+  check_eq("a null service output is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NULL_POINTER);
+
+  /* ---- KAPA teardown ----------------------------------------------- */
+  st = OwKapaStop(kapa_app);
+  check_eq("the KAPA application stops", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaGetApplication(kapa_app, &app);
+  check_eq("the KAPA application reports stopped", (unsigned long)app.State,
+           (unsigned long)OW_KAPA_STATE_STOPPED);
+  st = OwKapaDestroy(kapa_app);
+  check_eq("the KAPA instance is destroyed", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaGetApplication(kapa_app, &app);
+  check_eq("the KAPA application returns to associated",
+           (unsigned long)app.State, (unsigned long)OW_KAPA_STATE_ASSOCIATED);
+  check_eq("the KAPA application drops its instance id",
+           (unsigned long)app.InstanceId, (unsigned long)OW_KDB_INVALID_ID);
+
+  st = OwKapaLoad(kapa_app, 0u);
+  check_eq("the KAPA application reloads", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaFault(kapa_app, OW_ERR_CORRUPT);
+  check_eq("the KAPA application can be faulted", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaGetApplication(kapa_app, &app);
+  check_eq("the KAPA application reports faulted", (unsigned long)app.State,
+           (unsigned long)OW_KAPA_STATE_FAULTED);
+  st = OwKapaDestroy(kapa_app);
+  check_eq("a faulted KAPA instance is destroyed", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+
+  st = OwKapaUnregisterApplication(kapa_app);
+  check_eq("the KAPA application unregisters", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("KAPA is empty again", (unsigned long)OwKapaApplicationCount(), 0ul);
+  st = OwKapaGetApplication(kapa_app, &app);
+  check_eq("an unregistered KAPA application is gone", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+  st = OwKapaUnregisterApplication(kapa_app);
+  check_eq("unregistering twice is refused", (unsigned long)st,
+           (unsigned long)OW_ERR_NOT_FOUND);
+
+  files[0].Name = "kapa.manifest";
+  files[0].Data = (const uint8_t *)k_mf_kapa;
+  files[0].Size = (uint32_t)(sizeof(k_mf_kapa) - 1u);
+  st = OwKapaComposeAbi(files, 1u, &kapa_abi);
+  check_eq("KAPA composes a custom ABI", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKdbGetAbi(kapa_abi, &abi);
+  check_eq("the KAPA-composed ABI is registered", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  check_eq("the KAPA-composed ABI origin is manifest",
+           (unsigned long)abi.Origin,
+           (unsigned long)OW_KDB_ABI_ORIGIN_MANIFEST);
+  st = OwKdbUnregisterAbi(kapa_abi);
+  check_eq("the KAPA-composed ABI unregisters", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+  st = OwKapaComposeAbi(files, 0u, &kapa_abi);
+  check_eq("KAPA refuses an empty manifest list", (unsigned long)st,
+           (unsigned long)OW_ERR_INVALID_PARAM);
+
+  st = OwKdbUnregisterKernel(kapa_kernel);
+  check_eq("the KAPA native kernel unregisters", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+
+  /* ---- Syscall gateway refusal ------------------------------------- */
+  printf("\n=== KDB extensions: syscall gateway refusal ===\n");
+
+  check_eq("the KDB bridge syscall is refused without a caller",
+           (unsigned long)OwSyscallDispatch(OW_SYS_KDB_BRIDGE, 0u, 0u, 0u),
+           (unsigned long)-1);
+  check_eq("the KDB bridge syscall refuses a callerless pointer",
+           (unsigned long)OwSyscallDispatch(OW_SYS_KDB_BRIDGE, 0x1000u, 0u, 0u),
+           (unsigned long)-1);
+
+  printf("--- KDB extensions verified\n");
+}
+
 /* ------------------------------------------------------------------------- */
 /* Main                                                                       */
 /* ------------------------------------------------------------------------- */
@@ -5356,6 +6156,17 @@ int main(int argc, char **argv) {
 
   if (!ow_status_success(st)) {
     printf("[BOOT] KDB init failed\n");
+    return 1;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Phase 4e: KAPA application facade                                  */
+  /* ------------------------------------------------------------------ */
+
+  st = OwKapaInitialize();
+
+  if (!ow_status_success(st)) {
+    printf("[BOOT] KAPA init failed\n");
     return 1;
   }
 
@@ -5920,6 +6731,7 @@ int main(int argc, char **argv) {
   /* ------------------------------------------------------------------ */
 
   test_kdb();
+  test_kdb_extensions();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */

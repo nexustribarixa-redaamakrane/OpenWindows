@@ -33,7 +33,23 @@ static bool descriptor_valid(const OW_KDB_KERNEL_DESC* Desc) {
         return false;
     }
     if (Desc->Kind < OW_KDB_KIND_NATIVE_OPENWINDOWS ||
-        Desc->Kind > OW_KDB_KIND_CUSTOM) {
+        Desc->Kind > OW_KDB_KIND_UNIX) {
+        return false;
+    }
+    if (Desc->Abi == OW_KDB_INVALID_ID) {
+        return false;
+    }
+    if (Desc->Format != OW_KDB_FORMAT_OWX &&
+        Desc->Format != OW_KDB_FORMAT_ELF &&
+        Desc->Format != OW_KDB_FORMAT_RAW) {
+        return false;
+    }
+    if (Desc->MemoryModel != OW_KDB_MEMORY_PRIVATE &&
+        Desc->MemoryModel != OW_KDB_MEMORY_SHARED) {
+        return false;
+    }
+    if (Desc->PrivilegeModel != OW_KDB_PRIVILEGE_UNPRIVILEGED &&
+        Desc->PrivilegeModel != OW_KDB_PRIVILEGE_KERNEL_EQUIVALENT) {
         return false;
     }
     if (Desc->Image == (const uint8_t*)0 && Desc->ImageSize != 0U) {
@@ -181,6 +197,8 @@ static OW_STATUS report_set(OW_KDB_COMPAT_REPORT* Out,
 
 OW_STATUS OwKdbAssessCompatibility(const OW_KDB_KERNEL_DESC* Desc,
                                    OW_KDB_COMPAT_REPORT* OutReport) {
+    const OW_KDB_ABI_DESC* abi;
+
     if (OutReport == (OW_KDB_COMPAT_REPORT*)0) {
         return OW_ERR_NULL_POINTER;
     }
@@ -188,7 +206,7 @@ OW_STATUS OwKdbAssessCompatibility(const OW_KDB_KERNEL_DESC* Desc,
     if (!descriptor_valid(Desc)) {
         return report_set(OutReport, OW_KDB_COMPAT_INVALID_DESCRIPTOR,
                           OW_ERR_INVALID_PARAM,
-                          "descriptor name or image metadata is malformed");
+                          "descriptor name, ABI or image metadata is malformed");
     }
 
     if (Desc->TargetArch != OW_KDB_ARCH_X86_64) {
@@ -197,41 +215,69 @@ OW_STATUS OwKdbAssessCompatibility(const OW_KDB_KERNEL_DESC* Desc,
                           "target architecture is not x86-64");
     }
 
+    abi = OwKdbAbiPtr(Desc->Abi);
+    if (abi == (const OW_KDB_ABI_DESC*)0) {
+        return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
+                          OW_ERR_UNSUPPORTED,
+                          "descriptor names an ABI this build does not know");
+    }
+
+    /* Kind and ABI family must agree.  The kind is the policy label an
+     * operator sees; the ABI is the technical environment. */
     switch (Desc->Kind) {
     case OW_KDB_KIND_NATIVE_OPENWINDOWS:
-        if (Desc->Abi != OW_KDB_ABI_OPENWINDOWS_NATIVE) {
+        if (abi->Family != OW_KDB_ABI_FAMILY_OPENWINDOWS ||
+            abi->Kind != OW_KDB_KIND_NATIVE_OPENWINDOWS) {
             return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
                               OW_ERR_UNSUPPORTED,
                               "native OpenWindows kernel requires the native ABI");
         }
         break;
     case OW_KDB_KIND_STRIPPED_OPENWINDOWS:
-        if (Desc->Abi != OW_KDB_ABI_OPENWINDOWS_NATIVE &&
-            Desc->Abi != OW_KDB_ABI_OPENWINDOWS_COMPAT) {
+        if (abi->Family != OW_KDB_ABI_FAMILY_OPENWINDOWS) {
             return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
                               OW_ERR_UNSUPPORTED,
                               "stripped OpenWindows kernel requires an OpenWindows ABI");
         }
         break;
     case OW_KDB_KIND_MODIFIED_OPENWINDOWS:
-        if (Desc->Abi != OW_KDB_ABI_OPENWINDOWS_COMPAT) {
+        if (abi->Family != OW_KDB_ABI_FAMILY_OPENWINDOWS ||
+            abi->Kind != OW_KDB_KIND_MODIFIED_OPENWINDOWS) {
             return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
                               OW_ERR_UNSUPPORTED,
                               "modified OpenWindows kernel requires the compatibility ABI");
         }
         break;
     case OW_KDB_KIND_LINUX:
-        if (Desc->Abi != OW_KDB_ABI_LINUX_X86_64) {
+        if (abi->Family != OW_KDB_ABI_FAMILY_LINUX ||
+            abi->Kind != OW_KDB_KIND_LINUX) {
             return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
                               OW_ERR_UNSUPPORTED,
-                              "Linux descriptor does not carry the Linux x86-64 ABI");
+                              "Linux descriptor does not carry a Linux ABI");
+        }
+        break;
+    case OW_KDB_KIND_BSD:
+        if (abi->Family != OW_KDB_ABI_FAMILY_BSD ||
+            abi->Kind != OW_KDB_KIND_BSD) {
+            return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
+                              OW_ERR_UNSUPPORTED,
+                              "BSD descriptor does not carry a BSD ABI");
+        }
+        break;
+    case OW_KDB_KIND_UNIX:
+        if (abi->Family != OW_KDB_ABI_FAMILY_UNIX ||
+            abi->Kind != OW_KDB_KIND_UNIX) {
+            return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
+                              OW_ERR_UNSUPPORTED,
+                              "Unix descriptor does not carry a SysV Unix ABI");
         }
         break;
     case OW_KDB_KIND_CUSTOM:
-        if (Desc->Abi != OW_KDB_ABI_CUSTOM) {
+        if (abi->Family != OW_KDB_ABI_FAMILY_CUSTOM ||
+            abi->Kind != OW_KDB_KIND_CUSTOM) {
             return report_set(OutReport, OW_KDB_COMPAT_ABI_MISMATCH,
                               OW_ERR_UNSUPPORTED,
-                              "custom kernel descriptor does not carry the custom ABI");
+                              "custom kernel descriptor does not carry a custom ABI");
         }
         break;
     default:
@@ -240,50 +286,48 @@ OW_STATUS OwKdbAssessCompatibility(const OW_KDB_KERNEL_DESC* Desc,
                           "unknown associated-kernel kind");
     }
 
-    if (Desc->Kind == OW_KDB_KIND_LINUX) {
-        if (Desc->Format != OW_KDB_FORMAT_ELF) {
-            return report_set(OutReport, OW_KDB_COMPAT_FORMAT_MISMATCH,
-                              OW_ERR_UNSUPPORTED,
-                              "Linux associated kernel requires ELF");
-        }
-    } else if (Desc->Kind == OW_KDB_KIND_CUSTOM) {
-        if (Desc->Format != OW_KDB_FORMAT_RAW) {
-            return report_set(OutReport, OW_KDB_COMPAT_FORMAT_MISMATCH,
-                              OW_ERR_UNSUPPORTED,
-                              "custom associated kernel requires a raw image");
-        }
-    } else if (Desc->Format != OW_KDB_FORMAT_OWX) {
+    if (Desc->Format != abi->Format) {
         return report_set(OutReport, OW_KDB_COMPAT_FORMAT_MISMATCH,
                           OW_ERR_UNSUPPORTED,
-                          "OpenWindows associated kernel requires OWX");
+                          "descriptor image format does not match its ABI");
     }
 
-    /* No associated kernel is handed shared memory or kernel-equivalent
-     * privilege by this build.  A descriptor that asks for either is refused
-     * explicitly rather than being loaded under an isolation assumption the
-     * implementation does not keep. */
-    if (Desc->MemoryModel != OW_KDB_MEMORY_PRIVATE) {
+    /* An ABI that declares shared memory or kernel-equivalent privilege must
+     * be given a descriptor that says the same.  Lowering the descriptor
+     * silently would misrepresent the isolation the image expects. */
+    if ((abi->Flags & OW_KDB_ABI_FLAG_REQUIRES_SHARED_MEMORY) != 0U &&
+        Desc->MemoryModel != OW_KDB_MEMORY_SHARED) {
         return report_set(OutReport, OW_KDB_COMPAT_MEMORY_MODEL,
                           OW_ERR_UNSUPPORTED,
-                          "associated kernel must own a private memory model");
+                          "ABI requires shared memory but the descriptor is private");
     }
-    if (Desc->PrivilegeModel != OW_KDB_PRIVILEGE_UNPRIVILEGED) {
+    if ((abi->Flags & OW_KDB_ABI_FLAG_REQUIRES_KERNEL_PRIVILEGE) != 0U &&
+        Desc->PrivilegeModel != OW_KDB_PRIVILEGE_KERNEL_EQUIVALENT) {
         return report_set(OutReport, OW_KDB_COMPAT_PRIVILEGE_MODEL,
                           OW_ERR_UNSUPPORTED,
-                          "associated kernel must run unprivileged");
+                          "ABI requires kernel privilege but the descriptor is unprivileged");
     }
 
-    /* The metadata may be perfectly coherent and still have no adapter.  The
-     * two verdicts stay distinct so an operator can tell "wrong ABI" from
-     * "right ABI, not implemented yet". */
-    if (Desc->Kind == OW_KDB_KIND_LINUX || Desc->Kind == OW_KDB_KIND_CUSTOM) {
-        return report_set(OutReport, OW_KDB_COMPAT_UNSUPPORTED_KIND,
+    /* The default policy refuses the two models KDB cannot actually isolate.
+     * An operator may widen the policy explicitly; the refusal then becomes an
+     * admission rather than a silent assumption. */
+    if (Desc->MemoryModel == OW_KDB_MEMORY_SHARED &&
+        (OwKdbGetPolicy() & OW_KDB_POLICY_ALLOW_SHARED_MEMORY) == 0U) {
+        return report_set(OutReport, OW_KDB_COMPAT_MEMORY_MODEL,
                           OW_ERR_UNSUPPORTED,
-                          "this build has no loader adapter for that kernel kind");
+                          "shared memory requires OW_KDB_POLICY_ALLOW_SHARED_MEMORY");
+    }
+    if (Desc->PrivilegeModel == OW_KDB_PRIVILEGE_KERNEL_EQUIVALENT &&
+        (OwKdbGetPolicy() & OW_KDB_POLICY_ALLOW_KERNEL_PRIVILEGE) == 0U) {
+        return report_set(OutReport, OW_KDB_COMPAT_PRIVILEGE_MODEL,
+                          OW_ERR_UNSUPPORTED,
+                          "kernel privilege requires OW_KDB_POLICY_ALLOW_KERNEL_PRIVILEGE");
     }
 
     return report_set(OutReport, OW_KDB_COMPATIBLE, OW_SUCCESS,
-                      "compatible with the OpenWindows KDB loader");
+                      abi->ExecutionSupported
+                          ? "compatible; ABI has an execution path"
+                          : "compatible; ABI is validated but not executable in this build");
 }
 
 /* ---- Public registry wrappers ------------------------------------------ */
