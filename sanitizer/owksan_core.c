@@ -156,6 +156,12 @@ bool OwKSanMasterEnabled(void) {
     return g_MasterEnabled;
 }
 
+bool OwKSanIsEnabled(const char* Name) {
+    OW_KSAN_MODULE* m = ksan_find(Name);
+
+    return (m != (OW_KSAN_MODULE*)0) && g_MasterEnabled && m->Enabled;
+}
+
 OW_STATUS OwKSanInitializeEnabledModules(void) {
     uint32_t i;
     OW_STATUS st = OW_SUCCESS;

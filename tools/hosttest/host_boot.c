@@ -56,6 +56,9 @@ int test_superunicode_run(int* out_passed);
 #include "../../inc/ow_kdb.h"
 #include "../../inc/ow_kapa.h"
 #include "../../inc/owksan.h"
+#include "../../inc/owkheapsan.h"
+#include "../../inc/owkpagesan.h"
+#include "../../inc/owkbounds.h"
 #include "../../inc/ow_kprintf.h"
 /* Resolved on the include path, not by relative path: the generated header
  * lives in the build tree -- boot/ under the Makefile, <build>/generated under
@@ -5301,8 +5304,8 @@ static void test_owksan_core(void) {
   printf("\n=== OWKSan Suite (Phase 1 framework core) ===\n");
 
   check_window("OWKSan core is ready after the boot phase", OwKSanReady(), true);
-  check_eq("OWKSan module table starts empty", (unsigned long)OwKSanModuleCount(), 0ul);
-  check_eq("OWKSan starts with no module enabled", (unsigned long)OwKSanEnabledModuleCount(), 0ul);
+  check_eq("OWKSan module table holds the three Phase-2 modules", (unsigned long)OwKSanModuleCount(), 3ul);
+  check_eq("OWKSan starts with the Phase-2 modules enabled", (unsigned long)OwKSanEnabledModuleCount(), 3ul);
   check_window("OWKSan master switch defaults to disabled", OwKSanMasterEnabled(), false);
 
   mod.InitOrder = 100u;
@@ -5319,7 +5322,7 @@ static void test_owksan_core(void) {
 
   st = OwKSanRegisterModule(&mod);
   check_eq("OWKSan registers a synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
-  check_eq("OWKSan module table holds the synthetic module", (unsigned long)OwKSanModuleCount(), 1ul);
+  check_eq("OWKSan module table holds the synthetic module", (unsigned long)OwKSanModuleCount(), 4ul);
 
   st = OwKSanGetModule(name, &mod);
   check_eq("the synthetic module is queryable", (unsigned long)st, (unsigned long)OW_SUCCESS);
@@ -5329,7 +5332,7 @@ static void test_owksan_core(void) {
   st = OwKSanEnableModule(name);
   check_eq("OWKSan refuses an unknown module name", (unsigned long)OwKSanEnableModule("OWKNoSuchModule"), (unsigned long)OW_ERR_NOT_FOUND);
   check_eq("OWKSan enables the synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
-  check_eq("OWKSan enabled-module count is one", (unsigned long)OwKSanEnabledModuleCount(), 1ul);
+  check_eq("OWKSan enabled-module count is four", (unsigned long)OwKSanEnabledModuleCount(), 4ul);
   check_eq("OWKSan initialises the enabled module", (unsigned long)OwKSanInitializeEnabledModules(), (unsigned long)OW_SUCCESS);
   st = OwKSanGetModule(name, &mod);
   check_window("the synthetic module is now inited", mod.Inited, true);
@@ -5376,10 +5379,176 @@ static void test_owksan_core(void) {
   OwKSanShutdown();
   check_window("OWKSan is no longer ready after shutdown", OwKSanReady(), false);
   OwKSanUnregisterModule(name);
-  check_eq("the synthetic module is gone from the table", (unsigned long)OwKSanModuleCount(), 0ul);
+  check_eq("the synthetic module is gone from the table", (unsigned long)OwKSanModuleCount(), 3ul);
 
   check_eq("OWKSan re-initialises to ready", (unsigned long)OwKSanInitialize(), (unsigned long)OW_SUCCESS);
   check_window("OWKSan re-armed off after re-initialisation", OwKSanMasterEnabled(), false);
+}
+
+static void test_owkheapsan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+  OW_KHEAPSAN_REPORT rep;
+  void *marker;
+  void *marker2;
+  uint32_t errors_before;
+
+  printf("\n=== OWKSan Suite (OWKHeapSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKHEAPSAN, &mod);
+  check_eq("OWKHeapSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKHeapSan is enabled by default", mod.Enabled, true);
+  check_window("OWKHeapSan is inited at boot", mod.Inited, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  st = OwKHeapSanAuditArena(&rep);
+  check_eq("the arena header chain is packed and aligned", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the arena audit reports no errors", (unsigned long)rep.Errors, 0ul);
+  check_window("the arena audit visited at least one block", rep.Blocks >= 1u, true);
+  check_eq("the walk accounts for exactly the committed arena bytes", (unsigned long)rep.BytesWalked, (unsigned long)kalloc_used());
+
+  marker = kalloc(64);
+  check_window("a kalloc block validates as a live allocation", OwKHeapSanValidateBlock(marker), true);
+  check_window("a stack address is not a valid block", OwKHeapSanValidateBlock(&rep), false);
+
+  /* Double-free path: reset so the marker is a tracked allocation, then free
+   * it twice.  The bump arena never reuses the address, so the second free
+   * can only be a double-free or a wild pointer. */
+  OwKHeapSanRegistryReset();
+  marker2 = kalloc(64);
+  check_window("a fresh marker is tracked", OwKHeapSanIsTracked(marker2), true);
+  kfree(marker2);
+  check_window("a first free of a tracked marker is clean", !OwKHeapSanIsTracked(marker2), true);
+  errors_before = OwKSanReportCount();
+  kfree(marker2);
+  check_eq("the double-free is counted", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+
+  /* Foreign-pointer path: a stack address is not inside the arena. */
+  errors_before = OwKSanReportCount();
+  kfree(&marker2);
+  check_eq("an out-of-arena free is counted", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+
+  /* Negative path: corrupt one live block's size header and prove the audit
+   * catches it.  The bump arena never reuses memory, so this poisons only
+   * the audit walk; no live allocation or earlier block is affected. */
+  *(size_t *)((uint8_t *)marker2 - 8u) = 0u;
+  st = OwKHeapSanAuditArena(&rep);
+  check_window("the arena audit catches a corrupt header", st == OW_ERR_CORRUPT, true);
+  check_window("the corruption is counted", rep.Errors >= 1u, true);
+}
+
+static void test_owkpagesan(void) {
+  OW_KSAN_MODULE mod;
+  OW_PAGESAN_REPORT rep;
+  OW_STATUS st;
+  uint64_t va_base;
+
+  printf("\n=== OWKSan Suite (OWKPageSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKPageSan, &mod);
+  check_eq("OWKPageSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKPageSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  st = OwKPageSanAudit(&rep);
+  check_eq("the frame-allocator audit passes", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the frame-allocator audit reports no errors", (unsigned long)rep.Errors, 0ul);
+  check_window("the arena is non-empty and fully aligned", rep.ArenaBytes >= (uint64_t)OW_PAGE_SIZE, true);
+
+  /* Frame-range validation against the real arena. */
+  va_base = (uint64_t)OwMemArenaBase();
+  check_eq("the arena base frame range validates", (unsigned long)OwKPageSanCheckFrameRange(va_base, 1u), (unsigned long)OW_SUCCESS);
+  check_eq("an unaligned frame range is refused", (unsigned long)OwKPageSanCheckFrameRange(va_base + 1u, 1u), (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a wrapped frame range is refused", (unsigned long)OwKPageSanCheckFrameRange(0xFFFFFFFFFFFFF000ull, 2u), (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a range past the arena is refused", (unsigned long)OwKPageSanCheckFrameRange(va_base + rep.ArenaBytes, 1u), (unsigned long)OW_ERR_CORRUPT);
+
+  /* Raw leaf PTE structural validation. */
+  check_eq("a present kernel-RW PT entry passes",
+           (unsigned long)OwKPageSanCheckPte(0x12345000ull | OW_PAGE_KERN_RW,
+                                             OW_PAGESAN_LEVEL_PT), (unsigned long)OW_SUCCESS);
+  check_eq("a non-present entry passes",
+           (unsigned long)OwKPageSanCheckPte(0x12345000ull, OW_PAGESAN_LEVEL_PT),
+           (unsigned long)OW_SUCCESS);
+  check_eq("a reserved-above-51-bits entry is refused",
+           (unsigned long)OwKPageSanCheckPte(0x12345000ull | (1ull << 53) | OW_PAGE_PRESENT,
+                                             OW_PAGESAN_LEVEL_PT), (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a reserved-bits[10:9] entry is refused",
+           (unsigned long)OwKPageSanCheckPte(0x12345000ull | 0x600ull | OW_PAGE_PRESENT,
+                                             OW_PAGESAN_LEVEL_PT), (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a 4K entry with the PS bit set is refused",
+           (unsigned long)OwKPageSanCheckPte(0x12345000ull | OW_PAGE_HUGE | OW_PAGE_PRESENT,
+                                             OW_PAGESAN_LEVEL_PT), (unsigned long)OW_ERR_CORRUPT);
+  check_eq("an aligned 2MiB huge entry passes",
+           (unsigned long)OwKPageSanCheckPte(0x20000000ull | OW_PAGE_HUGE | OW_PAGE_PRESENT,
+                                             OW_PAGESAN_LEVEL_PD), (unsigned long)OW_SUCCESS);
+  check_eq("a misaligned 2MiB huge entry is refused",
+           (unsigned long)OwKPageSanCheckPte(0x20100000ull | OW_PAGE_HUGE | OW_PAGE_PRESENT,
+                                             OW_PAGESAN_LEVEL_PD), (unsigned long)OW_ERR_CORRUPT);
+  check_eq("an aligned 1GiB huge entry passes",
+           (unsigned long)OwKPageSanCheckPte(0x0000000040000000ull | OW_PAGE_HUGE | OW_PAGE_PRESENT,
+                                             OW_PAGESAN_LEVEL_PDPTE), (unsigned long)OW_SUCCESS);
+  check_eq("a misaligned 1GiB huge entry is refused",
+           (unsigned long)OwKPageSanCheckPte(0x0000000040100000ull | OW_PAGE_HUGE | OW_PAGE_PRESENT,
+                                             OW_PAGESAN_LEVEL_PDPTE), (unsigned long)OW_ERR_CORRUPT);
+}
+
+static void test_owkbounds(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+  size_t buf[4];
+  size_t i;
+
+  printf("\n=== OWKSan Suite (OWKBoundsSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKBOUNDSAN, &mod);
+  check_eq("OWKBoundsSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKBoundsSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  check_eq("an in-bounds index validates", (unsigned long)OwKBoundsSanCheckIndex("idx", 3u, 4u), (unsigned long)OW_SUCCESS);
+  check_eq("an out-of-bounds index is refused", (unsigned long)OwKBoundsSanCheckIndex("idx", 4u, 4u), (unsigned long)OW_ERR_INVALID_PARAM);
+
+  for (i = 0; i < 4; ++i) {
+    buf[i] = (size_t)(i + 1u);
+  }
+  check_eq("an access inside the region validates",
+           (unsigned long)OwKBoundsSanCheckRegion("reg", buf, sizeof buf, buf, sizeof buf),
+           (unsigned long)OW_SUCCESS);
+  check_eq("a span running past the region is refused",
+           (unsigned long)OwKBoundsSanCheckRegion("reg", buf, sizeof buf, &buf[3], 2u * sizeof(size_t)),
+           (unsigned long)OW_ERR_INVALID_PARAM);
+  check_eq("an access before the base is refused",
+           (unsigned long)OwKBoundsSanCheckRegion("reg", &buf[1], 2u * sizeof(size_t), buf, sizeof(size_t)),
+           (unsigned long)OW_ERR_INVALID_PARAM);
+  check_eq("a wrapping region is refused",
+           (unsigned long)OwKBoundsSanCheckRegion("reg", buf, (size_t)-1, buf, 1u),
+           (unsigned long)OW_ERR_INVALID_PARAM);
+  check_eq("an access into a NULL-sized region validates vacuously",
+           (unsigned long)OwKBoundsSanCheckRegion("reg", (const void*)0, 0u, (const void*)0, 0u),
+           (unsigned long)OW_SUCCESS);
+
+  {
+    char dst[8];
+    const char src[8] = "abc";
+
+    for (i = 0; i < sizeof dst; ++i) {
+      dst[i] = 'x';
+    }
+    check_eq("a capacity-fitting copy succeeds",
+             (unsigned long)OwKBoundsSanCopy(dst, sizeof dst, src, 4u),
+             (unsigned long)OW_SUCCESS);
+    check_window("the copy wrote the expected bytes", dst[0] == 'a' && dst[1] == 'b' && dst[2] == 'c', true);
+    check_eq("an oversized copy is refused",
+             (unsigned long)OwKBoundsSanCopy(dst, 2u, src, 4u),
+             (unsigned long)OW_ERR_INVALID_PARAM);
+    check_window("a refused copy leaves the destination untouched", dst[0] == 'a' && dst[1] == 'b', true);
+    check_eq("a NULL destination copy is refused",
+             (unsigned long)OwKBoundsSanCopy((void*)0, 4u, src, 1u),
+             (unsigned long)OW_ERR_INVALID_PARAM);
+  }
 }
 
 static void test_kdb_extensions(void) {
@@ -6274,6 +6443,10 @@ int main(int argc, char **argv) {
   /* Phase 4f: OWKSan Suite framework core                               */
   /* ------------------------------------------------------------------ */
 
+  (void)OwKHeapSanRegister();
+  (void)OwKPageSanRegister();
+  (void)OwKBoundsSanRegister();
+
   st = OwKSanInitialize();
 
   if (!ow_status_success(st)) {
@@ -6851,6 +7024,14 @@ int main(int argc, char **argv) {
   /* ------------------------------------------------------------------ */
 
   test_owksan_core();
+
+  /* ------------------------------------------------------------------ */
+  /* OWKSan Suite (Phase 2 memory diagnostics)                          */
+  /* ------------------------------------------------------------------ */
+
+  test_owkheapsan();
+  test_owkpagesan();
+  test_owkbounds();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */

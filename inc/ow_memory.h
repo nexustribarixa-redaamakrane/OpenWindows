@@ -81,6 +81,10 @@ OW_VAD_NODE* OwMemFindVad(OW_VAD_NODE* Root, uint64_t Address);
 void         OwMemWalkPml4(uint64_t VirtualAddress);
 uint32_t     OwMemPagesUsed(void);
 uint32_t     OwMemPagesTotal(void);
+/* Read-only frame-arena audit exports (OWKPageSan Phase 2). */
+uintptr_t    OwMemArenaBase(void);
+uint32_t     OwMemNonRamWindowCount(void);
+OW_STATUS    OwMemNonRamWindow(uint32_t Index, uint64_t* Lo, uint64_t* Hi);
 
 /* ---- Firmware physical RAM (multiboot) ----------------------------------
  *

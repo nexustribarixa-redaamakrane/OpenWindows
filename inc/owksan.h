@@ -92,6 +92,7 @@ OW_STATUS OwKSanDisableModule(const char* Name);
 OW_STATUS OwKSanConfigureModule(const char* Name, bool Enabled);
 void OwKSanSetMasterEnabled(bool On);
 bool OwKSanMasterEnabled(void);
+bool OwKSanIsEnabled(const char* Name);
 OW_STATUS OwKSanInitializeEnabledModules(void);
 
 /* ---- Diagnostic reporting ---------------------------------------------------- */

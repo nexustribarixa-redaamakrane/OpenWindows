@@ -1,15 +1,13 @@
 /* kalloc.c - Fixed-Pool Kernel Allocator (Bump Allocator) */
+#include "kalloc.h"
 #include "../inc/ow_mem.h"
+#include "../inc/owkheapsan.h"
 #include <stddef.h>
 #include <stdint.h>
 
 #define KALLOC_HEAP_SIZE (8U * 1024U * 1024U)
-#define KALLOC_ALIGN 8U
-/* Every block carries its requested size immediately in front of the payload.
- * The bump arena never reuses memory, but krealloc still has to know how many
- * bytes it may copy out of the old block without reading past the caller's
- * allocation. */
-#define KALLOC_HEADER_SIZE KALLOC_ALIGN
+/* The per-block layout (KALLOC_ALIGN / KALLOC_HEADER_SIZE) is in kalloc.h so
+ * the heap auditor can share it. */
 
 static uint8_t g_heap[KALLOC_HEAP_SIZE] __attribute__((aligned(KALLOC_ALIGN)));
 static size_t g_used = 0;
@@ -44,6 +42,7 @@ static void *kalloc_raw(size_t size) {
   block = &g_heap[g_used];
   *(size_t *)block = size;
   g_used += total;
+  OwKHeapSanNoteAlloc(block + KALLOC_HEADER_SIZE, size);
   return block + KALLOC_HEADER_SIZE;
 }
 
@@ -101,5 +100,48 @@ void *krealloc(void *ptr, size_t size) {
   return new_ptr;
 }
 
-void kfree(void *ptr) { (void)ptr; }
+void kfree(void *ptr) { OwKHeapSanNoteFree(ptr); }
 size_t kalloc_used(void) { return g_used; }
+
+/* Read-only consistency walk over the committed bump arena.  The callback sees
+ * each intact block (base, requested size, payload); the walk stops early if
+ * the callback asks it to.  Every byte boundary checked here is one the
+ * allocator itself maintains, so a caller that compares the accumulated byte
+ * sum against kalloc_used() is verifying the chain is packed exactly and that
+ * no header points at a block past the end of the committed arena. */
+uint32_t OwKAllocWalk(int (*Callback)(const void* Block, size_t Size,
+                                      const void* Payload, void* Ctx),
+                      void* Ctx) {
+  size_t offset = 0;
+  uint32_t blocks = 0;
+
+  if (!Callback)
+    return 0;
+  while (offset + KALLOC_HEADER_SIZE <= g_used) {
+    size_t size = *(const size_t *)(&g_heap[offset]);
+    size_t aligned;
+    const void *block = &g_heap[offset];
+
+    if (size == 0u)
+      break;
+    aligned = (size + (KALLOC_ALIGN - 1u)) & ~(size_t)(KALLOC_ALIGN - 1u);
+    if (aligned > g_used - offset - KALLOC_HEADER_SIZE)
+      break;
+    if (!Callback(block, size, (const uint8_t *)block + KALLOC_HEADER_SIZE,
+                  Ctx))
+      break;
+    offset += KALLOC_HEADER_SIZE + aligned;
+    blocks++;
+  }
+  return blocks;
+}
+
+/* True when Ptr lies inside the committed part of the arena. */
+bool OwKAllocContains(const void *Ptr) {
+  uintptr_t base = (uintptr_t)g_heap;
+  uintptr_t address = (uintptr_t)Ptr;
+
+  if (address < base)
+    return false;
+  return (size_t)(address - base) < g_used;
+}

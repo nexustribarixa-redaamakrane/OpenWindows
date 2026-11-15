@@ -891,3 +891,20 @@ uint32_t OwMemPagesUsed(void) {
 }
 
 uint32_t OwMemPagesTotal(void) { return (uint32_t)OW_TOTAL_PAGES; }
+
+/* ---- OWKSan Phase 2: read-only frame-arena audit exports -----------------
+ * These exist so the OWKPageSan module can check the frame arena from outside
+ * without guessing at its layout.  They expose nothing that is writable and
+ * reveal nothing the kernel does not already trust. */
+uintptr_t OwMemArenaBase(void) { return (uintptr_t)g_PhysicalRam; }
+
+uint32_t OwMemNonRamWindowCount(void) { return OW_NONRAM_COUNT; }
+
+OW_STATUS OwMemNonRamWindow(uint32_t Index, uint64_t* Lo, uint64_t* Hi) {
+  if (Index >= OW_NONRAM_COUNT || Lo == (uint64_t*)0 || Hi == (uint64_t*)0) {
+    return OW_ERR_INVALID_PARAM;
+  }
+  *Lo = (uint64_t)s_NonRam[Index].Lo;
+  *Hi = (uint64_t)s_NonRam[Index].Hi;
+  return OW_SUCCESS;
+}
