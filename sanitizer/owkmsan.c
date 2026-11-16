@@ -1,16 +1,21 @@
-/* owkmsan.c - OWKMSan: memory-initialization tracking (Phase 3) */
+/* owkmsan.c - OWKMSan: memory-initialization tracking (Phase 3+) */
 #include "../inc/owkmsan.h"
 #include "../inc/ow_mem.h"
+#include "../inc/ow_memory.h"
 #include "../lib/kalloc.h"
 
-/* 1 shadow byte per 8 arena bytes; bit i of a shadow byte marks payload byte
- * (8*shadow_index + i) as uninitialized.  The shadow covers the kalloc arena
- * only, so non-heap memory is outside this module's tracking domain. */
-#define KMSAN_SHADOW_SIZE (KALLOC_HEAP_SIZE / 8u)
+/* 1 shadow byte per 8 tracked bytes; bit i of a shadow byte marks tracked byte
+ * (8*shadow_index + i) as uninitialized.  Two regions are tracked: the 8 MiB
+ * kalloc arena and the 16 MiB physical frame arena.  Non-heap memory (stack,
+ * statics, MMIO) is outside the tracking domain. */
+#define KMSAN_HEAP_SHADOW_SIZE  (KALLOC_HEAP_SIZE / 8u)   /* 1 MiB */
+#define KMSAN_FRAME_SHADOW_SIZE (16u * 1024u * 1024u / 8u) /* 2 MiB */
 
-static uint8_t g_Shadow[KMSAN_SHADOW_SIZE];
-
-static uintptr_t s_Base;
+static uint8_t g_HeapShadow[KMSAN_HEAP_SHADOW_SIZE];
+static uint8_t g_FrameShadow[KMSAN_FRAME_SHADOW_SIZE];
+static uintptr_t s_HeapBase;
+static uintptr_t s_FrameBase;
+static uint64_t s_FrameSize;
 
 static int owkmsan_init(void) {
     OwKMSanReset();
@@ -36,83 +41,94 @@ OW_STATUS OwKMSanRegister(void) {
     return OwKSanRegisterModule(&g_MSModule);
 }
 
-static void shadow_set_range(size_t Off, size_t Size, bool Uninit) {
+static uint8_t* region_shadow(const void* Ptr, size_t Size, size_t* OutOff) {
+    uintptr_t a = (uintptr_t)Ptr;
+
+    if (a >= s_HeapBase && (size_t)(a - s_HeapBase) < KALLOC_HEAP_SIZE &&
+        Size <= KALLOC_HEAP_SIZE - (size_t)(a - s_HeapBase)) {
+        *OutOff = (size_t)(a - s_HeapBase);
+        return g_HeapShadow;
+    }
+    if (a >= s_FrameBase && (uint64_t)(a - s_FrameBase) < s_FrameSize &&
+        (uint64_t)Size <= s_FrameSize - (uint64_t)(a - s_FrameBase)) {
+        *OutOff = (size_t)(a - s_FrameBase);
+        return g_FrameShadow;
+    }
+    return (uint8_t*)0;
+}
+
+static void shadow_set_range(uint8_t* shadow, size_t Off, size_t Size, bool Uninit) {
     size_t i;
 
     for (i = 0u; i < Size; ++i) {
         size_t bit = Off + i;
-        size_t shadow = bit >> 3;
+        size_t shadow_i = bit >> 3;
         uint8_t mask = (uint8_t)(1u << (bit & 7u));
 
         if (Uninit) {
-            g_Shadow[shadow] |= mask;
+            shadow[shadow_i] |= mask;
         } else {
-            g_Shadow[shadow] &= ~mask;
+            shadow[shadow_i] &= (uint8_t)~mask;
         }
     }
 }
 
-static int shadow_find_uninit(size_t Off, size_t Size) {
+static int shadow_find_uninit(const uint8_t* shadow, size_t Off, size_t Size) {
     size_t i;
 
     for (i = 0u; i < Size; ++i) {
         size_t bit = Off + i;
-        size_t shadow = bit >> 3;
+        size_t shadow_i = bit >> 3;
         uint8_t mask = (uint8_t)(1u << (bit & 7u));
 
-        if ((g_Shadow[shadow] & mask) != 0u) {
+        if ((shadow[shadow_i] & mask) != 0u) {
             return (int)i;
         }
     }
     return -1;
 }
 
-static bool shadow_span(const void* Ptr, size_t Size, size_t* OutOff) {
-    uintptr_t base = s_Base;
-    uintptr_t a = (uintptr_t)Ptr;
-
-    if (a < base || Size > KALLOC_HEAP_SIZE) {
-        return false;
-    }
-    if ((size_t)(a - base) > KALLOC_HEAP_SIZE - Size) {
-        return false;
-    }
-    *OutOff = (size_t)(a - base);
-    return true;
-}
-
 void OwKMSanReset(void) {
-    s_Base = OwKAllocArenaBase();
+    s_HeapBase = OwKAllocArenaBase();
+    s_FrameBase = OwMemArenaBase();
+    s_FrameSize = OwMemArenaSize();
     /* Everything looks initialized at reset: tracking applies from here on,
-     * and older blocks are not provably uninitialized. */
-    ow_memset(g_Shadow, 0x00, sizeof(g_Shadow));
+     * and older untracked regions are not provably uninitialized. */
+    ow_memset(g_HeapShadow, 0x00, sizeof(g_HeapShadow));
+    ow_memset(g_FrameShadow, 0x00, sizeof(g_FrameShadow));
 }
 
 void OwKMSanNoteAlloc(const void* Ptr, size_t Size) {
+    uint8_t* shadow;
     size_t off;
 
     if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKMSAN)) {
         return;
     }
-    if (!shadow_span(Ptr, Size, &off)) {
+    shadow = region_shadow(Ptr, Size, &off);
+    if (!shadow) {
         return;
     }
-    shadow_set_range(off, Size, true);
+    shadow_set_range(shadow, off, Size, true);
 }
 
 void OwKMSanNoteInit(const void* Ptr, size_t Size) {
+    uint8_t* shadow;
     size_t off;
 
     if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKMSAN)) {
         return;
     }
-    if (!shadow_span(Ptr, Size, &off)) {
+    shadow = region_shadow(Ptr, Size, &off);
+    if (!shadow) {
         return;
     }
-    shadow_set_range(off, Size, false);
+    shadow_set_range(shadow, off, Size, false);
 }
 
 void OwKMSanNoteCopy(void* Dst, const void* Src, size_t CopyBytes, size_t NewBytes) {
+    uint8_t* dshadow;
+    uint8_t* sshadow;
     size_t dst_off;
     size_t src_off;
     size_t i;
@@ -120,57 +136,70 @@ void OwKMSanNoteCopy(void* Dst, const void* Src, size_t CopyBytes, size_t NewByt
     if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKMSAN)) {
         return;
     }
-    if (!shadow_span(Dst, NewBytes, &dst_off)) {
+    dshadow = region_shadow(Dst, NewBytes, &dst_off);
+    if (!dshadow) {
         return;
     }
-    if (!shadow_span(Src, CopyBytes, &src_off)) {
-        /* Copying from non-tracked memory: mark the copied prefix
-         * initialized, as there is no shadow to propagate. */
-        shadow_set_range(dst_off, CopyBytes, false);
-        shadow_set_range(dst_off + CopyBytes, NewBytes - CopyBytes, true);
-        return;
-    }
+    sshadow = region_shadow(Src, CopyBytes, &src_off);
     for (i = 0u; i < CopyBytes; ++i) {
         size_t dbit = dst_off + i;
-        size_t sbit = src_off + i;
+        size_t sbit = i + src_off;
         uint8_t bit = (uint8_t)(1u << (sbit & 7u));
-        size_t dshadow = dbit >> 3;
-        bool uninit = (g_Shadow[sbit >> 3] & bit) != 0u;
+        size_t dshadow_i = dbit >> 3;
+        bool uninit = sshadow && ((sshadow[sbit >> 3] & bit) != 0u);
 
         if (uninit) {
-            g_Shadow[dshadow] |= (uint8_t)(1u << (dbit & 7u));
+            dshadow[dshadow_i] |= (uint8_t)(1u << (dbit & 7u));
         } else {
-            g_Shadow[dshadow] &= (uint8_t)~(1u << (dbit & 7u));
+            dshadow[dshadow_i] &= (uint8_t)~(1u << (dbit & 7u));
         }
     }
     if (NewBytes > CopyBytes) {
-        shadow_set_range(dst_off + CopyBytes, NewBytes - CopyBytes, true);
+        shadow_set_range(dshadow, dst_off + CopyBytes, NewBytes - CopyBytes, true);
     }
 }
 
 void OwKMSanNoteFree(const void* Ptr, size_t Size) {
+    uint8_t* shadow;
     size_t off;
 
     if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKMSAN)) {
         return;
     }
-    if (!shadow_span(Ptr, Size, &off)) {
+    shadow = region_shadow(Ptr, Size, &off);
+    if (!shadow) {
         return;
     }
-    shadow_set_range(off, Size, true); /* freed == uninitialized again */
+    shadow_set_range(shadow, off, Size, true); /* freed == uninitialized again */
+}
+
+void OwKMSanNoteUninit(const void* Ptr, size_t Size) {
+    uint8_t* shadow;
+    size_t off;
+
+    if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKMSAN)) {
+        return;
+    }
+    shadow = region_shadow(Ptr, Size, &off);
+    if (!shadow) {
+        return;
+    }
+    shadow_set_range(shadow, off, Size, true);
 }
 
 OW_STATUS OwKMSanCheckRead(const void* Ptr, size_t Size, const char* Label) {
+    uint8_t* shadow;
     size_t off;
     int at;
 
     if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKMSAN)) {
         return OW_SUCCESS; /* module disabled: not tracked, not checked */
     }
-    if (!shadow_span(Ptr, Size, &off)) {
-        return OW_SUCCESS; /* outside the tracked arena */
+    shadow = region_shadow(Ptr, Size, &off);
+    if (!shadow) {
+        return OW_SUCCESS; /* outside the tracked regions */
     }
-    at = shadow_find_uninit(off, Size);
+    at = shadow_find_uninit(shadow, off, Size);
     if (at < 0) {
         return OW_SUCCESS;
     }
@@ -181,19 +210,23 @@ OW_STATUS OwKMSanCheckRead(const void* Ptr, size_t Size, const char* Label) {
 }
 
 void OwKMSanMarkInit(const void* Ptr, size_t Size) {
+    uint8_t* shadow;
     size_t off;
 
-    if (!shadow_span(Ptr, Size, &off)) {
+    shadow = region_shadow(Ptr, Size, &off);
+    if (!shadow) {
         return;
     }
-    shadow_set_range(off, Size, false);
+    shadow_set_range(shadow, off, Size, false);
 }
 
 void OwKMSanMarkUninit(const void* Ptr, size_t Size) {
+    uint8_t* shadow;
     size_t off;
 
-    if (!shadow_span(Ptr, Size, &off)) {
+    shadow = region_shadow(Ptr, Size, &off);
+    if (!shadow) {
         return;
     }
-    shadow_set_range(off, Size, true);
+    shadow_set_range(shadow, off, Size, true);
 }

@@ -271,6 +271,10 @@ set(KERNEL_COMMON_SOURCES
     sanitizer/owkbounds.c
     sanitizer/owkmsan.c
     sanitizer/owkasan.c
+    sanitizer/owkubsan.c
+    sanitizer/owkintsan.c
+    sanitizer/owkinitsan.c
+    sanitizer/owkstacksan.c
     usermode/usermode.c
     lib/ow_htl.c
     lib/kmem.c
@@ -465,7 +469,7 @@ set_target_properties(openwinkrnl_pe PROPERTIES
 target_include_directories(openwinkrnl_pe PRIVATE ${OW_INCLUDE_DIRS})
 target_compile_definitions(openwinkrnl_pe PRIVATE ${CIS_DEV_TRUST_DEFS})
 target_compile_options(openwinkrnl_pe PRIVATE
-    -std=c99 -ffreestanding -nostdlib -fno-stack-protector -fno-pie
+    -std=c99 -ffreestanding -nostdlib -fstack-protector-strong -fno-pie
     -Wall -Wextra -Werror -g
 )
 target_link_options(openwinkrnl_pe PRIVATE

@@ -16,16 +16,16 @@ in-kernel framework the production kernel would consult.
 | Component | Responsibility | Phase |
 |---|---|---|
 | OWKAsan | Address-access validation - implemented (Phase 3) | 3 (done) |
-| OWKUbSan | Undefined-behavior detection (shifts, overflow, alignment, enum, division) | 4+ |
+| OWKUbSan | Undefined-behavior detection - implemented (Phase 4) | 4 (done) |
 | OWKMSan | Memory initialization tracking - implemented (Phase 3) | 3 (done) |
 | OWKTSan | Data-race detection | 5+ |
 | OWKLSan | Lock-state and synchronization diagnostics | 5+ |
-| OWStackSan | Stack integrity and stack-boundary validation | 4+ |
+| OWStackSan | Stack integrity (compiler canary + validation) - implemented (Phase 4) | 4 (done) |
 | OWKHeapSan | Kernel heap integrity and allocation validation | 2 (done) |
 | OWKPageSan | Physical/virtual page-management validation | 2 (done) |
 | OWKBoundsSan | Buffer, array and memory-region bounds validation | 2 (done) |
-| OWKIntSan | Integer overflow and invalid arithmetic detection | 4+ |
-| OWKInitSan | Initialization-order and initialization-state validation | 4+ |
+| OWKIntSan | Integer overflow and invalid arithmetic detection - implemented (Phase 4) | 4 (done) |
+| OWKInitSan | Initialization-order and initialization-state validation - implemented (Phase 4) | 4 (done) |
 | OWKLockSan | Kernel lock correctness and misuse detection | 5+ |
 
 ## Phase 1 - Foundation: implemented
@@ -159,9 +159,11 @@ makes them meaningful.  Files changed:
 
 ### OWKMSan - what it detects and what it does not
 
-One shadow byte per 8 arena bytes; bit i marks payload byte (8g+i) as
-uninitialized.  The shadow covers the kalloc arena only; non-heap memory is
-outside the tracking domain.
+One shadow byte per 8 tracked bytes; bit i marks tracked byte (8g+i) as
+uninitialized.  Two regions are tracked: the 8 MiB kalloc arena and the 16 MiB
+physical frame arena (fresh frames are marked uninitialized at handout and
+cleared at the zeroing sites in `core/memory.c`).  Non-arena memory is outside
+the tracking domain.
 
 Detects (validated with host-side negative tests):
 - reads of uninitialized bytes of a kalloc'd block (at the time the check is
@@ -169,12 +171,13 @@ Detects (validated with host-side negative tests):
 - reads of a freed block (freed memory is marked uninitialized again),
 - krealloc copies propagate initialization exactly (the growth half of a
   re-allocated block reads uninitialized until it is explicitly marked),
-- zero-initialized allocations (kcalloc) read clean.
+- zero-initialized allocations (kcalloc) read clean,
+- reads of frame memory that was never written after allocation.
 
 Does NOT detect, and deliberately does not claim:
-- reads of uninitialized stack, statics, MMIO or non-heap globals,
-- out-of-bounds reads at arbitrary call sites (no compiler instrumentation
-  exists in this kernel; tracking is allocation- and check-driven only),
+- reads of uninitialized stack, statics, MMIO or non-arena memory,
+- out-of-bounds reads at arbitrary call sites (API-driven; see the note on
+  compiler instrumentation below),
 - correctness of writes that "initialize" memory, or the moment of the write
   (write tracking is intentionally not a finding class; the API contract is
   that callers mark initialization with `OwKMSanMarkInit`/`kcalloc`),
@@ -206,12 +209,114 @@ Does NOT detect, and deliberately does not claim:
 - it is NOT ASan-compatible: no shadow, no global instrumentation, no
   interposition of loads/stores; allocation-time bookkeeping plus API-boundary
   validation only,
-- quarantine is bounded (32 blocks, FIFO); once full, the oldest freed block
-  becomes reusable and stale-pointer writes to it are no longer observable.
+- quarantine depth is runtime-tunable (`OwKAsanSetQuarantineLimit`/`OwKAsanQuarantineLimit`):
+  0 disables it (freed blocks reuse immediately), default 32 blocks, hard
+  bound 64 in the static table; once full, the oldest freed block becomes
+  reusable and stale-pointer writes to it are no longer observable.
 
-## Phase 4 onwards - planned
+## Phase 4 - Runtime validation: implemented
 
-- Phase 4: `OWKUbSan`, `OWKIntSan`, `OWKInitSan`, `OWStackSan`.
+Phase 4 delivers the four runtime-validation modules.  Files changed:
+
+- `inc/owkubsan.h`, `sanitizer/owkubsan.c` - OWKUbSan
+- `inc/owkintsan.h`, `sanitizer/owkintsan.c` - OWKIntSan
+- `inc/owkinitsan.h`, `sanitizer/owkinitsan.c` - OWKInitSan
+- `inc/owkstacksan.h`, `sanitizer/owkstacksan.c` - OWStackSan (compiler canary
+  + explicit checks)
+- `core/main.c` - every boot phase in `boot_begin` / `boot_diag_done` /
+  `boot_diag_failed` / `boot_skip_phase` is tracked by OWKInitSan (begin order
+  auto-increments); the four modules are registered before the suite
+  initialises in phase 4f (a failed registration is a warning, not a halt)
+- `tools/hosttest/host_boot.c` - new `test_owkubsan`, `test_owkintsan`,
+  `test_owkinitsan`, `test_owkstacksan` suites
+- `Makefile`, `CMakeLists.txt` - `-fstack-protector-strong` for the kernel and
+  the host harness (was `-fno-stack-protector`); the host-side ASan build keeps
+  its own stack instrumentation
+- `lib/kalloc.h`, `lib/kalloc.c` - quarantine depth is runtime-tunable
+  (`OwKAllocQuarantineLimit`/`SetLimit`), `OwKAllocArenaBase`/`OwMemArenaBase`
+  exports for OWKMSan's second shadow region
+
+### OWKUbSan - what it detects and what it does not
+
+Detects (validated with host-side negative tests):
+- invalid shifts: shift count >= bit width, or a zero/over-64 width,
+- signed add/subtract/multiply overflow (via compiler intrinsics, no library
+  calls),
+- division by zero and `INT64_MIN / -1` wraparound (both `/` and `%`),
+- misaligned pointer access (address not a multiple of a power-of-two
+  alignment; non-power-of-two alignment is refused outright),
+- enum value outside its declared range,
+- null pointer where a non-null pointer is required.
+
+Does NOT detect, and deliberately does not claim:
+- invalid enum casts across types, strict aliasing, unsequenced side effects,
+  lifetime violations, signed/unsigned comparison UB,
+- anything in code the suite has not been asked to check; these are checked
+  call sites only, and this is NOT UBSan-compatible,
+- the moment a compiler-introduced misalignment occurs in a caller that never
+  asked.
+
+### OWKIntSan - what it detects and what it does not
+
+Detects (validated with host-side negative tests):
+- unsigned add/subtract/multiply overflow,
+- allocation-size calculation overflow (`Count * Size`),
+- pointer offset overflow (`Base + Offset`),
+- scaled index overflow (`Base + Index * Scale`, both steps),
+- region span wraparound (`Base + Size`).
+
+Does NOT detect: signed arithmetic (use OWKUbSan), floating-point arithmetic,
+compiler-inserted arithmetic checks, or overflows in code the suite was not
+asked to check.
+
+### OWKInitSan - what it detects and what it does not
+
+Detects (validated with host-side negative tests):
+- duplicate initialization (begin of an already-tracked phase),
+- re-entrant initialization (phase begun while RUNNING),
+- initialization-order violations (a phase begun with an Order lower than the
+  highest Order seen so far),
+- end of a phase that was never begun, end of a phase that was not running,
+  end of an already-DONE phase,
+- skipped phases (recorded as SKIPPED, terminal, and accepted as-is),
+- boot-phase tracking: every `boot_begin`/`boot_diag_done`/
+  `boot_diag_failed`/`boot_skip_phase` call in `core/main.c::_start` is
+  tracked, so the whole boot sequence appears in the tracker.
+
+Does NOT detect, and deliberately does not claim:
+- access-to-uninitialized-subsystem enforcement inside subsystem code: no
+  in-tree caller consumes the query API yet (`OwKInitSanIsInitialized`,
+  `OwKInitSanRequireInitialized`, `OwKInitSanPhaseFailed`); the API and its
+  tests exist, wiring call sites is a separate change,
+- data-level initialization tracking (this tracks subsystem state, not whether
+  a particular variable was written),
+- dependency graphs beyond the ordering rule above.
+
+### OWStackSan - what it detects and what it does not
+
+Detects (validated with host-side negative tests):
+- stack corruption caught by the compiler's own stack canary: the kernel and
+  the host harness are built with `-fstack-protector-strong`, so functions
+  whose frames carry arrays are instrumented by GCC itself; a mismatch calls
+  `__stack_chk_fail()`, which reports FATAL and halts through the BANhammer
+  crash path.  This is genuine compiler instrumentation, not a checked call
+  site.
+- corruption of the guard symbol in memory (the OWStackSan audit compares the
+  guard against the value this module wrote),
+- declared stack regions that overlap the kernel heap arena, misaligned
+  stack bases, zero-sized or wrapping stack spans.
+
+Does NOT detect, and deliberately does not claim:
+- stack-buffer overflows in functions the compiler did not protect (leaf
+  functions without arrays/local addresses),
+- return-address overwrites that bypass the epilogue canary check,
+- stack leaks of uninitialized locals,
+- stack-smashing in the assembly paths (ISR stubs are not themselves
+  instrumented),
+- anything about the validity of a stack region the caller never declares.
+
+## Phase 5 onwards - planned
+
 - Phase 5: `OWKTSan`, `OWKLSan`, `OWKLockSan`.
 - Phase 6: integration of all modules, regression tests, enabled/disabled
   configurations, documentation updates.
@@ -232,26 +337,44 @@ Does NOT detect, and deliberately does not claim:
   what a registered module asks it to report, and boot-phase registration is
   followed by the inert default (master off), so the kernel pays no diagnostic
   cost unless explicitly armed.
+- Compiler instrumentation exists for stacks only: `-fstack-protector-strong`
+  with a kernel-provided `__stack_chk_guard`/`__stack_chk_fail` (the OWStackSan
+  layer of protection).  Loads/stores are not intercepted; OWKAsan/OWKMSan
+  remain API-driven.
 
 ## Integration status
 
 - Build wiring: `Makefile` (`SANITIZER_OBJS`, `ALL_OBJS`, pattern rule,
-  `HOSTTEST_SRC`) and `CMakeLists.txt` (`KERNEL_COMMON_SOURCES`).
-- Boot wiring: `core/main.c` runs the suite core during boot phase 4f and records
-  diagnostic milestone `OW_C_OWKSAN_READY` (`0x0011AC15`); the Phase-2 and
-  Phase-3 modules are registered before the suite initialises (a failed
-  registration is advisory and does not halt the machine).  The host boot
-  harness (`tools/hosttest/host_boot.c`) mirrors all calls directly (the
-  harness does not execute `_start`, so it replicates the boot sequence).
+  `HOSTTEST_SRC`) and `CMakeLists.txt` (`KERNEL_COMMON_SOURCES`).  Both build
+  systems were built and run with this tree: `make`, `make hosttest`,
+  `make hosttest-asan`, `make qemu` (the QEMU dev-boot targets now self-build
+  with `CIS_DEV_TRUST=1`), and `cmake --build build-cmake4` with
+  `build-cmake4/hosttest.exe` run against the full suite.
+- Compiler instrumentation: `-fstack-protector-strong` in the freestanding
+  kernel (`Makefile` `CFLAGS`, `CMakeLists.txt` `openwinkrnl_pe`) and the host
+  harness (`HOSTTEST_FLAGS`).  The host-side ASan build keeps only ASan/UBSan.
+  Every C object in the image references `__stack_chk_guard`/`__stack_chk_fail`
+  (verified with `objdump -r`).
+- Boot wiring: `core/main.c` runs the suite core during boot phase 4f and
+  records diagnostic milestone `OW_C_OWKSAN_READY` (`0x0011AC15`); all
+  Phase-2/3/4 modules (heap, page, bounds, MSan, ASan, UbSan, IntSan, InitSan,
+  StackSan) are registered before the suite initialises; a failed registration
+  is advisory and does not halt the machine.  The host boot harness mirrors
+  all registration calls directly (the harness does not execute `_start`, so
+  it replicates the boot sequence).  `boot_begin`/`boot_diag_done`/
+  `boot_diag_failed`/`boot_skip_phase` are all tracked by OWKInitSan.
 - Host tests: `test_owksan_core()`, `test_owkheapsan()`, `test_owkpagesan()`,
-  `test_owkbounds()`, `test_owkmsan()` and `test_owkasan()` in
+  `test_owkbounds()`, `test_owkmsan()`, `test_owkasan()`, `test_owkubsan()`,
+  `test_owkintsan()`, `test_owkinitsan()` and `test_owkstacksan()` in
   `tools/hosttest/host_boot.c` exercise the framework and all registered
   modules end to end: boot-ready state, inert default, module
   registration/init, report/counter accounting, waived reports, the FATAL panic
   path, frame-arena registration and invariant audit, a deliberate
   arena-header and redzone-canary corruption that the audit catches, PTE
   LA48 structural violations, frame-range refusal cases, bounds/copy negative
-  paths, shadow-tracked initialization checks, use-after-free access checks,
-  and quarantine poison verification.  The full suite now reports
-  1728 passed, 0 failed, and the sanitized build (clang + ASan/UBSan) reports
-  the same.
+  paths, shadow-tracked initialization checks (heap and frame arena),
+  use-after-free access checks, quarantine poison verification, UbSan/IntSan
+  arithmetic and range checks, InitSan duplicate/order/re-entrant detection,
+  and the stack-guard audit and region checks.  The full suite reports 1797
+  passed, 0 failed; the sanitized build (clang + ASan/UBSan) reports the same;
+  the CMake build of the same harness passes with 1798, 0 failed.

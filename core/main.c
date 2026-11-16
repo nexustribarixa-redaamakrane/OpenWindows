@@ -29,6 +29,10 @@
 #include "../inc/owkbounds.h"
 #include "../inc/owkmsan.h"
 #include "../inc/owkasan.h"
+#include "../inc/owkubsan.h"
+#include "../inc/owkintsan.h"
+#include "../inc/owkinitsan.h"
+#include "../inc/owkstacksan.h"
 #include "../storage/owdisk.h"
 #include "../inc/ow_usermode.h"
 #include <stdarg.h>
@@ -148,6 +152,10 @@ static void km_line(uint8_t TagColor, const char* Tag, const char* fmt, ...) {
     boot_pace(BOOT_LINE_MS);
 }
 
+/* Boot phase sequence for OWKInitSan tracking; monotonically increasing,
+ * passed as the Order argument to OwKInitSanPhaseBegin. */
+static uint32_t g_BootPhaseSeq;
+
 /* Busy wait: sleep through `ms` so the boot visibly works between lines and
  * the staged log stays readable instead of appearing all at once. */
 static void boot_pace(uint32_t ms) {
@@ -160,6 +168,7 @@ static void boot_pace(uint32_t ms) {
 /* Serial-only boot log spine (VGA muted): the tests read the serial log. */
 static void boot_begin(const char* Name) {
     OwHalVgaSetEnabled(false);
+    OwKInitSanPhaseBegin(Name, g_BootPhaseSeq++);
     OwDiagLogStarted(Name);
     OwHalVgaSetEnabled(true);
 }
@@ -169,6 +178,7 @@ static void boot_begin(const char* Name) {
 static void boot_diag_done(uint32_t Phase, OW_STATUS Result,
                            const char* Name, int Ok) {
     g_System.BootPhase = Phase;
+    OwKInitSanPhaseEnd(Name, Ok ? OW_SUCCESS : Result);
     OwHalVgaSetEnabled(false);
     if (Ok) {
         OwDiagLogFinished(Name, Result);
@@ -193,6 +203,7 @@ static void boot_diag_done(uint32_t Phase, OW_STATUS Result,
 static void boot_diag_failed(uint32_t Phase, OW_STATUS Result,
                              const char* Name) {
     g_System.BootPhase = Phase;
+    OwKInitSanPhaseEnd(Name, Result);
     OwHalVgaSetEnabled(false);
     OwDiagLogFailed(Name, Result);
     OwHalVgaSetEnabled(true);
@@ -211,6 +222,9 @@ static void boot_skip_line(const char* Name) {
 
 static void boot_skip_phase(const char* Name, uint32_t Phase) {
     boot_skip_line(Name);
+    /* Mark the phase skipped before the shared completion path runs; the
+     * end call will leave the phase recorded as SKIPPED. */
+    (void)OwKInitSanPhaseSkip(Name);
     boot_diag_done(Phase, OW_SUCCESS, Name, 1);
 }
 
@@ -580,7 +594,7 @@ void _start(void) {
      * a broken sanitizer must never take the main kernel down on its own. */
     boot_begin("KSAN Init");
     {
-        /* Phase 2/3 diagnostics register before the suite initialises so the
+        /* Phase 2-4 diagnostics register before the suite initialises so the
          * enabled-module pass picks them up; a failed registration is a warning,
          * not a boot failure. */
         OW_STATUS regheap = OwKHeapSanRegister();
@@ -588,12 +602,18 @@ void _start(void) {
         OW_STATUS regbounds = OwKBoundsSanRegister();
         OW_STATUS regmsan = OwKMSanRegister();
         OW_STATUS regasan = OwKAsanRegister();
+        OW_STATUS regub = OwKUbSanRegister();
+        OW_STATUS regint = OwKIntSanRegister();
+        OW_STATUS reginit = OwKInitSanRegister();
+        OW_STATUS regstack = OwStackSanRegister();
 
         if (regheap != OW_SUCCESS || regpage != OW_SUCCESS ||
             regbounds != OW_SUCCESS || regmsan != OW_SUCCESS ||
-            regasan != OW_SUCCESS) {
+            regasan != OW_SUCCESS || regub != OW_SUCCESS ||
+            regint != OW_SUCCESS || reginit != OW_SUCCESS ||
+            regstack != OW_SUCCESS) {
             OwDiagLogWarning(OW_W_OWKSAN_UNAVAILABLE,
-                            "an OWKSan memory diagnostic module failed to register");
+                            "an OWKSan runtime-validation module failed to register");
         }
 
         OW_STATUS ksanst = OwKSanInitialize();

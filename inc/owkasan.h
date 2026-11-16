@@ -54,7 +54,12 @@ OW_STATUS OwKAsanCheckWrite(const void* Ptr, size_t Size, const char* Label);
  * counted in Out. */
 OW_STATUS OwKAsanAudit(OW_KASAN_REPORT* Out);
 
-/* Quarantine introspection. */
+/* Quarantine introspection and depth control. */
 uint32_t OwKAsanQuarantineBlocks(void);
+/* Change the quarantine depth at runtime.  0 disables the quarantine (freed
+ * blocks are immediately reusable).  Bounded by a compile-time maximum; returns
+ * the previous live limit. */
+uint32_t OwKAsanSetQuarantineLimit(uint32_t Blocks);
+uint32_t OwKAsanQuarantineLimit(void);
 
 #endif /* OW_KASAN_H */

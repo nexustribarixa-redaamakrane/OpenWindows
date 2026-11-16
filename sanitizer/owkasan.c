@@ -211,3 +211,11 @@ OW_STATUS OwKAsanAudit(OW_KASAN_REPORT* Out) {
 uint32_t OwKAsanQuarantineBlocks(void) {
     return OwKAllocQuarantineCount();
 }
+
+uint32_t OwKAsanSetQuarantineLimit(uint32_t Blocks) {
+    return OwKAllocQuarantineSetLimit(Blocks);
+}
+
+uint32_t OwKAsanQuarantineLimit(void) {
+    return OwKAllocQuarantineLimit();
+}

@@ -96,6 +96,9 @@ uint32_t     OwMemFrameArenaCount(void);
 OW_STATUS    OwMemFrameArenaGet(uint32_t Index, OW_FRAME_ARENA_DESC* Out);
 OW_STATUS    OwMemFrameArenaRegister(uint64_t Base, uint64_t Bytes,
                                      const size_t* UsedBytes);
+/* Base of the 16 MiB static physical frame arena (for OWKMSan shadow scope). */
+uintptr_t    OwMemArenaBase(void);
+uint64_t     OwMemArenaSize(void);
 /* Read-only frame-arena audit exports (OWKPageSan). */
 uint32_t     OwMemNonRamWindowCount(void);
 OW_STATUS    OwMemNonRamWindow(uint32_t Index, uint64_t* Lo, uint64_t* Hi);

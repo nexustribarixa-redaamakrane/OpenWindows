@@ -5,7 +5,7 @@
 # ==============================================================================
 
 CC = gcc
-CFLAGS = -std=c99 -ffreestanding -nostdlib -fno-stack-protector -fno-pie \
+CFLAGS = -std=c99 -ffreestanding -nostdlib -fstack-protector-strong -fno-pie \
          -Wall -Wextra -Werror \
          -I./inc -I./inc/bancode \
          -I../superunicode/sutf/include -I../superunicode/include -I../vip \
@@ -90,7 +90,11 @@ SANITIZER_OBJS = sanitizer/owksan_core.o \
                  sanitizer/owkpagesan.o \
                  sanitizer/owkbounds.o \
                  sanitizer/owkmsan.o \
-                 sanitizer/owkasan.o
+                 sanitizer/owkasan.o \
+                 sanitizer/owkubsan.o \
+                 sanitizer/owkintsan.o \
+                 sanitizer/owkinitsan.o \
+                 sanitizer/owkstacksan.o
 
 # Object files - User-mode (ring 3) launcher
 USERMODE_OBJS = usermode/usermode.o
@@ -706,7 +710,16 @@ $(QEMU_BIN): $(ALL_OBJS) $(TEST_SEED_OBJS) $(OWINIT_HEADER) $(EMERGENCY_HDRS) $(
 	objcopy -O binary $(QEMU_DIR)/qemu_image.exe $(QEMU_BIN)
 	@echo "QEMU flat multiboot image (state 1: owinit/owinitv/owrs seeded): $(QEMU_BIN)"
 
-qemu: $(QEMU_BIN)
+# The QEMU test images are development artifacts: the provenance gate requires
+# openwinkrnl.owx on the install volume under the production policy, which the
+# seeded test volumes do not carry (the whole point of the seeds), and CIS
+# would refuse every Essentials image without the development anchor.  Build
+# them with CIS_DEV_TRUST=1, which exists for exactly this case: the dev anchor
+# is provisioned and the sentinel tolerates the absent kernel image with a
+# warning instead of halting.  The production openwinkrnl.owx is built by a
+# plain `make` and keeps the production policy.
+qemu:
+	$(MAKE) CIS_DEV_TRUST=1 $(QEMU_BIN)
 	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_run.ps1 $(QEMU_BIN)
 
 # ==============================================================================
@@ -725,7 +738,8 @@ $(QEMU_EMERG_BIN): $(ALL_OBJS) $(EMERGENCY_SEEDS) $(EMERGENCY_HDRS) $(QEMU_DIR)/
 	objcopy -O binary $(QEMU_DIR)/qemu_emergency_image.exe $(QEMU_EMERG_BIN)
 	@echo "QEMU flat multiboot image (state 2: owinitv/owrs seeded): $(QEMU_EMERG_BIN)"
 
-qemu-emergency: $(QEMU_EMERG_BIN)
+qemu-emergency:
+	$(MAKE) CIS_DEV_TRUST=1 $(QEMU_EMERG_BIN)
 	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_run.ps1 $(QEMU_EMERG_BIN) -Emergency
 
 # ==============================================================================
@@ -824,17 +838,10 @@ $(KPROV_DENIED_BIN): $(ALL_OBJS) boot/owinit_seed.o boot/owinitv_seed.o boot/owr
 	objcopy -O binary $(QEMU_DIR)/qemu_prov_denied.exe $@
 	@echo "QEMU provenance denied image (CORE_KERNEL / Apache-2.0): $@"
 
-ifeq ($(CIS_DEV_TRUST),1)
-qemu-provenance: $(KPROV_CONTROL_BIN) $(KPROV_DENIED_BIN)
+qemu-provenance:
+	$(MAKE) CIS_DEV_TRUST=1 $(KPROV_CONTROL_BIN) $(KPROV_DENIED_BIN)
 	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_provenance_test.ps1 \
 	    $(KPROV_CONTROL_BIN) $(KPROV_DENIED_BIN)
-else
-qemu-provenance:
-	@echo "qemu-provenance requires CIS_DEV_TRUST=1: the test artifacts are signed"
-	@echo "with the development key, which only a CIS_DEV_TRUST build pins in the"
-	@echo "trust store. Run: make CIS_DEV_TRUST=1 qemu-provenance"
-	@exit 1
-endif
 
 # ==============================================================================
 # QEMU argv regression: hand PID 1 a non-trivial argument vector.
@@ -1010,17 +1017,10 @@ $(OWBH_BIN): $(ALL_OBJS) $(OWBH_DIR)/owbh_seed.o $(OWBH_DIR)/owbh_main.o \
 	objcopy -O binary $(QEMU_DIR)/qemu_owbh.exe $@
 	@echo "QEMU banhammer_cli image (banhammer_cli as PID 1, quote): $@"
 
-ifeq ($(CIS_DEV_TRUST),1)
-qemu-argv: $(OWARGV_MULTI_BIN) $(OWARGV_ZERO_BIN) $(OWKCONF_BIN) $(OWKCONF_SET_BIN) $(OWBH_BIN)
+qemu-argv:
+	$(MAKE) CIS_DEV_TRUST=1 $(OWARGV_MULTI_BIN) $(OWARGV_ZERO_BIN) $(OWKCONF_BIN) $(OWKCONF_SET_BIN) $(OWBH_BIN)
 	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_argv_test.ps1 \
 	    $(OWARGV_MULTI_BIN) $(OWARGV_ZERO_BIN) $(OWKCONF_BIN) $(OWKCONF_SET_BIN) $(OWBH_BIN)
-else
-qemu-argv:
-	@echo "qemu-argv requires CIS_DEV_TRUST=1: the shell image is signed with the"
-	@echo "development key, which only a CIS_DEV_TRUST build pins in the trust store."
-	@echo "Run: make CIS_DEV_TRUST=1 qemu-argv"
-	@exit 1
-endif
 
 # ==============================================================================
 # QEMU bancat regression: a real .owx that reads the primary OWFS volume.
@@ -1092,17 +1092,10 @@ $(OWBANCAT_BIN): $(ALL_OBJS) $(OWBANCAT_DIR)/owbancat_seed.o \
 	objcopy -O binary $(QEMU_DIR)/qemu_bancat.exe $@
 	@echo "QEMU bancat image (bancat as PID 1, reads crash.bdmp): $@"
 
-ifeq ($(CIS_DEV_TRUST),1)
-qemu-bancat: $(OWBANCAT_BIN)
+qemu-bancat:
+	$(MAKE) CIS_DEV_TRUST=1 $(OWBANCAT_BIN)
 	python tools/stage_owx.py --verify "$(BANCAT_BUILD_IMAGE)" "$(BANCAT_IMAGE)"
 	pwsh -ExecutionPolicy Bypass -File ./tools/qemu_bancat_test.ps1 $(OWBANCAT_BIN)
-else
-qemu-bancat:
-	@echo "qemu-bancat requires CIS_DEV_TRUST=1: the decoder image is signed with the"
-	@echo "development key, which only a CIS_DEV_TRUST build pins in the trust store."
-	@echo "Run: make CIS_DEV_TRUST=1 qemu-bancat"
-	@exit 1
-endif
 
 # ==============================================================================
 # VirtualBox floppy boot test: relinks the same flat kernel (boot/qboot.S +
@@ -1215,6 +1208,10 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                sanitizer/owkbounds.c \
                sanitizer/owkmsan.c \
                sanitizer/owkasan.c \
+               sanitizer/owkubsan.c \
+               sanitizer/owkintsan.c \
+               sanitizer/owkinitsan.c \
+               sanitizer/owkstacksan.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
                $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sutf16.c \
@@ -1319,7 +1316,7 @@ HOSTTEST_ASAN_FLAGS = -std=c99 -Wall -Wextra -Werror -fno-pie -g \
                       -DOW_HOST_HAL $(CIS_DEV_CFLAGS) $(HOSTTEST_INCLUDES)
 HOSTTEST_ASAN_OUT = $(or $(TMPDIR),$(TEMP),/tmp)/openwinkrnl_asan.exe
 
-HOSTTEST_FLAGS = -std=c99 -Wall -Wextra -Werror -fno-pie -g -DOW_HOST_HAL \
+HOSTTEST_FLAGS = -std=c99 -Wall -Wextra -Werror -fno-pie -g -fstack-protector-strong -DOW_HOST_HAL \
                  $(CIS_DEV_CFLAGS) $(HOSTTEST_INCLUDES)
 
 # Entry-point audit across all Essentials OWX targets. Runs the checker's own

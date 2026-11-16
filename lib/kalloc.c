@@ -12,10 +12,15 @@ static int g_init = 0;
 /* Freed blocks not yet reusable: the bounded quarantine defers reuse so that a
  * use-after-free write is detectable (poison verification) and so a stale
  * payload is handed back less promptly.  Threaded through the payload's first
- * 8 bytes; the header tag stays KALLOC_MAGIC_FREE throughout. */
-#define KALLOC_QUARANTINE_MAX 32u
+ * 8 bytes; the header tag stays KALLOC_MAGIC_FREE throughout.  The active
+ * depth is runtime-tunable via OwKAsanSetQuarantineLimit(); 0 bypasses the
+ * quarantine entirely, KALLOC_QUARANTINE_MAX is the hard bound of the static
+ * table. */
+#define KALLOC_QUARANTINE_MAX 64u
 static uint8_t *s_quarantine[KALLOC_QUARANTINE_MAX];
 static uint32_t s_quarantine_count = 0u;
+/* Live quarantine depth; default defers up to 32 blocks before reuse. */
+static uint32_t s_quarantine_limit = 32u;
 static uint8_t *g_free_list = (uint8_t *)0;
 
 void kalloc_init(void) {
@@ -213,17 +218,20 @@ void kfree(void *ptr) {
             KALLOC_REDZONE);
   *(((uint64_t *)block) + 1) = KALLOC_MAGIC_FREE;
 
-  if (s_quarantine_count < KALLOC_QUARANTINE_MAX) {
+  if (s_quarantine_limit == 0u) {
+    /* Quarantine disabled: freed blocks are immediately reusable. */
+    free_block_push(block);
+  } else if (s_quarantine_count < s_quarantine_limit) {
     s_quarantine[s_quarantine_count++] = block;
   } else {
     /* FIFO: the oldest quarantined block becomes reusable. */
     uint32_t i;
     uint8_t *oldest = s_quarantine[0];
 
-    for (i = 0u; i + 1u < KALLOC_QUARANTINE_MAX; ++i) {
+    for (i = 0u; i + 1u < s_quarantine_count; ++i) {
       s_quarantine[i] = s_quarantine[i + 1u];
     }
-    s_quarantine[KALLOC_QUARANTINE_MAX - 1u] = block;
+    s_quarantine[s_quarantine_count - 1u] = block;
     free_block_push(oldest);
   }
 
@@ -285,6 +293,26 @@ const void *OwKAllocBlockFind(const void *Payload) {
 }
 
 uint32_t OwKAllocQuarantineCount(void) { return s_quarantine_count; }
+
+/* Quarantine depth control.  Returns the previous live limit.  Setting the
+ * limit lower than the current occupancy promotes the newest excess blocks
+ * to the reusable list (the oldest stay in quarantine).  0 disables the
+ * quarantine; KALLOC_QUARANTINE_MAX is the hard bound of the static table. */
+uint32_t OwKAllocQuarantineLimit(void) { return s_quarantine_limit; }
+
+uint32_t OwKAllocQuarantineSetLimit(uint32_t Limit) {
+  uint32_t old = s_quarantine_limit;
+
+  if (Limit > KALLOC_QUARANTINE_MAX)
+    Limit = KALLOC_QUARANTINE_MAX;
+  s_quarantine_limit = Limit;
+  while (s_quarantine_count > s_quarantine_limit) {
+    uint32_t last = --s_quarantine_count;
+
+    free_block_push(s_quarantine[last]);
+  }
+  return old;
+}
 
 const void *OwKAllocQuarantineAt(uint32_t Index) {
   if (Index >= s_quarantine_count)

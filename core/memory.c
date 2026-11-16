@@ -3,6 +3,7 @@
 #include "../inc/ow_kprintf.h"
 #include "../inc/ow_mem.h"
 #include "../inc/ow_memory.h"
+#include "../inc/owkmsan.h"
 #include "../lib/kalloc.h"
 
 /* Static 16MB physical frame allocator.
@@ -25,6 +26,9 @@ static OW_FRAME_ARENA_DESC s_FrameArenas[OW_FRAME_ARENA_MAX];
 static uint32_t s_FrameArenaCount;
 
 uint32_t OwMemFrameArenaCount(void) { return s_FrameArenaCount; }
+
+uintptr_t OwMemArenaBase(void) { return (uintptr_t)g_PhysicalRam; }
+uint64_t OwMemArenaSize(void) { return (uint64_t)sizeof(g_PhysicalRam); }
 
 OW_STATUS OwMemFrameArenaGet(uint32_t Index, OW_FRAME_ARENA_DESC* Out) {
   if (Out == (OW_FRAME_ARENA_DESC*)0) {
@@ -189,6 +193,7 @@ void *OwMemAllocatePage(void) {
     return (void *)0;
   page = &g_PhysicalRam[g_RamPointer];
   g_RamPointer += OW_PAGE_SIZE;
+  OwKMSanNoteUninit(page, OW_PAGE_SIZE);
   return page;
 }
 
@@ -210,6 +215,7 @@ uint64_t OwMemAllocatePages(uint32_t Count) {
     return (uint64_t)0;
   pages = &g_PhysicalRam[g_RamPointer];
   g_RamPointer += span;
+  OwKMSanNoteUninit(pages, span);
   return (uint64_t)(uintptr_t)pages;
 }
 
@@ -272,6 +278,7 @@ OW_STATUS OwMemRunCharge(OW_FRAME_RUN *Run, uint64_t *OutFrame) {
   /* A demand-paged page must read as zero before any CPL3 instruction can
    * observe it: the CPU can retry the faulting store the instant we return. */
   ow_memset((void *)(uintptr_t)frame, 0, OW_PAGE_SIZE);
+  OwKMSanNoteInit((void *)(uintptr_t)frame, OW_PAGE_SIZE);
   Run->Committed++;
   s_CommitTotal++;
   *OutFrame = frame;
@@ -286,6 +293,7 @@ OW_STATUS OwMemRunRelease(OW_FRAME_RUN *Run, uint64_t Frame) {
     return OW_ERR_INVALID_PARAM;
   }
   ow_memset((void *)(uintptr_t)Frame, 0, OW_PAGE_SIZE);
+  OwKMSanNoteUninit((void *)(uintptr_t)Frame, OW_PAGE_SIZE);
   Run->Committed--;
   if (s_CommitTotal > 0u) s_CommitTotal--;
   return OW_SUCCESS;
@@ -298,6 +306,7 @@ void OwMemRunReleaseAll(OW_FRAME_RUN *Run) {
     Run->Committed--;
     if (s_CommitTotal > 0u) s_CommitTotal--;
     ow_memset((void *)(uintptr_t)frame, 0, OW_PAGE_SIZE);
+    OwKMSanNoteUninit((void *)(uintptr_t)frame, OW_PAGE_SIZE);
   }
 }
 
@@ -516,6 +525,7 @@ uint64_t OwMemAllocPageTable(void) {
   void *page = OwMemAllocatePage();
   if (!page) return (uint64_t)0;
   ow_memset(page, 0, OW_PAGE_SIZE);
+  OwKMSanNoteInit(page, OW_PAGE_SIZE);
   /* Identity mapped, so the VA we can dereference IS the physical address. */
   return (uint64_t)(uintptr_t)page;
 }

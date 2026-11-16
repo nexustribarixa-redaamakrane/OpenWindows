@@ -54,7 +54,8 @@ uintptr_t OwKAllocArenaBase(void);
  *
  * OwKAllocBlockFind returns the arena block base whose payload starts at
  * Payload, or NULL.  OwKAllocQuarantineCount/At expose a snapshot of the
- * quarantine so the auditor can verify poison integrity. */
+ * quarantine so the auditor can verify poison integrity.
+ * OwKAllocQuarantineLimit/SetLimit expose the runtime quarantine depth knob. */
 uint32_t OwKAllocWalk(int (*Callback)(const void* Block, size_t Size,
                                       const void* Payload, uint64_t Magic,
                                       void* Ctx),
@@ -63,5 +64,7 @@ bool     OwKAllocContains(const void* Ptr);
 const void* OwKAllocBlockFind(const void* Payload);
 uint32_t OwKAllocQuarantineCount(void);
 const void* OwKAllocQuarantineAt(uint32_t Index);
+uint32_t OwKAllocQuarantineLimit(void);
+uint32_t OwKAllocQuarantineSetLimit(uint32_t Limit);
 
 #endif /* KALLOC_H */

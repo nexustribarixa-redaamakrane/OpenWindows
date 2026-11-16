@@ -61,6 +61,10 @@ int test_superunicode_run(int* out_passed);
 #include "../../inc/owkbounds.h"
 #include "../../inc/owkmsan.h"
 #include "../../inc/owkasan.h"
+#include "../../inc/owkubsan.h"
+#include "../../inc/owkintsan.h"
+#include "../../inc/owkinitsan.h"
+#include "../../inc/owkstacksan.h"
 #include "../../inc/ow_kprintf.h"
 /* Resolved on the include path, not by relative path: the generated header
  * lives in the build tree -- boot/ under the Makefile, <build>/generated under
@@ -5306,8 +5310,8 @@ static void test_owksan_core(void) {
   printf("\n=== OWKSan Suite (Phase 1 framework core) ===\n");
 
   check_window("OWKSan core is ready after the boot phase", OwKSanReady(), true);
-  check_eq("OWKSan module table holds the five memory modules", (unsigned long)OwKSanModuleCount(), 5ul);
-  check_eq("OWKSan starts with the memory modules enabled", (unsigned long)OwKSanEnabledModuleCount(), 5ul);
+  check_eq("OWKSan module table holds the nine registered modules", (unsigned long)OwKSanModuleCount(), 9ul);
+  check_eq("OWKSan starts with the registered modules enabled", (unsigned long)OwKSanEnabledModuleCount(), 9ul);
   check_window("OWKSan master switch defaults to disabled", OwKSanMasterEnabled(), false);
 
   mod.InitOrder = 100u;
@@ -5324,7 +5328,7 @@ static void test_owksan_core(void) {
 
   st = OwKSanRegisterModule(&mod);
   check_eq("OWKSan registers a synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
-  check_eq("OWKSan module table holds the synthetic module", (unsigned long)OwKSanModuleCount(), 6ul);
+  check_eq("OWKSan module table holds the synthetic module", (unsigned long)OwKSanModuleCount(), 10ul);
 
   st = OwKSanGetModule(name, &mod);
   check_eq("the synthetic module is queryable", (unsigned long)st, (unsigned long)OW_SUCCESS);
@@ -5334,7 +5338,7 @@ static void test_owksan_core(void) {
   st = OwKSanEnableModule(name);
   check_eq("OWKSan refuses an unknown module name", (unsigned long)OwKSanEnableModule("OWKNoSuchModule"), (unsigned long)OW_ERR_NOT_FOUND);
   check_eq("OWKSan enables the synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
-  check_eq("OWKSan enabled-module count is six", (unsigned long)OwKSanEnabledModuleCount(), 6ul);
+  check_eq("OWKSan enabled-module count is ten", (unsigned long)OwKSanEnabledModuleCount(), 10ul);
   check_eq("OWKSan initialises the enabled module", (unsigned long)OwKSanInitializeEnabledModules(), (unsigned long)OW_SUCCESS);
   st = OwKSanGetModule(name, &mod);
   check_window("the synthetic module is now inited", mod.Inited, true);
@@ -5381,7 +5385,7 @@ static void test_owksan_core(void) {
   OwKSanShutdown();
   check_window("OWKSan is no longer ready after shutdown", OwKSanReady(), false);
   OwKSanUnregisterModule(name);
-  check_eq("the synthetic module is gone from the table", (unsigned long)OwKSanModuleCount(), 5ul);
+  check_eq("the synthetic module is gone from the table", (unsigned long)OwKSanModuleCount(), 9ul);
 
   check_eq("OWKSan re-initialises to ready", (unsigned long)OwKSanInitialize(), (unsigned long)OW_SUCCESS);
   check_window("OWKSan re-armed off after re-initialisation", OwKSanMasterEnabled(), false);
@@ -5637,6 +5641,24 @@ static void test_owkmsan(void) {
   st = OwKMSanCheckRead(p, 4, "msan-test");
   check_eq("a freed block reads as uninitialized", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
 
+  /* Frame-arena tracking: a fresh frame is uninitialized; the zeroing site
+   * re-initializes it. */
+  {
+    uint64_t frame = OwMemAllocatePages(1u);
+
+    check_window("a frame-backed page is returned", frame != 0ull, true);
+    check_eq("a fresh frame reads as uninitialized",
+             (unsigned long)OwKMSanCheckRead((const void *)(uintptr_t)frame,
+                                             OW_PAGE_SIZE, "msan-frame"),
+             (unsigned long)OW_ERR_CORRUPT);
+    memset((void *)(uintptr_t)frame, 0, OW_PAGE_SIZE);
+    OwKMSanNoteInit((const void *)(uintptr_t)frame, OW_PAGE_SIZE);
+    check_eq("the zeroed frame validates",
+             (unsigned long)OwKMSanCheckRead((const void *)(uintptr_t)frame,
+                                             OW_PAGE_SIZE, "msan-frame"),
+             (unsigned long)OW_SUCCESS);
+  }
+
   kfree(q);
 }
 
@@ -5689,6 +5711,207 @@ static void test_owkasan(void) {
   check_window("the restored poison audits clean", st == OW_SUCCESS, true);
 
   check_eq("the quarantine holds freed blocks", (unsigned long)(rep.QuarantinedBlocks >= 1u), 1ul);
+
+  /* Quarantine depth control: 0 disables the quarantine, the previous live
+   * limit is returned, and a round trip restores it. */
+  {
+    uint32_t prev = OwKAsanSetQuarantineLimit(0u);
+
+    check_eq("the previous quarantine limit is returned", (unsigned long)(prev == 32u), 1ul);
+    check_eq("a zero quarantine limit is readable", (unsigned long)OwKAsanQuarantineLimit(), 0ul);
+    check_eq("the round trip restores the previous limit", (unsigned long)OwKAsanSetQuarantineLimit(prev), 0ul);
+    check_eq("the quarantine is armed again", (unsigned long)OwKAsanQuarantineLimit(), (unsigned long)prev);
+  }
+}
+
+static void test_owkubsan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+  int64_t ires = 0;
+
+  printf("\n=== OWKSan Suite (OWKUbSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKUBSAN, &mod);
+  check_eq("OWKUbSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKUbSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  check_eq("a legal shift passes",
+           (unsigned long)OwKUbSanShiftLeft(1u, 63u, 64u), (unsigned long)OW_SUCCESS);
+  check_eq("an out-of-range shift is refused",
+           (unsigned long)OwKUbSanShiftLeft(1u, 64u, 64u), (unsigned long)OW_ERR_INVALID_PARAM);
+  check_eq("a zero shift is refused",
+           (unsigned long)OwKUbSanShiftRight(1u, 0u, 0u), (unsigned long)OW_ERR_INVALID_PARAM);
+
+  check_eq("signed add of zero validates",
+           (unsigned long)OwKUbSanSignedAdd(0, 0, &ires), (unsigned long)OW_SUCCESS);
+  check_eq("signed add of the maxima validates",
+           (unsigned long)OwKUbSanSignedAdd(INT64_MAX, 0, &ires), (unsigned long)OW_SUCCESS);
+  st = OwKUbSanSignedAdd(INT64_MAX, 1, &ires);
+  check_eq("signed add overflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  check_eq("signed subtract of the maxima validates",
+           (unsigned long)OwKUbSanSignedSub(INT64_MAX, INT64_MAX, &ires), (unsigned long)OW_SUCCESS);
+  st = OwKUbSanSignedSub(INT64_MIN, 1, &ires);
+  check_eq("signed subtract overflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  st = OwKUbSanSignedMul(INT64_MAX, 2, &ires);
+  check_eq("signed multiply overflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  check_eq("small signed multiply validates",
+           (unsigned long)OwKUbSanSignedMul(1024, 1024, &ires), (unsigned long)OW_SUCCESS);
+
+  st = OwKUbSanDiv(10, 0, &ires);
+  check_eq("division by zero is refused", (unsigned long)st, (unsigned long)OW_ERR_INVALID_PARAM);
+  st = OwKUbSanMod(10, 0, &ires);
+  check_eq("modulo by zero is refused", (unsigned long)st, (unsigned long)OW_ERR_INVALID_PARAM);
+  st = OwKUbSanDiv(INT64_MIN, -1, &ires);
+  check_eq("INT64_MIN / -1 is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  st = OwKUbSanMod(INT64_MIN, -1, &ires);
+  check_eq("INT64_MIN % -1 is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a legal division validates",
+           (unsigned long)OwKUbSanDiv(INT64_MAX, 7, &ires), (unsigned long)OW_SUCCESS);
+
+  {
+    char aligned_buf[16] __attribute__((aligned(8)));
+    char *misaligned = (char *)aligned_buf + 1;
+
+    check_eq("an 8-aligned pointer validates",
+             (unsigned long)OwKUbSanAlign(aligned_buf, 8u), (unsigned long)OW_SUCCESS);
+    st = OwKUbSanAlign(misaligned, 8u);
+    check_eq("a misaligned pointer is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+    check_eq("a non-power-of-two alignment is refused",
+             (unsigned long)OwKUbSanAlign(aligned_buf, 3u), (unsigned long)OW_ERR_INVALID_PARAM);
+  }
+
+  check_eq("an in-range enum validates",
+           (unsigned long)OwKUbSanEnum(5, 0, 10), (unsigned long)OW_SUCCESS);
+  st = OwKUbSanEnum(11, 0, 10);
+  check_eq("an out-of-range enum is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a null pointer is refused",
+           (unsigned long)OwKUbSanNull((const void *)0), (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a non-null pointer validates",
+           (unsigned long)OwKUbSanNull((const void *)1), (unsigned long)OW_SUCCESS);
+}
+
+static void test_owkintsan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+  uint64_t ures = 0;
+
+  printf("\n=== OWKSan Suite (OWKIntSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKINTSAN, &mod);
+  check_eq("OWKIntSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKIntSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  check_eq("a plain add validates",
+           (unsigned long)OwKIntSanAdd(1, 2, &ures), (unsigned long)OW_SUCCESS);
+  st = OwKIntSanAdd(UINT64_MAX, 1, &ures);
+  check_eq("add overflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a plain subtract validates",
+           (unsigned long)OwKIntSanSub(100, 42, &ures), (unsigned long)OW_SUCCESS);
+  st = OwKIntSanSub(0, 1, &ures);
+  check_eq("subtract underflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  check_eq("a plain multiply validates",
+           (unsigned long)OwKIntSanMul(4294967296u, 4296u, &ures), (unsigned long)OW_SUCCESS);
+  st = OwKIntSanMul(UINT64_MAX, 2, &ures);
+  check_eq("multiply overflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+
+  check_eq("an allocation size calculation validates",
+           (unsigned long)OwKIntSanAllocSize(4096u, 4096u, &ures), (unsigned long)OW_SUCCESS);
+  st = OwKIntSanAllocSize(UINT64_MAX / 8u, 16u, &ures);
+  check_eq("an allocation size overflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+
+  check_eq("a pointer offset validates",
+           (unsigned long)OwKIntSanPointerOffset(0x40000000u, 0x2000u, &ures), (unsigned long)OW_SUCCESS);
+  st = OwKIntSanPointerOffset(UINT64_MAX, 1, &ures);
+  check_eq("a pointer offset wrap is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+
+  st = OwKIntSanAddScaled(0x40000000u, 0x7FFFFFFFull, 0x2000u, &ures);
+  check_eq("a scaled index validates", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  st = OwKIntSanAddScaled(0x40000000u, UINT64_MAX, 0x2000u, &ures);
+  check_eq("a scaled index overflow is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+
+  check_eq("a region span validates",
+           (unsigned long)OwKIntSanRangeSpan(0x40000000u, 0x2000u, &ures), (unsigned long)OW_SUCCESS);
+  st = OwKIntSanRangeSpan(UINT64_MAX, 1, &ures);
+  check_eq("a region span wrap is refused", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+}
+
+static void test_owkinitsan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+
+  printf("\n=== OWKSan Suite (OWKInitSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKINITSAN, &mod);
+  check_eq("OWKInitSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKInitSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  check_eq("begin of a phase validates",
+           (unsigned long)OwKInitSanPhaseBegin("test.phase1", 900u), (unsigned long)OW_SUCCESS);
+  check_eq("the phase is running", (unsigned long)(!OwKInitSanIsInitialized("test.phase1")), 1ul);
+  check_eq("end of the phase validates",
+           (unsigned long)OwKInitSanPhaseEnd("test.phase1", OW_SUCCESS), (unsigned long)OW_SUCCESS);
+  check_window("the phase is initialized after the end", OwKInitSanIsInitialized("test.phase1"), true);
+  check_window("the phase is not marked failed", !OwKInitSanPhaseFailed("test.phase1"), true);
+  check_eq("an end of a done phase is refused",
+           (unsigned long)OwKInitSanPhaseEnd("test.phase1", OW_SUCCESS), (unsigned long)OW_ERR_INVALID_PARAM);
+  check_eq("a duplicate begin is refused",
+           (unsigned long)OwKInitSanPhaseBegin("test.phase1", 901u), (unsigned long)OW_ERR_ALREADY_EXISTS);
+  check_eq("an out-of-order begin is refused",
+           (unsigned long)OwKInitSanPhaseBegin("test.phase2", 899u), (unsigned long)OW_ERR_CORRUPT);
+
+  check_eq("a failing phase end marks failed",
+           (unsigned long)OwKInitSanPhaseBegin("test.phase3", 902u), (unsigned long)OW_SUCCESS);
+  check_eq("the failing phase end validates",
+           (unsigned long)OwKInitSanPhaseEnd("test.phase3", OW_ERR_CORRUPT), (unsigned long)OW_SUCCESS);
+  check_window("the failed phase is marked failed", OwKInitSanPhaseFailed("test.phase3"), true);
+  check_window("the failed phase is not initialized", !OwKInitSanIsInitialized("test.phase3"), true);
+
+  check_eq("end without begin is refused",
+           (unsigned long)OwKInitSanPhaseEnd("test.nonexistent", OW_SUCCESS), (unsigned long)OW_ERR_NOT_FOUND);
+
+  OwKInitSanReset();
+  check_eq("the tracker resets to empty", (unsigned long)OwKInitSanPhaseCount(), 0ul);
+}
+
+static void test_owkstacksan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+
+  printf("\n=== OWKSan Suite (OWStackSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWSTACKSAN, &mod);
+  check_eq("OWStackSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWStackSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  st = OwStackSanAudit();
+  check_eq("the stack guard validates untouched", (unsigned long)st, (unsigned long)OW_SUCCESS);
+
+  {
+    uint8_t stack_buf[128];
+
+    memset(stack_buf, 0, sizeof stack_buf);
+    check_eq("a declared stack region validates",
+             (unsigned long)OwStackSanCheckStackRange(stack_buf, sizeof stack_buf),
+             (unsigned long)OW_SUCCESS);
+    st = OwStackSanCheckStackRange(stack_buf, 0u);
+    check_eq("a zero-sized region is refused", (unsigned long)st, (unsigned long)OW_ERR_INVALID_PARAM);
+    {
+      uint64_t heap_base = (uint64_t)OwKAllocArenaBase();
+
+      st = OwStackSanCheckStackRange((const void *)(uintptr_t)heap_base,
+                                     (size_t)KALLOC_HEAP_SIZE);
+      check_eq("a region overlapping the heap arena is refused",
+               (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+    }
+  }
 }
 
 static void test_kdb_extensions(void) {
@@ -6588,6 +6811,10 @@ int main(int argc, char **argv) {
   (void)OwKBoundsSanRegister();
   (void)OwKMSanRegister();
   (void)OwKAsanRegister();
+  (void)OwKUbSanRegister();
+  (void)OwKIntSanRegister();
+  (void)OwKInitSanRegister();
+  (void)OwStackSanRegister();
 
   st = OwKSanInitialize();
 
@@ -7176,6 +7403,10 @@ int main(int argc, char **argv) {
   test_owkbounds();
   test_owkmsan();
   test_owkasan();
+  test_owkubsan();
+  test_owkintsan();
+  test_owkinitsan();
+  test_owkstacksan();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */
