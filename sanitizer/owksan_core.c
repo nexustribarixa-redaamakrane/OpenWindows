@@ -57,7 +57,7 @@ OW_STATUS OwKSanRegisterModule(const OW_KSAN_MODULE* Module) {
         uint32_t i2;
 
         for (i2 = g_ModuleCount; i2 > slot; --i2) {
-            g_Modules[i2 - 1U] = g_Modules[i2 - 2U];
+            g_Modules[i2] = g_Modules[i2 - 1U];
         }
     }
     g_Modules[slot] = *Module;
@@ -65,9 +65,7 @@ OW_STATUS OwKSanRegisterModule(const OW_KSAN_MODULE* Module) {
     g_Modules[slot].Name[OW_KSAN_MODULE_NAME_MAX - 1U] = '\0';
     g_Modules[slot].Inited = false;
     g_Modules[slot].InitStatus = OW_SUCCESS;
-    if (slot == g_ModuleCount) {
-        g_ModuleCount++;
-    }
+    g_ModuleCount++;
     return OW_SUCCESS;
 }
 

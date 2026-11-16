@@ -17,6 +17,8 @@
 #include "../inc/ow_io.h"
 #include "../inc/ow_mem.h"
 #include "../inc/ow_kprintf.h"
+#include "../inc/owklocksan.h"
+#include "../inc/owktsan.h"
 
 /* ---- Static dispatcher table ------------------------------------------ */
 static OW_DISPATCHER_OBJECT  s_Dispatchers[OW_MAX_DISPATCHERS];
@@ -65,11 +67,15 @@ static void wake_one_waiter(OW_DISPATCHER_OBJECT* Obj, uint32_t Result) {
     thr->NextWait = (OW_THREAD_OBJECT*)0;
     thr->WaitObject = (OW_DISPATCHER_OBJECT*)0;
     thr->WaitTimeout = 0;
-    /* A woken mutex waiter takes immediate ownership. */
     if (Obj->Type == OW_DISPATCH_MUTEX) {
         Obj->Owner = thr;
         Obj->OwnCount = 1;
+        OwKLockSanNoteAcquireMutex(Obj, (uint32_t)thr->Tid);
+        if (Result == OW_WAIT_ABANDONED) {
+            OwKLockSanNoteWaitResult(Obj, (uint32_t)thr->Tid, Result);
+        }
     }
+    OwKLockSanNoteWake((uint32_t)thr->Tid);
     set_wait_result(thr, Result);
     OwPsWakeThread(thr);
 }
@@ -142,6 +148,10 @@ OW_DISPATCHER_OBJECT* KeCreateMutex(const char* Name, uint32_t InitialOwner) {
             d->SignalState = 0u;
         }
     }
+    OwKLockSanNoteCreateMutex(d);
+    if (d->Owner != (OW_THREAD_OBJECT*)0) {
+        OwKLockSanNoteAcquireMutex(d, (uint32_t)d->Owner->Tid);
+    }
     len = 0;
     if (Name) {
         while (Name[len] && len < (uint32_t)OW_MAX_NAME - 1u) len++;
@@ -169,6 +179,7 @@ uint32_t KeSetEvent(OW_DISPATCHER_OBJECT* Obj) {
     uint64_t flags;
 
     if (!Obj) return 0u;
+    OwKTSanSyncPoint();
     prev = Obj->SignalState;
 
     flags = ow_irq_save();
@@ -192,6 +203,7 @@ uint32_t KeResetEvent(OW_DISPATCHER_OBJECT* Obj) {
     uint64_t flags;
 
     if (!Obj) return 0u;
+    OwKTSanSyncPoint();
     flags = ow_irq_save();
     prev = Obj->SignalState;
     Obj->SignalState = 0u;
@@ -203,6 +215,8 @@ void KeReleaseSemaphore(OW_DISPATCHER_OBJECT* Obj, uint32_t Count) {
     uint64_t flags;
 
     if (!Obj) return;
+    OwKTSanSyncPoint();
+    OwKLockSanNoteReleaseSemaphore(Obj, Count);
     flags = ow_irq_save();
     Obj->SignalState += Count;
     if (Obj->SignalState > Obj->Limit) Obj->SignalState = Obj->Limit;
@@ -219,7 +233,12 @@ uint32_t KeReleaseMutex(OW_DISPATCHER_OBJECT* Obj) {
     uint64_t flags;
 
     if (!Obj) return 0u;
+    OwKTSanSyncPoint();
     cur = OwPsGetCurrentThread();
+
+    if (cur) {
+        OwKLockSanNoteReleaseMutex(Obj, (uint32_t)cur->Tid);
+    }
 
     flags = ow_irq_save();
     if (Obj->Type != OW_DISPATCH_MUTEX || !cur || Obj->Owner != cur) {
@@ -261,12 +280,14 @@ uint32_t KeWaitForSingleObject(OW_DISPATCHER_OBJECT* Obj,
     if (Obj->Type == OW_DISPATCH_MUTEX) {
         if (cur && Obj->Owner == cur) {
             Obj->OwnCount++;                    /* recursive acquisition */
+            OwKLockSanNoteAcquireMutex(Obj, (uint32_t)cur->Tid);
             ow_irq_restore(flags);
             return OW_WAIT_SIGNALED;
         }
         if (Obj->SignalState > 0) {
             Obj->Owner = cur;
             Obj->OwnCount = 1;
+            OwKLockSanNoteAcquireMutex(Obj, (uint32_t)cur->Tid);
             Obj->SignalState = 0;
             ow_irq_restore(flags);
             return Obj->Abandoned ? OW_WAIT_ABANDONED : OW_WAIT_SIGNALED;
@@ -308,6 +329,8 @@ uint32_t KeWaitForSingleObject(OW_DISPATCHER_OBJECT* Obj,
     cur->WaitTimeout = (TimeoutTicks >= OW_TIMEOUT_INFINITE)
                            ? 0u
                            : (uint64_t)OwPsGetTickCount() + TimeoutTicks;
+
+    OwKLockSanNoteWillBlock(Obj, (uint32_t)cur->Tid);
 
     ow_kprintf("[WAIT] tid=%u on '%s'\r\n", (unsigned)cur->Tid,
                Obj->Header.Name);
@@ -442,6 +465,7 @@ void OwPsCheckTimeouts(void) {
             thr->NextWait = (OW_THREAD_OBJECT*)0;
             thr->WaitTimeout = 0;
             set_wait_result(thr, result);
+            OwKLockSanNoteWake((uint32_t)thr->Tid);
             OwPsWakeThread(thr);
         }
     }
@@ -454,6 +478,7 @@ void KeOnThreadExit(OW_THREAD_OBJECT* Thr) {
     uint32_t i;
 
     if (!Thr) return;
+    OwKLockSanNoteThreadExit((uint32_t)Thr->Tid);
     for (i = 0; i < OW_MAX_DISPATCHERS; i++) {
         OW_DISPATCHER_OBJECT* d = &s_Dispatchers[i];
         if (d->Type != OW_DISPATCH_MUTEX) continue;

@@ -18,15 +18,15 @@ in-kernel framework the production kernel would consult.
 | OWKAsan | Address-access validation - implemented (Phase 3) | 3 (done) |
 | OWKUbSan | Undefined-behavior detection - implemented (Phase 4) | 4 (done) |
 | OWKMSan | Memory initialization tracking - implemented (Phase 3) | 3 (done) |
-| OWKTSan | Data-race detection | 5+ |
-| OWKLSan | Lock-state and synchronization diagnostics | 5+ |
+| OWKTSan | Data-race detection - implemented (Phase 5) | 5 (done) |
+| OWKLSan | Lock-state and synchronization diagnostics - implemented (Phase 5) | 5 (done) |
 | OWStackSan | Stack integrity (compiler canary + validation) - implemented (Phase 4) | 4 (done) |
 | OWKHeapSan | Kernel heap integrity and allocation validation | 2 (done) |
 | OWKPageSan | Physical/virtual page-management validation | 2 (done) |
 | OWKBoundsSan | Buffer, array and memory-region bounds validation | 2 (done) |
 | OWKIntSan | Integer overflow and invalid arithmetic detection - implemented (Phase 4) | 4 (done) |
 | OWKInitSan | Initialization-order and initialization-state validation - implemented (Phase 4) | 4 (done) |
-| OWKLockSan | Kernel lock correctness and misuse detection | 5+ |
+| OWKLockSan | Kernel lock correctness and misuse detection - implemented (Phase 5) | 5 (done) |
 
 ## Phase 1 - Foundation: implemented
 
@@ -315,9 +315,91 @@ Does NOT detect, and deliberately does not claim:
   instrumented),
 - anything about the validity of a stack region the caller never declares.
 
-## Phase 5 onwards - planned
+## Phase 5 - Concurrency diagnostics: implemented
 
-- Phase 5: `OWKTSan`, `OWKLSan`, `OWKLockSan`.
+Phase 5 delivers the three concurrency modules.  The kernel is single-CPU,
+ring-0 only, with NT-like dispatcher objects as its synchronization primitive;
+the architecture is what the modules check against.  Files changed:
+
+- `inc/owklocksan.h`, `sanitizer/owklocksan.c` - OWKLockSan
+- `inc/owklsan.h`, `sanitizer/owklsan.c` - OWKLSan
+- `inc/owktsan.h`, `sanitizer/owktsan.c` - OWKTSan (shadow happens-before)
+- `sync/ow_sync.c` - instrumentation hooks (create/acquire/release/wait/wake/
+  exit), each gated on the suite switches
+- `core/main.c`, `tools/hosttest/host_boot.c` - the three modules are
+  registered before the suite initialises in boot phase 4f (and its host-
+  harness mirror)
+- `tools/hosttest/host_boot.c` - new `test_owklocksan`, `test_owklsan`,
+  `test_owktsan` suites
+
+### OWKLockSan - what it detects and what it does not
+
+Detects (validated with host-side negative tests):
+- release of a mutex the caller does not own (the kernel previously returned
+  0 silently),
+- recursive acquisition beyond the depth ceiling (16),
+- semaphore release that would exceed its limit (the kernel previously
+  clamped silently),
+- circular-wait (potential deadlock) detection over the mutex wait-for graph:
+  when a thread is about to block, the chain of (wanted object -> owner ->
+  that owner's wanted object) is walked; if it returns to the requesting
+  thread the cycle is reported,
+- mutex abandoned when a thread exits without releasing it (KeOnThreadExit
+  leaves the object half-done),
+- a wait waking on an abandoned mutex.
+
+Does NOT detect, and deliberately does not claim:
+- lock-order inversions that never close a live cycle,
+- deadlocks that do not pass through dispatcher objects (cli/sti sections are
+  not waits),
+- ISR-vs-thread races (the uniprocessor model cannot attribute an interrupt
+  to a distinct thread),
+- detection for code the suite was not asked to check.
+
+The lock-tracking table is a static, bounded 64-record store; ownership is
+tracked per dispatcher object, and the wait-for graph is bounded by
+OW_KLCKSAN_MAX_LOCKS.
+
+### OWKLSan - what it detects and what it does not
+
+OWKLockSan answers "is this lock operation legal?"; OWKLSan answers "is the
+kernel's lock state sane right now?"  It installs no instrumentation of its
+own - it audits OWKLockSan's tracked table.  Detects:
+- held-lock census: tracked records, owned records, deepest recursion depth,
+  abandoned count,
+- locks held at a quiescent point (e.g. just before entering userspace),
+- locks held longer than a tick budget (backdating supported by the test
+  hook),
+- abandoned mutexes.
+
+Does NOT detect: lock order inversions, cli/sti critical sections, priority
+inversion, or anything about why a lock is held.
+
+### OWKTSan - what it detects and what it does not
+
+Shadow-based happens-before detection over the 8 MiB kalloc arena: a global
+synchronization epoch (bumped at dispatcher signal/release operations and
+explicit sync points) plus one 4-byte shadow entry per 8 bytes of heap
+(epoch, accessing tid, write flag).  Two accesses to the same group by
+different threads in the same epoch, with at least one write, report a race.
+
+Detects (validated with host-side negative tests):
+- unsynchronized cross-thread accesses to the same heap group,
+- races across independently scheduled accesses that never cross a
+  synchronization epoch boundary,
+- (detector is report-side only; same-epoch conflicting pairs report once per
+  access).
+
+Does NOT detect, and deliberately does not claim:
+- plain loads/stores that bypass the tracked APIs (no compiler instrumentation
+  exists in this kernel; detection covers the tracked call sites only),
+- accesses outside the kalloc arena,
+- ISR-vs-thread conflicts attributable to distinct threads,
+- epoch wraparound (the epoch wraps at 65536; reports are per-epoch),
+- this is NOT TSan and provides no completeness guarantee.
+
+## Phase 6 onwards - planned
+
 - Phase 6: integration of all modules, regression tests, enabled/disabled
   configurations, documentation updates.
 
@@ -357,15 +439,18 @@ Does NOT detect, and deliberately does not claim:
   (verified with `objdump -r`).
 - Boot wiring: `core/main.c` runs the suite core during boot phase 4f and
   records diagnostic milestone `OW_C_OWKSAN_READY` (`0x0011AC15`); all
-  Phase-2/3/4 modules (heap, page, bounds, MSan, ASan, UbSan, IntSan, InitSan,
-  StackSan) are registered before the suite initialises; a failed registration
-  is advisory and does not halt the machine.  The host boot harness mirrors
-  all registration calls directly (the harness does not execute `_start`, so
-  it replicates the boot sequence).  `boot_begin`/`boot_diag_done`/
-  `boot_diag_failed`/`boot_skip_phase` are all tracked by OWKInitSan.
+  Phase-2 through Phase-5 modules (heap, page, bounds, MSan, ASan, UbSan,
+  IntSan, InitSan, StackSan, LockSan, LSan, TSan) are registered before the
+  suite initialises; a failed registration is advisory and does not halt the
+  machine.  The host boot harness mirrors all registration calls directly
+  (the harness does not execute `_start`, so it replicates the boot sequence).
+  `boot_begin`/`boot_diag_done`/`boot_diag_failed`/`boot_skip_phase` are all
+  tracked by OWKInitSan; the dispatcher paths in `sync/ow_sync.c` are
+  instrumented by OWKLockSan and OWKTSan.
 - Host tests: `test_owksan_core()`, `test_owkheapsan()`, `test_owkpagesan()`,
   `test_owkbounds()`, `test_owkmsan()`, `test_owkasan()`, `test_owkubsan()`,
-  `test_owkintsan()`, `test_owkinitsan()` and `test_owkstacksan()` in
+  `test_owkintsan()`, `test_owkinitsan()`, `test_owkstacksan()`,
+  `test_owklocksan()`, `test_owklsan()` and `test_owktsan()` in
   `tools/hosttest/host_boot.c` exercise the framework and all registered
   modules end to end: boot-ready state, inert default, module
   registration/init, report/counter accounting, waived reports, the FATAL panic
@@ -375,6 +460,9 @@ Does NOT detect, and deliberately does not claim:
   paths, shadow-tracked initialization checks (heap and frame arena),
   use-after-free access checks, quarantine poison verification, UbSan/IntSan
   arithmetic and range checks, InitSan duplicate/order/re-entrant detection,
-  and the stack-guard audit and region checks.  The full suite reports 1797
-  passed, 0 failed; the sanitized build (clang + ASan/UBSan) reports the same;
-  the CMake build of the same harness passes with 1798, 0 failed.
+  the stack-guard audit and region checks, dispatcher-object lock checks
+  (non-owner release, recursion depth, semaphore over-release, circular-wait
+  detection), the lock census/long-hold/quiescent audits, and the TSan
+  shadow-epoch race detector.  The full suite reports 1829 passed, 0 failed;
+  the sanitized build (clang + ASan/UBSan) reports the same; the CMake build
+  of the same harness passes with 1829, 0 failed.

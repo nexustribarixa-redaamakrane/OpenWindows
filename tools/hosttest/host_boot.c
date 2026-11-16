@@ -65,6 +65,10 @@ int test_superunicode_run(int* out_passed);
 #include "../../inc/owkintsan.h"
 #include "../../inc/owkinitsan.h"
 #include "../../inc/owkstacksan.h"
+#include "../../inc/ow_sync.h"
+#include "../../inc/owklocksan.h"
+#include "../../inc/owklsan.h"
+#include "../../inc/owktsan.h"
 #include "../../inc/ow_kprintf.h"
 /* Resolved on the include path, not by relative path: the generated header
  * lives in the build tree -- boot/ under the Makefile, <build>/generated under
@@ -5310,8 +5314,8 @@ static void test_owksan_core(void) {
   printf("\n=== OWKSan Suite (Phase 1 framework core) ===\n");
 
   check_window("OWKSan core is ready after the boot phase", OwKSanReady(), true);
-  check_eq("OWKSan module table holds the nine registered modules", (unsigned long)OwKSanModuleCount(), 9ul);
-  check_eq("OWKSan starts with the registered modules enabled", (unsigned long)OwKSanEnabledModuleCount(), 9ul);
+  check_eq("OWKSan module table holds the twelve registered modules", (unsigned long)OwKSanModuleCount(), 12ul);
+  check_eq("OWKSan starts with the registered modules enabled", (unsigned long)OwKSanEnabledModuleCount(), 12ul);
   check_window("OWKSan master switch defaults to disabled", OwKSanMasterEnabled(), false);
 
   mod.InitOrder = 100u;
@@ -5328,7 +5332,7 @@ static void test_owksan_core(void) {
 
   st = OwKSanRegisterModule(&mod);
   check_eq("OWKSan registers a synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
-  check_eq("OWKSan module table holds the synthetic module", (unsigned long)OwKSanModuleCount(), 10ul);
+  check_eq("OWKSan module table holds the synthetic module", (unsigned long)OwKSanModuleCount(), 13ul);
 
   st = OwKSanGetModule(name, &mod);
   check_eq("the synthetic module is queryable", (unsigned long)st, (unsigned long)OW_SUCCESS);
@@ -5338,7 +5342,7 @@ static void test_owksan_core(void) {
   st = OwKSanEnableModule(name);
   check_eq("OWKSan refuses an unknown module name", (unsigned long)OwKSanEnableModule("OWKNoSuchModule"), (unsigned long)OW_ERR_NOT_FOUND);
   check_eq("OWKSan enables the synthetic module", (unsigned long)st, (unsigned long)OW_SUCCESS);
-  check_eq("OWKSan enabled-module count is ten", (unsigned long)OwKSanEnabledModuleCount(), 10ul);
+  check_eq("OWKSan enabled-module count is thirteen", (unsigned long)OwKSanEnabledModuleCount(), 13ul);
   check_eq("OWKSan initialises the enabled module", (unsigned long)OwKSanInitializeEnabledModules(), (unsigned long)OW_SUCCESS);
   st = OwKSanGetModule(name, &mod);
   check_window("the synthetic module is now inited", mod.Inited, true);
@@ -5385,7 +5389,7 @@ static void test_owksan_core(void) {
   OwKSanShutdown();
   check_window("OWKSan is no longer ready after shutdown", OwKSanReady(), false);
   OwKSanUnregisterModule(name);
-  check_eq("the synthetic module is gone from the table", (unsigned long)OwKSanModuleCount(), 9ul);
+  check_eq("the synthetic module is gone from the table", (unsigned long)OwKSanModuleCount(), 12ul);
 
   check_eq("OWKSan re-initialises to ready", (unsigned long)OwKSanInitialize(), (unsigned long)OW_SUCCESS);
   check_window("OWKSan re-armed off after re-initialisation", OwKSanMasterEnabled(), false);
@@ -5912,6 +5916,167 @@ static void test_owkstacksan(void) {
                (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
     }
   }
+}
+
+static void test_owklocksan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+  OW_KLCKSAN_STATS stats;
+  OW_DISPATCHER_OBJECT *m1;
+  OW_DISPATCHER_OBJECT *m2;
+  uint32_t errors_before;
+
+  printf("\n=== OWKSan Suite (OWKLockSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKLOCKSAN, &mod);
+  check_eq("OWKLockSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKLockSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  m1 = KeCreateMutex("klocksan.test1", 1u); /* initially owned by current thread */
+  check_window("a mutex is created", m1 != (OW_DISPATCHER_OBJECT *)0, true);
+  m2 = KeCreateMutex("klocksan.test2", 0u); /* initially unowned */
+  check_window("a second mutex is created", m2 != (OW_DISPATCHER_OBJECT *)0, true);
+
+  OwKLockSanGetStats(&stats);
+  check_eq("create tracks both mutexes", (unsigned long)stats.Total, 2ul);
+  check_eq("the initial owner is accounted for", (unsigned long)stats.Owned, 1ul);
+
+  /* Recursive acquire: depth tracking works and stays under the ceiling. */
+  (void)KeWaitForSingleObject(m1, OW_TIMEOUT_INFINITE);
+  OwKLockSanGetStats(&stats);
+  check_eq("the recursive acquire is tracked", (unsigned long)stats.Owned, 1ul);
+  check_eq("the recursion depth is tracked", (unsigned long)stats.MaxRecursion, 2ul);
+
+  /* Release from a thread other than the owner must be reported. */
+  errors_before = OwKSanReportCount();
+  OwKLockSanNoteReleaseMutex(m1, 999u); /* caller claims to be tid 999 */
+  check_eq("a release from a non-owner tid is reported", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+
+  /* Semaphore over-release is reported (the layer clamps silently). */
+  {
+    OW_DISPATCHER_OBJECT *sem = KeCreateSemaphore("klocksan.sem", 1u, 4u);
+
+    errors_before = OwKSanReportCount();
+    KeReleaseSemaphore(sem, 4u);   /* state 1 + 4 > limit 4: clamp would hide it */
+    check_eq("a semaphore over-release is reported", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+    (void)KeWaitForSingleObject(sem, 0u); /* clean up one count */
+    (void)KeWaitForSingleObject(sem, 0u);
+  }
+
+  /* Circular-wait detection: tid 2 owns m1, tid 3 owns m2; tid 2 blocks on
+   * m2 (owner 3 is free), then tid 3 blocks on m1 -- that closes the cycle
+   * and must be reported. */
+  OwKLockSanReset();
+  OwKLockSanNoteAcquireMutex(m1, 2u);   /* tid 2 owns m1 */
+  OwKLockSanNoteAcquireMutex(m2, 3u);   /* tid 3 owns m2 */
+  OwKLockSanNoteWillBlock(m2, 2u);      /* tid 2 wants m2: owner 3, not blocked -> no cycle */
+  errors_before = OwKSanReportCount();
+  OwKLockSanNoteWillBlock(m1, 3u);      /* tid 3 wants m1: owner 2 (want=m2) -> owner 3 -> cycle */
+  check_eq("the circular wait is reported", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+
+  OwKLockSanGetStats(&stats);
+  check_eq("the tracked lock count includes the test locks", (unsigned long)stats.Total, 2ul);
+}
+
+static void test_owklsan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+  OW_KLSAN_AUDIT audit;
+  OW_DISPATCHER_OBJECT *held;
+  uint32_t flagged = 0u;
+
+  printf("\n=== OWKSan Suite (OWKLSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKLSAN, &mod);
+  check_eq("OWKLSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKLSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  /* Census on a quiet table. */
+  OwKLockSanReset();
+  st = OwKLSanAuditHeldLocks(&audit);
+  check_eq("the held-lock audit runs", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the quiescent table reports zero held", (unsigned long)audit.Owned, 0ul);
+  check_eq("the quiescent audit passes", (unsigned long)OwKLSanAuditQuiescent("test"),
+           (unsigned long)OW_SUCCESS);
+
+  /* A held mutex is detected by the quiescent audit. */
+  held = KeCreateMutex("klsan.held", 0u); /* created unowned */
+  (void)KeWaitForSingleObject(held, OW_TIMEOUT_INFINITE); /* immediate acquire */
+  st = OwKLSanAuditQuiescent("test");
+  check_eq("a held mutex fails the quiescent audit", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+
+  /* Long-hold detection: backdate the recorded acquisition past the budget. */
+  OwKLockSanTestSetAcquiredAt(held, (uint64_t)-1000);
+  st = OwKLSanAuditLongHolds(100u, &flagged);
+  check_eq("the long-hold audit runs", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the held mutex exceeds the long-hold budget", (unsigned long)flagged, 1ul);
+  st = OwKLSanAuditLongHolds(1000000u, &flagged);
+  check_eq("the held mutex is inside a generous budget", (unsigned long)flagged, 0ul);
+
+  /* Release it; the quiescent audit passes again. */
+  (void)KeReleaseMutex(held);
+  st = OwKLSanAuditQuiescent("test");
+  check_eq("the released mutex passes the quiescent audit", (unsigned long)st,
+           (unsigned long)OW_SUCCESS);
+
+  st = OwKLSanAuditHeldLocks(&audit);
+  check_eq("the census shows zero held after release", (unsigned long)audit.Owned, 0ul);
+}
+
+static void test_owktsan(void) {
+  OW_KSAN_MODULE mod;
+  OW_STATUS st;
+  OW_KTSAN_STATS stats;
+  void *heap;
+  uint32_t errors_before;
+
+  printf("\n=== OWKSan Suite (OWKTSan) ===\n");
+
+  st = OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKTSAN, &mod);
+  check_eq("OWKTSan is registered at boot", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_window("OWKTSan is enabled by default", mod.Enabled, true);
+
+  OwKSanSetMasterEnabled(true);
+
+  OwKTSanReset();
+  heap = kalloc(64);
+  check_window("a heap block is available for tracking", heap != (void *)0, true);
+
+  /* Same-thread access never races. */
+  errors_before = OwKSanReportCount();
+  OwKTSanTrackAccess(heap, 32, true, 3u);
+  OwKTSanTrackAccess(heap, 32, false, 3u);
+  check_eq("same-thread accesses are not reported", (unsigned long)(OwKSanReportCount() - errors_before), 0ul);
+
+  /* Different-thread access in the same epoch races. */
+  errors_before = OwKSanReportCount();
+  OwKTSanTrackAccess(heap, 32, true, 4u);
+  check_eq("an unsynchronized cross-thread write is reported", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+
+  /* The write synchronizes-with the following read across an epoch boundary. */
+  errors_before = OwKSanReportCount();
+  OwKTSanSyncPoint();
+  OwKTSanTrackAccess(heap, 32, true, 3u);
+  OwKTSanSyncPoint();
+  OwKTSanTrackAccess(heap, 32, false, 4u);
+  check_eq("a synchronized cross-thread read is not reported", (unsigned long)(OwKSanReportCount() - errors_before), 0ul);
+
+  /* Two writers in the same epoch race. */
+  errors_before = OwKSanReportCount();
+  OwKTSanSyncPoint();
+  OwKTSanTrackAccess(heap, 32, true, 3u);
+  OwKTSanTrackAccess(heap, 32, true, 4u);
+  check_eq("two unsynchronized writers are reported", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+
+  OwKTSanGetStats(&stats);
+  check_eq("the stats count the accesses", (unsigned long)(stats.Accesses >= 6ull), 1ul);
+  check_eq("the stats count the races", (unsigned long)(stats.Races >= 2ull), 1ul);
+
+  kfree(heap);
 }
 
 static void test_kdb_extensions(void) {
@@ -6815,6 +6980,9 @@ int main(int argc, char **argv) {
   (void)OwKIntSanRegister();
   (void)OwKInitSanRegister();
   (void)OwStackSanRegister();
+  (void)OwKLockSanRegister();
+  (void)OwKLSanRegister();
+  (void)OwKTSanRegister();
 
   st = OwKSanInitialize();
 
@@ -7407,6 +7575,9 @@ int main(int argc, char **argv) {
   test_owkintsan();
   test_owkinitsan();
   test_owkstacksan();
+  test_owklocksan();
+  test_owklsan();
+  test_owktsan();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */

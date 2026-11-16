@@ -94,7 +94,10 @@ SANITIZER_OBJS = sanitizer/owksan_core.o \
                  sanitizer/owkubsan.o \
                  sanitizer/owkintsan.o \
                  sanitizer/owkinitsan.o \
-                 sanitizer/owkstacksan.o
+                 sanitizer/owkstacksan.o \
+                 sanitizer/owklocksan.o \
+                 sanitizer/owklsan.o \
+                 sanitizer/owktsan.o
 
 # Object files - User-mode (ring 3) launcher
 USERMODE_OBJS = usermode/usermode.o
@@ -1212,6 +1215,9 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                sanitizer/owkintsan.c \
                sanitizer/owkinitsan.c \
                sanitizer/owkstacksan.c \
+               sanitizer/owklocksan.c \
+               sanitizer/owklsan.c \
+               sanitizer/owktsan.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
                $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sutf16.c \

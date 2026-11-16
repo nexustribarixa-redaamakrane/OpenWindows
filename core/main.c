@@ -33,6 +33,9 @@
 #include "../inc/owkintsan.h"
 #include "../inc/owkinitsan.h"
 #include "../inc/owkstacksan.h"
+#include "../inc/owklocksan.h"
+#include "../inc/owklsan.h"
+#include "../inc/owktsan.h"
 #include "../storage/owdisk.h"
 #include "../inc/ow_usermode.h"
 #include <stdarg.h>
@@ -606,12 +609,16 @@ void _start(void) {
         OW_STATUS regint = OwKIntSanRegister();
         OW_STATUS reginit = OwKInitSanRegister();
         OW_STATUS regstack = OwStackSanRegister();
+        OW_STATUS reglock = OwKLockSanRegister();
+        OW_STATUS reglsan = OwKLSanRegister();
+        OW_STATUS regtsan = OwKTSanRegister();
 
         if (regheap != OW_SUCCESS || regpage != OW_SUCCESS ||
             regbounds != OW_SUCCESS || regmsan != OW_SUCCESS ||
             regasan != OW_SUCCESS || regub != OW_SUCCESS ||
             regint != OW_SUCCESS || reginit != OW_SUCCESS ||
-            regstack != OW_SUCCESS) {
+            regstack != OW_SUCCESS || reglock != OW_SUCCESS ||
+            reglsan != OW_SUCCESS || regtsan != OW_SUCCESS) {
             OwDiagLogWarning(OW_W_OWKSAN_UNAVAILABLE,
                             "an OWKSan runtime-validation module failed to register");
         }
