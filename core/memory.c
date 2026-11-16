@@ -16,6 +16,59 @@
 static uint8_t g_PhysicalRam[16U * 1024U * 1024U] __attribute__((aligned(4096)));
 static size_t g_RamPointer = 0;
 
+/* ---- OWKSan Phase 2/3: read-only frame-arena registry --------------------
+ * Frame owners register here; OWKPageSan audits the registered arenas instead
+ * of one hardwired backing, so a future (dynamic or re-backed) frame allocator
+ * is validated without the audit knowing anything about it.  The static pool
+ * above registers itself in OwMemInitialize. */
+static OW_FRAME_ARENA_DESC s_FrameArenas[OW_FRAME_ARENA_MAX];
+static uint32_t s_FrameArenaCount;
+
+uint32_t OwMemFrameArenaCount(void) { return s_FrameArenaCount; }
+
+OW_STATUS OwMemFrameArenaGet(uint32_t Index, OW_FRAME_ARENA_DESC* Out) {
+  if (Out == (OW_FRAME_ARENA_DESC*)0) {
+    return OW_ERR_INVALID_PARAM;
+  }
+  if (Index >= s_FrameArenaCount) {
+    return OW_ERR_NOT_FOUND;
+  }
+  *Out = s_FrameArenas[Index];
+  return OW_SUCCESS;
+}
+
+OW_STATUS OwMemFrameArenaRegister(uint64_t Base, uint64_t Bytes,
+                                 const size_t* UsedBytes) {
+  uint32_t i;
+
+  if (Bytes == 0u || Base > ~(uint64_t)0 - Bytes) {
+    return OW_ERR_INVALID_PARAM;
+  }
+  if ((Base & (OW_PAGE_SIZE - 1u)) != 0u) {
+    return OW_ERR_INVALID_PARAM;
+  }
+  if (UsedBytes == (const size_t*)0) {
+    return OW_ERR_INVALID_PARAM;
+  }
+  /* Re-registering the same base replaces the descriptor instead of growing
+   * the table; the owner may re-register after re-initialisation. */
+  for (i = 0u; i < s_FrameArenaCount; ++i) {
+    if (s_FrameArenas[i].Base == Base) {
+      s_FrameArenas[i].Bytes = Bytes;
+      s_FrameArenas[i].UsedBytes = UsedBytes;
+      return OW_SUCCESS;
+    }
+  }
+  if (s_FrameArenaCount >= OW_FRAME_ARENA_MAX) {
+    return OW_ERR_INSUFFICIENT;
+  }
+  s_FrameArenas[s_FrameArenaCount].Base = Base;
+  s_FrameArenas[s_FrameArenaCount].Bytes = Bytes;
+  s_FrameArenas[s_FrameArenaCount].UsedBytes = UsedBytes;
+  s_FrameArenaCount++;
+  return OW_SUCCESS;
+}
+
 /* Firmware physical RAM as reported by the bootloader, in bytes.  Zero means
  * "no memory map was supplied" and is displayed as unknown.  This is NOT the
  * arena size: the arena is the fixed static pool above, and the two numbers are
@@ -55,6 +108,7 @@ static void vad_pool_build(void) {
 OW_STATUS OwMemInitialize(void) {
   g_RamPointer = 0;
   s_CommitTotal = 0;
+  s_FrameArenaCount = 0u;
   vad_pool_build();
 #ifndef OW_HOST_HAL
   /* Capture the running root while CR3 still holds the loader's identity map;
@@ -66,6 +120,10 @@ OW_STATUS OwMemInitialize(void) {
     s_BootPml4 = cr3;
   }
 #endif
+  /* Register the static frame arena: physical base (identity-mapped), full
+   * extent, and the live counter the allocator advances on every allocation. */
+  (void)OwMemFrameArenaRegister((uint64_t)(uintptr_t)g_PhysicalRam,
+                                (uint64_t)sizeof(g_PhysicalRam), &g_RamPointer);
   return OW_SUCCESS;
 }
 
@@ -892,12 +950,9 @@ uint32_t OwMemPagesUsed(void) {
 
 uint32_t OwMemPagesTotal(void) { return (uint32_t)OW_TOTAL_PAGES; }
 
-/* ---- OWKSan Phase 2: read-only frame-arena audit exports -----------------
- * These exist so the OWKPageSan module can check the frame arena from outside
- * without guessing at its layout.  They expose nothing that is writable and
- * reveal nothing the kernel does not already trust. */
-uintptr_t OwMemArenaBase(void) { return (uintptr_t)g_PhysicalRam; }
-
+/* ---- OWKSan: non-RAM window query ---------------------------------------
+ * Platform constants: windows the frame allocator must never hand out because
+ * they are firmware/PCI space, not plain RAM. */
 uint32_t OwMemNonRamWindowCount(void) { return OW_NONRAM_COUNT; }
 
 OW_STATUS OwMemNonRamWindow(uint32_t Index, uint64_t* Lo, uint64_t* Hi) {

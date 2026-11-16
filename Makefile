@@ -84,11 +84,13 @@ KDB_OBJS = kdb/kdb_core.o \
 # Object files - KAPA application facade
 KAPA_OBJS = kapa/kapa_core.o
 
-# Object files - OWKSan Suite (kernel sanitization framework core + Phase 2)
+# Object files - OWKSan Suite (kernel sanitization framework core + Phase 2/3)
 SANITIZER_OBJS = sanitizer/owksan_core.o \
                  sanitizer/owkheapsan.o \
                  sanitizer/owkpagesan.o \
-                 sanitizer/owkbounds.o
+                 sanitizer/owkbounds.o \
+                 sanitizer/owkmsan.o \
+                 sanitizer/owkasan.o
 
 # Object files - User-mode (ring 3) launcher
 USERMODE_OBJS = usermode/usermode.o
@@ -1211,6 +1213,8 @@ sentinel/damagecntrl.c sentinel/fltrmgr.c \
                sanitizer/owkheapsan.c \
                sanitizer/owkpagesan.c \
                sanitizer/owkbounds.c \
+               sanitizer/owkmsan.c \
+               sanitizer/owkasan.c \
                usermode/usermode.c \
                $(BANCODE_DIR)/bancode.c $(BANCODE_DIR)/bancode_trap.c \
                $(SUTF_DIR)/src/sutf8.c $(SUTF_DIR)/src/sutf16.c \

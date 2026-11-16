@@ -91,8 +91,6 @@ OW_STATUS OwKPageSanCheckPte(uint64_t Entry, uint32_t Level) {
 
 OW_STATUS OwKPageSanCheckFrameRange(uint64_t Base, uint32_t Pages) {
     uint64_t base = Base;
-    uint64_t arena = (uint64_t)OwMemArenaBase();
-    uint64_t total_bytes = (uint64_t)OwMemPagesTotal() * OW_PAGE_SIZE;
     uint64_t span;
     uint64_t end;
     uint32_t i;
@@ -116,11 +114,31 @@ OW_STATUS OwKPageSanCheckFrameRange(uint64_t Base, uint32_t Pages) {
     }
     end = base + span;
 
-    if (base < arena || end > arena + total_bytes) {
-        OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKPageSan,
-                     "frame range outside the kernel arena: base=0x%llX pages=%u",
-                     (unsigned long long)base, (unsigned)Pages);
-        return OW_ERR_CORRUPT;
+    {
+        uint32_t arenas = OwMemFrameArenaCount();
+        uint32_t inside = 0u;
+        uint32_t i2;
+
+        if (arenas == 0u) {
+            /* No frame arena has registered: the suite has no arena to hold
+             * the range against, so it cannot pass judgment. */
+            return OW_ERR_NOT_INITIALIZED;
+        }
+        for (i2 = 0u; i2 < arenas; ++i2) {
+            OW_FRAME_ARENA_DESC desc;
+
+            if (OwMemFrameArenaGet(i2, &desc) == OW_SUCCESS &&
+                base >= desc.Base && end <= desc.Base + desc.Bytes) {
+                inside = 1u;
+                break;
+            }
+        }
+        if (!inside) {
+            OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKPageSan,
+                         "frame range outside every registered arena: base=0x%llX pages=%u",
+                         (unsigned long long)base, (unsigned)Pages);
+            return OW_ERR_CORRUPT;
+        }
     }
 
     windows = OwMemNonRamWindowCount();
@@ -141,36 +159,52 @@ OW_STATUS OwKPageSanCheckFrameRange(uint64_t Base, uint32_t Pages) {
 }
 
 OW_STATUS OwKPageSanAudit(OW_PAGESAN_REPORT* Out) {
-    uint32_t total;
-    uint32_t used;
-    uint32_t commit;
-    uint32_t limit;
-    uint64_t arena;
+    uint32_t arenas;
+    uint64_t total_bytes = 0ull;
+    uint64_t used_bytes = 0ull;
+    uint32_t i;
 
     if (Out == (OW_PAGESAN_REPORT*)0) {
         return OW_ERR_INVALID_PARAM;
     }
 
-    total = OwMemPagesTotal();
-    used = OwMemPagesUsed();
-    commit = OwMemCommitTotal();
-    limit = OwMemCommitLimit();
-    arena = (uint64_t)OwMemArenaBase();
-
-    Out->TotalPages = total;
-    Out->UsedPages = used;
-    Out->CommitTotal = commit;
-    Out->CommitLimit = limit;
-    Out->ArenaBytes = (uint64_t)total * OW_PAGE_SIZE;
+    Out->CommitTotal = OwMemCommitTotal();
+    Out->CommitLimit = OwMemCommitLimit();
     Out->Errors = 0u;
 
-    if (used > total) {
-        Out->Errors++;
+    arenas = OwMemFrameArenaCount();
+    if (arenas == 0u) {
+        /* Nothing has registered an arena yet; there is no state to audit. */
+        return OW_ERR_NOT_INITIALIZED;
     }
-    if (commit > limit) {
-        Out->Errors++;
+
+    /* Every registered arena is validated independently; a bad arena does not
+     * hide the health of its siblings. */
+    for (i = 0u; i < arenas; ++i) {
+        OW_FRAME_ARENA_DESC desc;
+        uint64_t used;
+
+        if (OwMemFrameArenaGet(i, &desc) != OW_SUCCESS) {
+            Out->Errors++;
+            continue;
+        }
+        if ((desc.Base & (OW_PAGE_SIZE - 1u)) != 0ull) {
+            Out->Errors++;
+        }
+        used = (uint64_t)*desc.UsedBytes;
+        if (used > desc.Bytes) {
+            Out->Errors++;
+        }
+        total_bytes += desc.Bytes;
+        used_bytes += used;
     }
-    if ((arena & (OW_PAGE_SIZE - 1u)) != 0ull) {
+
+    Out->ArenaCount = arenas;
+    Out->ArenaBytes = total_bytes;
+    Out->TotalPages = (uint32_t)(total_bytes / OW_PAGE_SIZE);
+    Out->UsedPages = (uint32_t)(used_bytes / OW_PAGE_SIZE);
+
+    if (Out->CommitTotal > Out->CommitLimit) {
         Out->Errors++;
     }
     if (Out->Errors != 0u) {

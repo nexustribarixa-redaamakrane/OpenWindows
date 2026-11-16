@@ -269,6 +269,8 @@ set(KERNEL_COMMON_SOURCES
     sanitizer/owkheapsan.c
     sanitizer/owkpagesan.c
     sanitizer/owkbounds.c
+    sanitizer/owkmsan.c
+    sanitizer/owkasan.c
     usermode/usermode.c
     lib/ow_htl.c
     lib/kmem.c

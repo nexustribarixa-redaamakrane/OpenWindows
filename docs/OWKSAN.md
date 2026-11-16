@@ -15,9 +15,9 @@ in-kernel framework the production kernel would consult.
 
 | Component | Responsibility | Phase |
 |---|---|---|
-| OWKAsan | Address-access validation (shadow/redzone/invalid-address) | 3+ |
+| OWKAsan | Address-access validation - implemented (Phase 3) | 3 (done) |
 | OWKUbSan | Undefined-behavior detection (shifts, overflow, alignment, enum, division) | 4+ |
-| OWKMSan | Memory initialization tracking | 3+ |
+| OWKMSan | Memory initialization tracking - implemented (Phase 3) | 3 (done) |
 | OWKTSan | Data-race detection | 5+ |
 | OWKLSan | Lock-state and synchronization diagnostics | 5+ |
 | OWStackSan | Stack integrity and stack-boundary validation | 4+ |
@@ -72,14 +72,18 @@ checks against the live OpenWindows allocator/frame arena.  Files changed:
 - `inc/owkpagesan.h`, `sanitizer/owkpagesan.c` - OWKPageSan
 - `inc/owkbounds.h`, `sanitizer/owkbounds.c` - OWKBoundsSan
 - `inc/owksan.h`, `sanitizer/owksan_core.c` - new `OwKSanIsEnabled` hot-path query
-- `lib/kalloc.h`, `lib/kalloc.c` - shared arena layout constants, read-only
+- `lib/kalloc.h`, `lib/kalloc.c` - **allocator rewrite**: free-list allocation
+  with block magic tags, trailing redzone canaries (0xA5), poison-on-free
+  (0xDD), a bounded 32-block quarantine before reuse, shared arena layout
+  constants (`KALLOC_ALIGN`, `KALLOC_HEADER_SIZE`, `KALLOC_REDZONE`), read-only
   arena walker (`OwKAllocWalk`), arena-containment query (`OwKAllocContains`),
-  and the `OwKHeapSanNoteAlloc`/`OwKHeapSanNoteFree` hooks wired into
-  `kalloc_raw` and `kfree`
-- `core/memory.c`, `inc/ow_memory.h` - read-only frame-arena audit exports
-  (`OwMemArenaBase`, `OwMemNonRamWindowCount`, `OwMemNonRamWindow`)
-- `core/main.c`, `tools/hosttest/host_boot.c` - the three modules are
-  registered before the suite initialises in boot phase 4f (and its host-harness
+  the `OwKHeapSanNoteFree` verdict hook (OK / FOREIGN / DOUBLE) wired into
+  `kfree`, and the frame-arena registration consumed by OWKPageSan
+- `core/memory.c`, `inc/ow_memory.h` - frame-arena registry
+  (`OwMemFrameArenaRegister`/`OwMemFrameArenaGet`/`OwMemFrameArenaCount`); the
+  16 MiB static pool registers itself in `OwMemInitialize`
+- `core/main.c`, `tools/hosttest/host_boot.c` - the modules are registered
+  before the suite initialises in boot phase 4f (and its host-harness
   mirror), so they are enabled at boot but inert while the master switch is off
 - `tools/hosttest/host_boot.c` - new `test_owkheapsan`, `test_owkpagesan`,
   `test_owkbounds` suites
@@ -87,39 +91,41 @@ checks against the live OpenWindows allocator/frame arena.  Files changed:
 ### OWKHeapSan - what it detects and what it does not
 
 Detects (validated with host-side negative tests):
-- header-chain inconsistency in the `lib/kalloc.c` bump arena: walk length not
+- header-chain inconsistency in the `lib/kalloc.c` arena: walk length not
   matching the committed byte counter, zero-sized headers, non-owning walk,
 - payload misalignment (every kalloc payload is 8-byte aligned),
+- header magic corruption (a block whose tag is neither LIVE nor FREE),
+- redzone canary corruption (a trailing write past the payload),
 - `kfree()` of a pointer outside the arena,
-- `kfree()` of an already-freed allocation (double free of a tracked block),
-- `kfree()` of an allocation never tracked while the bounded registry was
-  guaranteed to hold it.
+- `kfree()` of an already-freed block (double free; the block goes to the
+  bounded quarantine and its tag is FREE, so the second free is detected
+  unambiguously - there is no unbounded registry and no overflow blind spot).
 
 Does NOT detect, and deliberately does not claim:
-- use-after-free: `lib/kalloc.c` is a bump allocator that never reuses memory,
-  so a UAF is indistinguishable from a live allocation without allocator changes,
-- payload-content corruption or out-of-arena scribbling,
-- bounds of the 8 MiB arena itself (callers are still responsible),
-- anything before the suite arms its master switch or when the module is
-  disabled (diagnostics are waived, not dropped),
-- detection is limited to a bounded registry (256 entries) and a freed-pointer
-  set; once those overflow, untracked frees are counted, never reported.
+- payload-content corruption that leaves the header and redzone intact,
+- arbitrary out-of-bounds writes that land inside a live block (no shadow, no
+  per-access checking at arbitrary call sites),
+- use-after-free reads/writes that never call the allocator or the checked
+  access APIs (see OWKAsan for the checked-API surface),
+- memory leaks (every block is live until kfree; reachability is untracked).
 
 ### OWKPageSan - what it detects and what it does not
 
 Detects (validated with host-side negative tests):
-- frame ranges that are unaligned, wrap the address space, fall outside the
-  kernel frame arena, or overlap the non-RAM holes the allocator skips,
+- frame ranges that are unaligned, wrap the address space, fall outside every
+  registered arena, or overlap the non-RAM holes the allocator skips,
 - raw leaf page-table entries that violate LA48 structure: reserved bits
   [62:52], reserved bits [10:9], a 4K leaf with the `PS` bit set, a huge-page
   frame base unaligned to its page size,
-- frame-allocator invariant violations visible via public state: used pages
-  exceeding the pool, committed charge exceeding the commit ceiling, arena base
-  misalignment.
+- frame-allocator invariant violations visible via registered-arena state:
+  committed bytes exceeding the arena extent, arena base misalignment,
+  committed charge exceeding the commit ceiling.
 
 Does NOT detect, and deliberately does not claim:
 - CPU walk faults or page-table aliasing bugs (no CR3 walk is performed),
 - correctness of address-space sharing between processes,
+- defects of an arena that never registered itself (the audit is registry-driven;
+  an arena with no owner is invisible to it),
 - whether the allocator skipped the right non-RAM windows (only that handed-out
   frames never overlap them),
 - virtual-translation correctness on hosts without page tables (the host HAL
@@ -137,7 +143,78 @@ Detects:
 Does NOT detect: compiler-generated bounds violations, mis-stated capacities,
 or anything about the contents copied.
 
-## Phase 3 onwards - planned
+## Phase 3 - Memory access instrumentation: implemented
+
+Phase 3 delivers OWKMSan and OWKAsan, plus the allocator instrumentation that
+makes them meaningful.  Files changed:
+
+- `inc/owkmsan.h`, `sanitizer/owkmsan.c` - OWKMSan (shadow tracking)
+- `inc/owkasan.h`, `sanitizer/owkasan.c` - OWKAsan (access validation)
+- `lib/kalloc.h`, `lib/kalloc.c` - block magic tags, trailing redzone canaries,
+  poison-on-free, bounded 32-block quarantine (FIFO promotion to the free list),
+  read-only arena walker and quarantine/block-find exports
+- `core/main.c`, `tools/hosttest/host_boot.c` - both modules registered before
+  the suite initialises in phase 4f (and the host-harness mirror)
+- `tools/hosttest/host_boot.c` - new `test_owkmsan` and `test_owkasan` suites
+
+### OWKMSan - what it detects and what it does not
+
+One shadow byte per 8 arena bytes; bit i marks payload byte (8g+i) as
+uninitialized.  The shadow covers the kalloc arena only; non-heap memory is
+outside the tracking domain.
+
+Detects (validated with host-side negative tests):
+- reads of uninitialized bytes of a kalloc'd block (at the time the check is
+  performed, i.e. at checked call sites),
+- reads of a freed block (freed memory is marked uninitialized again),
+- krealloc copies propagate initialization exactly (the growth half of a
+  re-allocated block reads uninitialized until it is explicitly marked),
+- zero-initialized allocations (kcalloc) read clean.
+
+Does NOT detect, and deliberately does not claim:
+- reads of uninitialized stack, statics, MMIO or non-heap globals,
+- out-of-bounds reads at arbitrary call sites (no compiler instrumentation
+  exists in this kernel; tracking is allocation- and check-driven only),
+- correctness of writes that "initialize" memory, or the moment of the write
+  (write tracking is intentionally not a finding class; the API contract is
+  that callers mark initialization with `OwKMSanMarkInit`/`kcalloc`),
+- non-heap frees,
+- anything before the master switch is armed or when the module is disabled
+  (shadow operations are skipped; checks report OW_SUCCESS as "not tracked").
+
+### OWKAsan - what it detects and what it does not
+
+ASan-style, allocator-integrated validation over the kalloc arena: block magic
+tags, redzone canaries, poison-on-free, bounded quarantine.
+
+Detects (validated with host-side negative tests):
+- use-after-free access through the checked access APIs (`OwKAsanCheckRead` /
+  `OwKAsanCheckWrite`): the block's tag is FREE, and the access is reported,
+- heap accesses that cross a block boundary into the redzone or a neighbouring
+  block (at checked call sites),
+- trailing buffer overflows that corrupt the redzone canary (audit-time),
+- writes into freed memory: a stale write overwrites the 0xDD poison; the
+  quarantine integrity sweep at audit time detects any deviation from poison,
+  including a single byte,
+- freed blocks whose redzone was corrupted after free (audit-time).
+
+Does NOT detect, and deliberately does not claim:
+- arbitrary out-of-bounds loads/stores outside the checked APIs (no compiler
+  instrumentation exists in this kernel),
+- use-after-free through raw pointers that never call the checked APIs,
+- stack/global buffer overflows,
+- it is NOT ASan-compatible: no shadow, no global instrumentation, no
+  interposition of loads/stores; allocation-time bookkeeping plus API-boundary
+  validation only,
+- quarantine is bounded (32 blocks, FIFO); once full, the oldest freed block
+  becomes reusable and stale-pointer writes to it are no longer observable.
+
+## Phase 4 onwards - planned
+
+- Phase 4: `OWKUbSan`, `OWKIntSan`, `OWKInitSan`, `OWStackSan`.
+- Phase 5: `OWKTSan`, `OWKLSan`, `OWKLockSan`.
+- Phase 6: integration of all modules, regression tests, enabled/disabled
+  configurations, documentation updates.
 
 ## Quality constraints honoured by the Phase-1 core
 
@@ -161,16 +238,20 @@ or anything about the contents copied.
 - Build wiring: `Makefile` (`SANITIZER_OBJS`, `ALL_OBJS`, pattern rule,
   `HOSTTEST_SRC`) and `CMakeLists.txt` (`KERNEL_COMMON_SOURCES`).
 - Boot wiring: `core/main.c` runs the suite core during boot phase 4f and records
-  diagnostic milestone `OW_C_OWKSAN_READY` (`0x0011AC15`); the three Phase-2
-  modules are registered before the suite initialises (a failed registration is
-  advisory and does not halt the machine).  The host boot harness
-  (`tools/hosttest/host_boot.c`) mirrors both calls directly (the harness does
-  not execute `_start`, so it replicates the boot sequence).
-- Host tests: `test_owksan_core()`, `test_owkheapsan()`, `test_owkpagesan()` and
-  `test_owkbounds()` in `tools/hosttest/host_boot.c` exercise the framework and
-  the three Phase-2 modules end to end: boot-ready state, inert default, module
+  diagnostic milestone `OW_C_OWKSAN_READY` (`0x0011AC15`); the Phase-2 and
+  Phase-3 modules are registered before the suite initialises (a failed
+  registration is advisory and does not halt the machine).  The host boot
+  harness (`tools/hosttest/host_boot.c`) mirrors all calls directly (the
+  harness does not execute `_start`, so it replicates the boot sequence).
+- Host tests: `test_owksan_core()`, `test_owkheapsan()`, `test_owkpagesan()`,
+  `test_owkbounds()`, `test_owkmsan()` and `test_owkasan()` in
+  `tools/hosttest/host_boot.c` exercise the framework and all registered
+  modules end to end: boot-ready state, inert default, module
   registration/init, report/counter accounting, waived reports, the FATAL panic
-  path, a deliberate arena-header corruption that the arena audit catches, PTE
+  path, frame-arena registration and invariant audit, a deliberate
+  arena-header and redzone-canary corruption that the audit catches, PTE
   LA48 structural violations, frame-range refusal cases, bounds/copy negative
-  paths.  The full suite now reports 1690 passed, 0 failed, and the sanitized
-  build (clang + ASan/UBSan) reports the same.
+  paths, shadow-tracked initialization checks, use-after-free access checks,
+  and quarantine poison verification.  The full suite now reports
+  1728 passed, 0 failed, and the sanitized build (clang + ASan/UBSan) reports
+  the same.

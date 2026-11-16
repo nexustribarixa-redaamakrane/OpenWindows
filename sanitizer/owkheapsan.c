@@ -1,33 +1,17 @@
-/* owkheapsan.c - OWKHeapSan: kernel heap integrity diagnostics (Phase 2) */
+/* owkheapsan.c - OWKHeapSan: kernel heap integrity diagnostics (Phase 2+) */
 #include "../inc/owkheapsan.h"
 #include "../lib/kalloc.h"
 
-typedef struct _OW_KHEAPSAN_ENTRY {
-    const void* Ptr;
-    size_t Size;
-    bool Used;
-} OW_KHEAPSAN_ENTRY;
-
-/* Live-allocation registry: bounded snapshot of every allocation observed since
- * the last reset.  It exists so kfree() can be checked against what the
- * allocator actually handed out. */
-static OW_KHEAPSAN_ENTRY g_Registry[OW_KHEAPSAN_REGISTRY_MAX];
-/* Freed-pointer set: bounded snapshot of frees since the last reset, used to
- * report double-free of a tracked block. */
-static OW_KHEAPSAN_ENTRY g_Freed[OW_KHEAPSAN_REGISTRY_MAX];
 static uint32_t g_ForeignFreeCount;
-static uint32_t g_UntrackedFreeCount;
 static uint32_t g_DoubleFreeCount;
-static bool g_RegistryOverflow;
-static bool g_FreedOverflow;
 
 static int owkheap_init(void) {
-    OwKHeapSanRegistryReset();
+    OwKHeapSanReset();
     return (int)OW_SUCCESS;
 }
 
 static void owkheap_shutdown(void) {
-    /* The registry is a bounded snapshot, not a resource to release. */
+    /* Read-only counters/canaries; nothing to release. */
 }
 
 static OW_KSAN_MODULE g_HeapModule = {
@@ -48,29 +32,47 @@ OW_STATUS OwKHeapSanRegister(void) {
 typedef struct _OW_KHEAPSAN_WALK_CTX {
     uint64_t Sum;
     uint32_t Blocks;
+    uint32_t Live;
+    uint32_t Free;
     uint32_t Errors;
 } OW_KHEAPSAN_WALK_CTX;
 
 static int owkheap_walk(const void* Block, size_t Size, const void* Payload,
-                        void* Ctx) {
+                        uint64_t Magic, void* Ctx) {
     OW_KHEAPSAN_WALK_CTX* ctx = (OW_KHEAPSAN_WALK_CTX*)Ctx;
     size_t aligned;
     uintptr_t payload = (uintptr_t)Payload;
+    const uint8_t* redzone;
+    uint32_t i;
 
     (void)Block;
 
-    /* Every payload address the allocator returns is 8-byte aligned. */
     if ((payload & ((uintptr_t)KALLOC_ALIGN - 1u)) != 0u) {
         ctx->Errors++;
     }
     if (Size == 0u) {
-        /* An intact block never carries a zero size; stop rather than
-         * accumulate garbage into the walk. */
+        /* An intact block never carries a zero size. */
         ctx->Errors++;
         return 0;
     }
     aligned = (Size + ((size_t)KALLOC_ALIGN - 1u)) & ~(size_t)(KALLOC_ALIGN - 1u);
-    ctx->Sum += (uint64_t)KALLOC_HEADER_SIZE + (uint64_t)aligned;
+    if (Magic != KALLOC_MAGIC_LIVE && Magic != KALLOC_MAGIC_FREE) {
+        ctx->Errors++;
+    } else if (Magic == KALLOC_MAGIC_LIVE) {
+        ctx->Live++;
+    } else {
+        ctx->Free++;
+    }
+    /* Every block carries a 16-byte 0xA5 redzone right after its payload. */
+    redzone = (const uint8_t*)Payload + aligned;
+    for (i = 0u; i < KALLOC_REDZONE; ++i) {
+        if (redzone[i] != KALLOC_REDZONE_BYTE) {
+            ctx->Errors++;
+            break;
+        }
+    }
+
+    ctx->Sum += (uint64_t)KALLOC_HEADER_SIZE + (uint64_t)aligned + KALLOC_REDZONE;
     ctx->Blocks++;
     return 1;
 }
@@ -86,6 +88,8 @@ OW_STATUS OwKHeapSanAuditArena(OW_KHEAPSAN_REPORT* Out) {
 
     ctx.Sum = 0u;
     ctx.Blocks = 0u;
+    ctx.Live = 0u;
+    ctx.Free = 0u;
     ctx.Errors = 0u;
 
     OwKAllocWalk(owkheap_walk, &ctx);
@@ -94,10 +98,11 @@ OW_STATUS OwKHeapSanAuditArena(OW_KHEAPSAN_REPORT* Out) {
 
     Out->BytesWalked = walked;
     Out->Blocks = ctx.Blocks;
-    Out->Errors = ctx.Errors;
+    Out->LiveBlocks = ctx.Live;
+    Out->FreeBlocks = ctx.Free;
     Out->ForeignFrees = g_ForeignFreeCount;
-    Out->UntrackedFrees = g_UntrackedFreeCount;
     Out->DoubleFrees = g_DoubleFreeCount;
+    Out->Errors = ctx.Errors;
 
     if (walked != used) {
         /* Header chain length mismatch: either a header was overwritten or the
@@ -117,10 +122,11 @@ OW_STATUS OwKHeapSanAuditArena(OW_KHEAPSAN_REPORT* Out) {
 typedef struct _OW_KHEAPSAN_FIND_CTX {
     const void* Target;
     bool Found;
+    bool Live;
 } OW_KHEAPSAN_FIND_CTX;
 
 static int owkheap_find(const void* Block, size_t Size, const void* Payload,
-                        void* Ctx) {
+                        uint64_t Magic, void* Ctx) {
     OW_KHEAPSAN_FIND_CTX* ctx = (OW_KHEAPSAN_FIND_CTX*)Ctx;
 
     (void)Block;
@@ -128,12 +134,13 @@ static int owkheap_find(const void* Block, size_t Size, const void* Payload,
 
     if (Payload == ctx->Target) {
         ctx->Found = true;
-        return 0; /* stop the walk */
+        ctx->Live = (Magic == KALLOC_MAGIC_LIVE);
+        return 0; /* stop */
     }
     return 1;
 }
 
-bool OwKHeapSanValidateBlock(const void* Ptr) {
+static bool owkheap_find_live(const void* Ptr, bool* OutLive) {
     OW_KHEAPSAN_FIND_CTX ctx;
 
     if (Ptr == (const void*)0 || !OwKAllocContains(Ptr)) {
@@ -141,138 +148,61 @@ bool OwKHeapSanValidateBlock(const void* Ptr) {
     }
     ctx.Target = Ptr;
     ctx.Found = false;
+    ctx.Live = false;
     (void)OwKAllocWalk(owkheap_find, &ctx);
+    if (OutLive) {
+        *OutLive = ctx.Live;
+    }
     return ctx.Found;
 }
 
+bool OwKHeapSanValidateBlock(const void* Ptr) {
+    return owkheap_find_live(Ptr, (void*)0);
+}
+
 bool OwKHeapSanIsTracked(const void* Ptr) {
-    uint32_t i;
+    bool live = false;
 
-    if (Ptr == (const void*)0) {
-        return false;
-    }
-    for (i = 0u; i < OW_KHEAPSAN_REGISTRY_MAX; ++i) {
-        if (g_Registry[i].Used && g_Registry[i].Ptr == Ptr) {
-            return true;
-        }
-    }
-    return false;
+    return owkheap_find_live(Ptr, &live) && live;
 }
 
-void OwKHeapSanNoteAlloc(const void* Ptr, size_t Size) {
-    uint32_t i;
-
+void OwKHeapSanNoteFree(const void* Ptr, uint32_t Verdict) {
     if (Ptr == (const void*)0) {
         return;
     }
     if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKHEAPSAN)) {
         return;
     }
-    for (i = 0u; i < OW_KHEAPSAN_REGISTRY_MAX; ++i) {
-        if (!g_Registry[i].Used) {
-            g_Registry[i].Ptr = Ptr;
-            g_Registry[i].Size = Size;
-            g_Registry[i].Used = true;
-            return;
-        }
-    }
-    g_RegistryOverflow = true;
-}
-
-static bool owkheap_in_freed(const void* Ptr) {
-    uint32_t i;
-
-    for (i = 0u; i < OW_KHEAPSAN_REGISTRY_MAX; ++i) {
-        if (g_Freed[i].Used && g_Freed[i].Ptr == Ptr) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static void owkheap_note_freed(const void* Ptr) {
-    uint32_t i;
-
-    for (i = 0u; i < OW_KHEAPSAN_REGISTRY_MAX; ++i) {
-        if (!g_Freed[i].Used) {
-            g_Freed[i].Ptr = Ptr;
-            g_Freed[i].Size = 0u;
-            g_Freed[i].Used = true;
-            return;
-        }
-    }
-    g_FreedOverflow = true;
-}
-
-void OwKHeapSanNoteFree(const void* Ptr) {
-    uint32_t i;
-
-    if (Ptr == (const void*)0) {
-        return;
-    }
-    if (!OwKSanIsEnabled(OW_KSAN_MODULE_NAME_OWKHEAPSAN)) {
-        return;
-    }
-    /* Tracked live allocation: a legitimate free. */
-    for (i = 0u; i < OW_KHEAPSAN_REGISTRY_MAX; ++i) {
-        if (g_Registry[i].Used && g_Registry[i].Ptr == Ptr) {
-            g_Registry[i].Used = false;
-            owkheap_note_freed(Ptr);
-            return;
-        }
-    }
-    /* Not live.  Pointer outside the arena is a foreign pointer, full stop. */
-    if (!OwKAllocContains(Ptr)) {
+    switch (Verdict) {
+    case KALLOC_FREE_FOREIGN:
         g_ForeignFreeCount++;
         OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKHEAPSAN,
                      "kfree of pointer outside the kernel arena: %p", Ptr);
-        return;
-    }
-    /* Pointer inside the arena but not a live tracked allocation.  If this is a
-     * block we have already freed, that is a double free. */
-    if (owkheap_in_freed(Ptr)) {
+        break;
+    case KALLOC_FREE_DOUBLE:
         g_DoubleFreeCount++;
         OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKHEAPSAN,
                      "kfree of an already-freed allocation: %p", Ptr);
-        return;
+        break;
+    default:
+        break;
     }
-    if (!g_RegistryOverflow && !g_FreedOverflow) {
-        /* Both sets never filled: every arena allocation and every free was
-         * tracked, so this is a genuine invalid free, not a blind spot. */
-        g_UntrackedFreeCount++;
-        OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKHEAPSAN,
-                     "kfree of untracked arena allocation: %p", Ptr);
-        return;
-    }
-    g_UntrackedFreeCount++;
 }
 
-void OwKHeapSanRegistryReset(void) {
-    uint32_t i;
-
-    for (i = 0u; i < OW_KHEAPSAN_REGISTRY_MAX; ++i) {
-        g_Registry[i].Used = false;
-        g_Registry[i].Ptr = (const void*)0;
-        g_Registry[i].Size = 0u;
-        g_Freed[i].Used = false;
-        g_Freed[i].Ptr = (const void*)0;
-        g_Freed[i].Size = 0u;
-    }
-    g_RegistryOverflow = false;
-    g_FreedOverflow = false;
+void OwKHeapSanReset(void) {
     g_ForeignFreeCount = 0u;
-    g_UntrackedFreeCount = 0u;
     g_DoubleFreeCount = 0u;
 }
 
-uint32_t OwKHeapSanTrackedCount(void) {
-    uint32_t i;
-    uint32_t n = 0u;
+uint32_t OwKHeapSanLiveCount(void) {
+    OW_KHEAPSAN_WALK_CTX ctx;
 
-    for (i = 0u; i < OW_KHEAPSAN_REGISTRY_MAX; ++i) {
-        if (g_Registry[i].Used) {
-            n++;
-        }
-    }
-    return n;
+    ctx.Sum = 0u;
+    ctx.Blocks = 0u;
+    ctx.Live = 0u;
+    ctx.Free = 0u;
+    ctx.Errors = 0u;
+
+    (void)OwKAllocWalk(owkheap_walk, &ctx);
+    return ctx.Live;
 }

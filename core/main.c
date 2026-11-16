@@ -27,6 +27,8 @@
 #include "../inc/owkheapsan.h"
 #include "../inc/owkpagesan.h"
 #include "../inc/owkbounds.h"
+#include "../inc/owkmsan.h"
+#include "../inc/owkasan.h"
 #include "../storage/owdisk.h"
 #include "../inc/ow_usermode.h"
 #include <stdarg.h>
@@ -578,15 +580,18 @@ void _start(void) {
      * a broken sanitizer must never take the main kernel down on its own. */
     boot_begin("KSAN Init");
     {
-        /* Phase 2 diagnostics register before the suite initialises so the
+        /* Phase 2/3 diagnostics register before the suite initialises so the
          * enabled-module pass picks them up; a failed registration is a warning,
          * not a boot failure. */
         OW_STATUS regheap = OwKHeapSanRegister();
         OW_STATUS regpage = OwKPageSanRegister();
         OW_STATUS regbounds = OwKBoundsSanRegister();
+        OW_STATUS regmsan = OwKMSanRegister();
+        OW_STATUS regasan = OwKAsanRegister();
 
         if (regheap != OW_SUCCESS || regpage != OW_SUCCESS ||
-            regbounds != OW_SUCCESS) {
+            regbounds != OW_SUCCESS || regmsan != OW_SUCCESS ||
+            regasan != OW_SUCCESS) {
             OwDiagLogWarning(OW_W_OWKSAN_UNAVAILABLE,
                             "an OWKSan memory diagnostic module failed to register");
         }

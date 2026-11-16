@@ -81,8 +81,22 @@ OW_VAD_NODE* OwMemFindVad(OW_VAD_NODE* Root, uint64_t Address);
 void         OwMemWalkPml4(uint64_t VirtualAddress);
 uint32_t     OwMemPagesUsed(void);
 uint32_t     OwMemPagesTotal(void);
-/* Read-only frame-arena audit exports (OWKPageSan Phase 2). */
-uintptr_t    OwMemArenaBase(void);
+/* ---- OWKSan Phase 2/3: read-only frame-arena registry -------------------
+ * Any frame-arena owner registers its arena here (the 16 MiB static pool at
+ * OwMemInitialize, and any future dynamic allocator).  OWKPageSan audits the
+ * registered arenas rather than one hardwired backing. */
+#define OW_FRAME_ARENA_MAX 4u
+typedef struct _OW_FRAME_ARENA_DESC {
+    uint64_t Base;          /* physical base, identity-mapped              */
+    uint64_t Bytes;         /* arena extent in bytes                       */
+    const size_t* UsedBytes;/* live committed-byte counter, owner-maintained */
+} OW_FRAME_ARENA_DESC;
+
+uint32_t     OwMemFrameArenaCount(void);
+OW_STATUS    OwMemFrameArenaGet(uint32_t Index, OW_FRAME_ARENA_DESC* Out);
+OW_STATUS    OwMemFrameArenaRegister(uint64_t Base, uint64_t Bytes,
+                                     const size_t* UsedBytes);
+/* Read-only frame-arena audit exports (OWKPageSan). */
 uint32_t     OwMemNonRamWindowCount(void);
 OW_STATUS    OwMemNonRamWindow(uint32_t Index, uint64_t* Lo, uint64_t* Hi);
 
