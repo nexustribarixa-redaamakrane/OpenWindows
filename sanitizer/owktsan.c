@@ -57,7 +57,10 @@ void OwKTSanSyncPoint(void) {
     g_SyncCount++;
     g_Epoch++;
     if (g_Epoch > 0xFFFFu) {
-        g_Epoch = 1u; /* wrap; epoch equality still only compares within an epoch */
+        g_Epoch = 1u;
+        /* Epoch wrap would make stale entries compare equal to new epochs;
+         * invalidate the whole shadow instead of wrapping. */
+        ow_memset(g_Shadow, 0, sizeof g_Shadow);
     }
 }
 

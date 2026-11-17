@@ -205,7 +205,8 @@ Does NOT detect, and deliberately does not claim:
 - arbitrary out-of-bounds loads/stores outside the checked APIs (no compiler
   instrumentation exists in this kernel),
 - use-after-free through raw pointers that never call the checked APIs,
-- stack/global buffer overflows,
+- stack/global buffer overflows in unprotected functions and non-stack-global
+  arrays (stack arrays in instrumented functions are canary-protected),
 - it is NOT ASan-compatible: no shadow, no global instrumentation, no
   interposition of loads/stores; allocation-time bookkeeping plus API-boundary
   validation only,
@@ -286,8 +287,11 @@ Detects (validated with host-side negative tests):
 Does NOT detect, and deliberately does not claim:
 - access-to-uninitialized-subsystem enforcement inside subsystem code: no
   in-tree caller consumes the query API yet (`OwKInitSanIsInitialized`,
-  `OwKInitSanRequireInitialized`, `OwKInitSanPhaseFailed`); the API and its
-  tests exist, wiring call sites is a separate change,
+  `OwKInitSanRequireInitialized`, `OwKInitSanPhaseFailed`); wiring one into
+  the shared call paths breaks the host harness (which never runs `_start` and
+  therefore tracks no phases), and wiring one into `_start` is redundant with
+  the runlevel-consistency gates already at the userspace boundary; the API
+  and its tests exist, wiring consumer call sites is a separate change,
 - data-level initialization tracking (this tracks subsystem state, not whether
   a particular variable was written),
 - dependency graphs beyond the ordering rule above.
@@ -398,10 +402,60 @@ Does NOT detect, and deliberately does not claim:
 - epoch wraparound (the epoch wraps at 65536; reports are per-epoch),
 - this is NOT TSan and provides no completeness guarantee.
 
-## Phase 6 onwards - planned
+## Phase 6 - Integration and verification: implemented
 
-- Phase 6: integration of all modules, regression tests, enabled/disabled
-  configurations, documentation updates.
+Phase 6 integrated the suite end to end and hardened it:
+- All 12 modules are registered at boot phase 4f (kernel and host-harness
+  mirrors); the suite is armed by default only while a test wants it armed.
+- Regression tests for the defects found during development: middle-insert
+  module registration (the phase-5 gate's root cause), the Tid-0 sentinel
+  class (the System thread is tid 0), and lock-order inversion detection
+  (new in this phase).
+- Enabled/disabled configurations tested: suite-level disarm waives reports
+  without counter drift; per-module disable/re-enable tested.
+- Diagnostic reporting verified: the installable panic hook receives
+  Module/Detail/Status intact, the built-in sink path works, FATAL counters
+  and the severity name/status mappings are stable.
+- A latent toolchain issue was fixed: the emergency PE/OWX rules now always
+  use gcc, so `make hosttest-asan CC=clang` no longer fails at the image
+  build step (the PE packer flow is gcc-oriented and lld-link rejects `-e`).
+- QEMU boot validation passes (34 checks) with the full instrumented suite
+  in the real `_start` path.
+
+## Per-module overhead and dependencies
+
+For each module: memory overhead (static), the hot-path cost when armed and
+when disarmed, and dependencies.
+
+| Module | Static storage | Disarmed cost | Armed cost | Depends on |
+|---|---|---|---|---|
+| OWKAsan | ~8 KB tables + quarantine | one predictable branch | lookup + visit per alloc/free/access | OWKSan core, lib/kalloc.c hooks |
+| OWKHeapSan | 64-record table (~2 KB) | one predictable branch | arena walk on audit (O(nblocks)) | lib/kalloc.c walker |
+| OWKPageSan | none (reads allocator state) | one predictable branch | per-entry PTE decode; arena audit | registered arenas |
+| OWKBoundsSan | none (stateless) | one predictable branch | span arithmetic per checked call | OWKSan core |
+| OWKMSan | 3 MiB shadow | one predictable branch | shadow lookup per checked access | lib/kalloc.c, frame-arena hooks |
+| OWKTSan | 4 MiB shadow | one predictable branch | shadow update per tracked access (2M groups) | OWKSan core, heap arena |
+| OWKUbSan | none (stateless) | one predictable branch | builtin-overflow per checked op | OWKSan core |
+| OWKIntSan | none (stateless) | one predictable branch | builtin-overflow per checked op | OWKSan core |
+| OWKInitSan | 48-slot table (~2 KB) | one predictable branch | per-phase track (boot sequence only) | OWKSan core |
+| OWKLockSan | 64-record table (~4 KB) + 512 B edge matrix | one predictable branch | lookup + graph walk at block time | OWKSan core, sync layer |
+| OWKLSan | none extra (reads LockSan table) | one predictable branch | audit-time walk (O(nblocks)) | OWKLockSan read-only table |
+| OWStackSan | guard symbol only | one predictable branch | audit-time compare; per-frame canary check | compiler stack protector + OWKSan core |
+
+All modules: freestanding, no locks (single-threaded uniprocessor scope),
+report through the OWKSan core only; nothing reports when its module or the
+master switch is disabled.
+
+## Suite status
+
+All twelve components are implemented and tested: framework (Phase 1),
+memory diagnostics (Phase 2), memory access instrumentation (Phase 3),
+runtime validation (Phase 4), concurrency diagnostics (Phase 5), and
+integration/verification (Phase 6). The suite boots inert (master off),
+registers every module at phase 4f, and passes the host harness with
+the full negative-test corpus included. Honest limits remain documented
+per module; the suite does not claim compiler-instrumented memory
+instrumentation for arbitrary loads and stores.
 
 ## Quality constraints honoured by the Phase-1 core
 
@@ -462,7 +516,12 @@ Does NOT detect, and deliberately does not claim:
   arithmetic and range checks, InitSan duplicate/order/re-entrant detection,
   the stack-guard audit and region checks, dispatcher-object lock checks
   (non-owner release, recursion depth, semaphore over-release, circular-wait
-  detection), the lock census/long-hold/quiescent audits, and the TSan
-  shadow-epoch race detector.  The full suite reports 1829 passed, 0 failed;
-  the sanitized build (clang + ASan/UBSan) reports the same; the CMake build
-  of the same harness passes with 1829, 0 failed.
+  detection, lock-order inversion detection), the lock census/long-hold/quiescent
+  audits, and the TSan shadow-epoch race detector.  Phase-6 suites add:
+  `test_owksan_regressions` (middle-insert module ordering incl. the
+  Tid-0/acquire-order trap), `test_owksan_suite_toggles` (armed/disarmed suite
+  and per-module disable/re-enable), `test_owksan_reporting` (custom panic hook
+  capture, FATAL counter accounting, severity-name and severity-to-status
+  mappings).  The full suite reports 1860 passed, 0 failed; the sanitized
+  build (clang + ASan/UBSan) reports the same; the CMake build of the same
+  harness passes with 1861, 0 failed; QEMU boot validation passes (34 checks).

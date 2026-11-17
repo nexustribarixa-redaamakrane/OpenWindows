@@ -23,10 +23,9 @@
  *   - accesses to memory outside the kalloc arena are untracked,
  *   - interrupt-vs-thread races cannot be attributed to distinct threads
  *     (an ISR sees the interrupted thread's tid),
- *   - the global epoch wraps at 65536; conflicts are reported per epoch, so
- *     an unlucky wrap can produce a duplicate or missed report,
  *   - this is not TSan-compatible and provides no false-negative guarantees
- *     for code that does not go through the tracked paths.
+ *     for code that does not go through the tracked paths.  The epoch does
+ *     not wrap: on overflow the shadow is invalidated and epochs restart.
  */
 #ifndef OW_KTSAN_H
 #define OW_KTSAN_H

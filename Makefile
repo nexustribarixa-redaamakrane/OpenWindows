@@ -634,13 +634,15 @@ boot/owchk_seed.o: boot/owchk_seed.c storage/owdisk.h inc/ow_sentinel.h
 # OWowinitv_IMAGE_SIZE would compile, and then fail on the first include of the
 # header -- at the include site, far from the rule that got it wrong.
 $(EMERGENCY_DIR)/owinitv.owx: $(EMERGENCY_DIR)/owinitv.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py tools/cis_block.py $(CIS_STAMP)
-	$(CC) $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owinitv.o
-	$(CC) $(EMERGENCY_CFLAGS) -Wl,-e,owinitv_main -o $(EMERGENCY_DIR)/owinitv.pe $(EMERGENCY_DIR)/owinitv.o
+	# Always gcc: the PE packer flow is gcc-oriented, and overriding CC to
+	# another driver (e.g. the clang used for hosttest-asan) breaks it.
+	gcc $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owinitv.o
+	gcc $(EMERGENCY_CFLAGS) -Wl,-e,owinitv_main -o $(EMERGENCY_DIR)/owinitv.pe $(EMERGENCY_DIR)/owinitv.o
 	python tools/owx_pack.py $(EMERGENCY_DIR)/owinitv.pe $@ --subsystem 0x05 $(OWX_SIGN_ARGS)
 
 $(EMERGENCY_DIR)/owrs.owx: $(EMERGENCY_DIR)/owrs.c $(EMERGENCY_DIR)/ow_gate.h tools/owx_pack.py tools/cis_block.py $(CIS_STAMP)
-	$(CC) $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owrs.o
-	$(CC) $(EMERGENCY_CFLAGS) -Wl,-e,owrs_main -o $(EMERGENCY_DIR)/owrs.pe $(EMERGENCY_DIR)/owrs.o
+	gcc $(EMERGENCY_CFLAGS) -c $< -o $(EMERGENCY_DIR)/owrs.o
+	gcc $(EMERGENCY_CFLAGS) -Wl,-e,owrs_main -o $(EMERGENCY_DIR)/owrs.pe $(EMERGENCY_DIR)/owrs.o
 	python tools/owx_pack.py $(EMERGENCY_DIR)/owrs.pe $@ --subsystem 0x05 $(OWX_SIGN_ARGS)
 
 $(EMERGENCY_DIR)/owinitv_image.h: $(EMERGENCY_DIR)/owinitv.owx tools/embed_owx.py

@@ -7,6 +7,10 @@ static OW_KLCKSAN_LOCK g_Locks[OW_KLCKSAN_MAX_LOCKS];
 static const OW_DISPATCHER_OBJECT* g_Want[OW_PS_MAX_THREADS];
 static uint64_t g_Sequence;
 static uint32_t g_Tracked;
+/* Acquire-after edges: bit (from,to) = a lock indexed by "to" was acquired
+ * while the lock indexed by "from" was held, by the same thread.  A reverse
+ * edge against a previously-recorded edge is a lock-order inversion. */
+static uint8_t g_Edges[OW_KLCKSAN_MAX_LOCKS * (OW_KLCKSAN_MAX_LOCKS / 8u)];
 
 static int owklocksan_init(void) {
     OwKLockSanReset();
@@ -46,6 +50,9 @@ void OwKLockSanReset(void) {
     }
     for (i = 0u; i < OW_PS_MAX_THREADS; ++i) {
         g_Want[i] = (const OW_DISPATCHER_OBJECT*)0;
+    }
+    for (i = 0u; i < (uint32_t)sizeof(g_Edges); ++i) {
+        g_Edges[i] = 0u;
     }
     g_Sequence = 0u;
     g_Tracked = 0u;
@@ -90,6 +97,26 @@ static OW_KLCKSAN_LOCK* find(const void* Obj) {
         }
     }
     return (OW_KLCKSAN_LOCK*)0;
+}
+
+static int lock_index(const OW_KLCKSAN_LOCK* rec) {
+    return (int)(rec - g_Locks);
+}
+
+static bool edge_get(int From, int To) {
+    if (From < 0 || To < 0) {
+        return false;
+    }
+    return (g_Edges[(uint32_t)From * (OW_KLCKSAN_MAX_LOCKS / 8u) + ((uint32_t)To >> 3)] &
+            (uint8_t)(1u << ((uint32_t)To & 7u))) != 0u;
+}
+
+static void edge_set(int From, int To) {
+    if (From < 0 || To < 0) {
+        return;
+    }
+    g_Edges[(uint32_t)From * (OW_KLCKSAN_MAX_LOCKS / 8u) + ((uint32_t)To >> 3)] |=
+        (uint8_t)(1u << ((uint32_t)To & 7u));
 }
 
 static const char* lock_name(const void* Obj) {
@@ -152,6 +179,32 @@ void OwKLockSanNoteAcquireMutex(const void* Obj, uint32_t Tid) {
     rec->Abandoned = 0u;
     rec->AcquiredAt = (uint64_t)OwPsGetTickCount();
     rec->Seq = ++g_Sequence;
+
+    /* Record acquire-after edges: this lock was acquired by Tid after every
+     * tracked lock Tid already holds.  If the reverse edge was recorded
+     * earlier, the acquisition order was inverted. */
+    {
+        uint32_t i;
+        int self = lock_index(rec);
+
+        for (i = 0u; i < OW_KLCKSAN_MAX_LOCKS; ++i) {
+            int other;
+
+            if (!g_Locks[i].Used || g_Locks[i].OwnerTid != Tid) {
+                continue;
+            }
+            other = (int)i;
+            if (other == self) {
+                continue; /* same lock re-acquired; not an ordered pair */
+            }
+            if (edge_get(self, other)) {
+                OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKLOCKSAN,
+                             "lock order inversion: '%s' acquired while holding '%s', but the reverse order was observed earlier",
+                             lock_name(rec->Obj), lock_name(g_Locks[(uint32_t)other].Obj));
+            }
+            edge_set(other, self);
+        }
+    }
 }
 
 void OwKLockSanNoteReleaseMutex(const void* Obj, uint32_t Tid) {

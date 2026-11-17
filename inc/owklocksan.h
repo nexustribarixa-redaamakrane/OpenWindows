@@ -18,6 +18,9 @@
  *     clamped),
  *   - circular-wait (potential deadlock) detection over the mutex wait-for
  *     graph, computed when a thread is about to block,
+ *   - lock-order inversion detection: every pair of locks acquired (while
+ *     holding the other) records an edge; a later acquisition against a
+ *     previously recorded opposite edge reports an inversion,
  *   - mutex reported as abandoned when the owning thread exits without
  *     releasing it,
  *   - wait realizing an abandoned mutex (owner left it half-done).

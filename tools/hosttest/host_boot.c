@@ -5299,6 +5299,45 @@ static uint32_t kdb_test_build_elf(uint8_t *Image, uint16_t Type,
 static int ksan_test_init(void) { return OW_SUCCESS; }
 static void ksan_test_shutdown(void) { }
 
+/* Build a minimal module descriptor for the regression suite. */
+static void reg_mod(OW_KSAN_MODULE* Out, const char* Name, uint32_t InitOrder) {
+  uint32_t i;
+
+  memset(Out, 0, sizeof *Out);
+  for (i = 0u; Name[i] != '\0' && i + 1u < OW_KSAN_MODULE_NAME_MAX; ++i) {
+    Out->Name[i] = Name[i];
+  }
+  Out->Name[i] = '\0';
+  Out->InitOrder = InitOrder;
+  Out->Enabled = true;
+  Out->DependsOn = (const char*)0;
+  Out->Initialize = ksan_test_init;
+  Out->Shutdown = ksan_test_shutdown;
+}
+
+static struct {
+  bool Called;
+  char Module[64];
+  char Detail[128];
+  OW_STATUS Status;
+} g_PanicCapture;
+
+static void ksan_test_panic_hook(const char* Module, const char* Detail,
+                                 OW_STATUS Status) {
+  uint32_t i;
+
+  g_PanicCapture.Called = true;
+  g_PanicCapture.Status = Status;
+  for (i = 0u; Module != (const char*)0 && Module[i] != '\0' && i + 1u < sizeof g_PanicCapture.Module; ++i) {
+    g_PanicCapture.Module[i] = Module[i];
+  }
+  g_PanicCapture.Module[i] = '\0';
+  for (i = 0u; Detail != (const char*)0 && Detail[i] != '\0' && i + 1u < sizeof g_PanicCapture.Detail; ++i) {
+    g_PanicCapture.Detail[i] = Detail[i];
+  }
+  g_PanicCapture.Detail[i] = '\0';
+}
+
 /* Phase 1 of the OWKSan Suite: framework-core behaviour.  The boot phase has
  * already run the suite core (inert, master off, empty module table); this
  * drives the registry / configuration / reporting / counter / panic seams that
@@ -6077,6 +6116,148 @@ static void test_owktsan(void) {
   check_eq("the stats count the races", (unsigned long)(stats.Races >= 2ull), 1ul);
 
   kfree(heap);
+}
+
+static void test_owksan_regressions(void) {
+  OW_KSAN_MODULE m;
+  OW_KSAN_MODULE got;
+  OW_DISPATCHER_OBJECT *tid0_mtx;
+  OW_DISPATCHER_OBJECT *ia;
+  OW_DISPATCHER_OBJECT *ib;
+  OW_STATUS st;
+  uint32_t before;
+  uint32_t errors_before;
+
+  printf("\n=== OWKSan Suite (regressions) ===\n");
+
+  /* Regression: middle-insert grows the table and preserves the tail; the
+   * original register path corrupted the table here and lost OWKTSan. */
+  before = OwKSanModuleCount();
+  reg_mod(&m, "regres.mid", 45u);
+  st = OwKSanRegisterModule(&m);
+  check_eq("a middle insertion is accepted", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  check_eq("the table grows on middle insertion", (unsigned long)OwKSanModuleCount(), (unsigned long)(before + 1u));
+  check_eq("the mid-inserted module is findable",
+           (unsigned long)OwKSanGetModule("regres.mid", &got), (unsigned long)OW_SUCCESS);
+  check_eq("the previous tail module is still findable",
+           (unsigned long)OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKTSAN, &got), (unsigned long)OW_SUCCESS);
+  check_eq("the module inserted before the previous boundary is findable",
+           (unsigned long)OwKSanGetModule(OW_KSAN_MODULE_NAME_OWKUBSAN, &got), (unsigned long)OW_SUCCESS);
+  OwKSanUnregisterModule("regres.mid");
+  check_eq("the middle insertion unregisters cleanly", (unsigned long)OwKSanModuleCount(), (unsigned long)before);
+
+  /* Regression: tid 0 is the System thread; a lock it owns is tracked, and
+   * its release is seen. */
+  tid0_mtx = KeCreateMutex("regres.tid0", 1u);
+  check_window("a lock acquired by tid 0 is tracked as owned",
+               OwKLockSanLookup(tid0_mtx) != (const OW_KLCKSAN_LOCK *)0 &&
+               OwKLockSanLookup(tid0_mtx)->OwnerTid == 0u, true);
+  (void)KeReleaseMutex(tid0_mtx);
+  check_window("the tid 0 lock is released cleanly",
+               OwKLockSanLookup(tid0_mtx) != (const OW_KLCKSAN_LOCK *)0 &&
+               OwKLockSanLookup(tid0_mtx)->OwnerTid == OW_KLCKSAN_TID_FREE, true);
+
+  /* Regression: a lock-order inversion within one thread is reported. */
+  OwKLockSanReset();
+  ia = KeCreateMutex("regres.order.a", 0u);
+  ib = KeCreateMutex("regres.order.b", 0u);
+  (void)KeWaitForSingleObject(ia, OW_TIMEOUT_INFINITE);
+  (void)KeWaitForSingleObject(ib, OW_TIMEOUT_INFINITE);
+  (void)KeReleaseMutex(ib);
+  (void)KeReleaseMutex(ia);
+  (void)KeWaitForSingleObject(ib, OW_TIMEOUT_INFINITE);
+  errors_before = OwKSanReportCount();
+  (void)KeWaitForSingleObject(ia, OW_TIMEOUT_INFINITE); /* holding b, taking a after a->b */
+  check_eq("a lock order inversion is reported", (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+  (void)KeReleaseMutex(ia);
+  (void)KeReleaseMutex(ib);
+}
+
+static void test_owksan_suite_toggles(void) {
+  OW_STATUS st;
+  OW_KSAN_SEVERITY sev;
+  uint32_t errors_before;
+
+  printf("\n=== OWKSan Suite (enabled and disabled configurations) ===\n");
+
+  /* The suite is inert while disarmed: reports are waived, counters hold. */
+  OwKSanSetMasterEnabled(false);
+  errors_before = OwKSanReportCount();
+  sev = OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKLOCKSAN,
+                     "disabled-check");
+  check_window("a report is waived while the suite is disarmed", sev == OW_KSAN_SEVERITY_OK, true);
+  check_eq("no diagnostics are counted while disarmed",
+           (unsigned long)(OwKSanReportCount() - errors_before), 0ul);
+
+  /* A single module can be disarmed while the rest stay armed. */
+  OwKSanSetMasterEnabled(true);
+  st = OwKSanDisableModule(OW_KSAN_MODULE_NAME_OWKLOCKSAN);
+  check_eq("OWKLockSan can be disabled", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  errors_before = OwKSanReportCount();
+  sev = OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKLOCKSAN,
+                     "disabled-module-check");
+  check_window("a report through a disabled module is waived", sev == OW_KSAN_SEVERITY_OK, true);
+  check_eq("a disabled-module report is not counted",
+           (unsigned long)(OwKSanReportCount() - errors_before), 0ul);
+
+  /* Re-enable; the module reports again. */
+  st = OwKSanEnableModule(OW_KSAN_MODULE_NAME_OWKLOCKSAN);
+  check_eq("OWKLockSan can be re-enabled", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  errors_before = OwKSanReportCount();
+  sev = OwKSanReport(OW_KSAN_SEVERITY_ERROR, OW_KSAN_MODULE_NAME_OWKLOCKSAN,
+                     "re-enabled-check");
+  check_window("a report through a re-enabled module is accepted", sev == OW_KSAN_SEVERITY_ERROR, true);
+  check_eq("a re-enabled module report is counted",
+           (unsigned long)(OwKSanReportCount() - errors_before), 1ul);
+
+  /* Restore the suite to the inert default. */
+  OwKSanSetMasterEnabled(false);
+}
+
+static void test_owksan_reporting(void) {
+  OW_STATUS st;
+  OW_KSAN_SEVERITY sev;
+  uint32_t fatal_before;
+
+  printf("\n=== OWKSan Suite (diagnostic reporting) ===\n");
+
+  /* A custom panic hook receives the diagnostic intact. */
+  g_PanicCapture.Called = false;
+  OwKSanSetPanicHook(ksan_test_panic_hook);
+  OwKSanPanic("OWKReporting", "reporting detail", OW_ERR_CORRUPT);
+  check_window("the panic hook is invoked", g_PanicCapture.Called, true);
+  check_eq("the panic hook receives the module name",
+           (unsigned long)strncmp(g_PanicCapture.Module, "OWKReporting", 12u), 0ul);
+  check_eq("the panic hook receives the detail",
+           (unsigned long)strncmp(g_PanicCapture.Detail, "reporting detail", 16u), 0ul);
+  check_eq("the panic hook receives the status", (unsigned long)g_PanicCapture.Status, (unsigned long)OW_ERR_CORRUPT);
+
+  /* Restore the built-in sink and verify the FATAL accounting path. */
+  OwKSanSetPanicHook((OW_KSAN_PANIC_HOOK)0);
+  OwKSanSetMasterEnabled(true);
+  OwKSanResetCounters();
+  fatal_before = OwKSanFatalCount();
+  sev = OwKSanReport(OW_KSAN_SEVERITY_FATAL, OW_KSAN_MODULE_NAME_OWKASAN, "fatal-check");
+  check_window("a FATAL report returns FATAL severity", sev == OW_KSAN_SEVERITY_FATAL, true);
+  check_eq("a FATAL report increments the fatal counter",
+           (unsigned long)(OwKSanFatalCount() - fatal_before), 1ul);
+
+  /* Severity names and the severity-to-status mapping are stable. */
+  check_window("severity OK is named", strcmp(OwKSanSeverityName(OW_KSAN_SEVERITY_OK), "OK") == 0, true);
+  check_window("severity WARNING is named", strcmp(OwKSanSeverityName(OW_KSAN_SEVERITY_WARNING), "WARNING") == 0, true);
+  check_window("severity ERROR is named", strcmp(OwKSanSeverityName(OW_KSAN_SEVERITY_ERROR), "ERROR") == 0, true);
+  check_window("severity FATAL is named", strcmp(OwKSanSeverityName(OW_KSAN_SEVERITY_FATAL), "FATAL") == 0, true);
+
+  st = OwKSanSeverityToStatus(OW_KSAN_SEVERITY_OK);
+  check_eq("severity OK maps to OW_SUCCESS", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  st = OwKSanSeverityToStatus(OW_KSAN_SEVERITY_WARNING);
+  check_eq("severity WARNING maps to OW_SUCCESS", (unsigned long)st, (unsigned long)OW_SUCCESS);
+  st = OwKSanSeverityToStatus(OW_KSAN_SEVERITY_ERROR);
+  check_eq("severity ERROR maps to OW_ERR_CORRUPT", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+  st = OwKSanSeverityToStatus(OW_KSAN_SEVERITY_FATAL);
+  check_eq("severity FATAL maps to OW_ERR_CORRUPT", (unsigned long)st, (unsigned long)OW_ERR_CORRUPT);
+
+  OwKSanSetMasterEnabled(false);
 }
 
 static void test_kdb_extensions(void) {
@@ -7578,6 +7759,9 @@ int main(int argc, char **argv) {
   test_owklocksan();
   test_owklsan();
   test_owktsan();
+  test_owksan_regressions();
+  test_owksan_suite_toggles();
+  test_owksan_reporting();
 
   /* ------------------------------------------------------------------ */
   /* Copyleft Integrity Safeguard                                        */
